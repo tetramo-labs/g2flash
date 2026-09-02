@@ -10,7 +10,7 @@
 //     G2_STAGE=3 bun shapes-demo.ts     # one stage
 //     G2_PAUSE_MS=1500 G2_LOOPS=2 bun shapes-demo.ts
 //
-// Needs the glassly-cfw firmware at contract revision 19 or later.
+// Needs the glassly-cfw firmware (capability token scene17).
 
 import {
   G2Session,
