@@ -19,6 +19,7 @@ import {
   buildImageContainers,
   buildImageRawData,
   planImageFragments,
+  querySettings,
   queryCapabilities,
   hasFeature,
   type ImageContainerSpec,
@@ -74,7 +75,12 @@ function leasePb(op: number): { pb: Uint8Array; magic: number } {
 
 // ---- session ------------------------------------------------------------------
 const session = await G2Session.open();
-const caps = await queryCapabilities(session, nextMagic());
+// A settings read first, as detect-cfw.ts does: the first request after connect
+// can go unanswered, and it prints the firmware versions.
+const settings = await querySettings(session, nextMagic());
+if (settings) console.log(`firmware: L=${settings.leftSoftwareVersion} R=${settings.rightSoftwareVersion}`);
+let caps = await queryCapabilities(session, nextMagic());
+if (!caps) caps = await queryCapabilities(session, nextMagic());
 if (!caps || !hasFeature(caps, "scene17")) {
   console.log(caps ? `CFW ${caps.raw}` : "no CFW capability field");
   console.log("this demo needs the glassly-cfw build (shapes16 scene17 anim18)");
