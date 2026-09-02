@@ -270,8 +270,8 @@ static int cfw_texture_draw_image(uint8_t *shadow, uint32_t stride,
     customCfwContext *ctx = getCustomCfwContext();
     cfw_cached_image image;
     if (!cfw_texture_image_at(ctx, rd16(src), &image)) return -1;
-    int32_t x = (int32_t)rd16(src + 2);
-    int32_t y = (int32_t)rd16(src + 4);
+    int32_t x = (int32_t)(int16_t)rd16(src + 2);
+    int32_t y = (int32_t)(int16_t)rd16(src + 4);
     uint8_t options = src[6];
     uint8_t lut[16];
     cfw_texture_make_lut(options, lut);
@@ -300,8 +300,8 @@ static int cfw_texture_draw_string(uint8_t *shadow, uint32_t stride,
     if (ctx == 0 || ctx->texture_cache == 0) return -1;
     const uint8_t *table = ctx->texture_cache + font_offset;
     const uint8_t *string = src + 8;
-    int32_t x = (int32_t)rd16(src + 2);
-    int32_t y = (int32_t)rd16(src + 4);
+    int32_t x = (int32_t)(int16_t)rd16(src + 2);
+    int32_t y = (int32_t)(int16_t)rd16(src + 4);
 
     /* Validate every character/table entry/RLE stream before drawing any glyph. */
     int32_t scan_x = x;
@@ -434,10 +434,11 @@ static int cfw_builtin_glyph(const uint8_t *font, uint32_t letter,
  * It draws through the stock background 20 px font chain. Bytes 1..31 retain
  * mode 14's inline x adjustments (-10..20); all other text is strict UTF-8.
  * Supplying the next real glyph to LVGL applies the built-in default kerning. */
-static int cfw_builtin_draw_string(uint8_t *shadow, uint32_t stride,
-                                   uint32_t panel_w, uint32_t panel_h,
-                                   const uint8_t *src, uint32_t len,
-                                   cfw_rectlist *rl) {
+static int cfw_builtin_draw_string_buf(uint8_t *shadow, uint32_t stride,
+                                       uint32_t panel_w, uint32_t panel_h,
+                                       const uint8_t *src, uint32_t len,
+                                       cfw_rectlist *rl,
+                                       uint32_t *tokens, uint32_t max_tokens) {
     if (shadow == 0 || src == 0 || len < 6u || !cfw_fb_lease_active()) return -1;
     uint32_t string_len = src[5];
     if (len != 6u + string_len) return -1;
@@ -450,11 +451,11 @@ static int cfw_builtin_draw_string(uint8_t *shadow, uint32_t stride,
 
     /* At most one token per input byte. Decode the complete payload before any
      * font calls or shadow writes, preserving all-or-nothing syntax handling. */
-    uint32_t tokens[255];
     uint32_t token_count = 0;
     uint32_t pos = 0;
     const uint8_t *string = src + 6;
     while (pos < string_len) {
+        if (token_count >= max_tokens) return -1;
         uint32_t byte = string[pos];
         if (byte >= 1u && byte <= 31u) {
             tokens[token_count++] = CFW_TEXT_CONTROL_FLAG | byte;
@@ -480,8 +481,8 @@ static int cfw_builtin_draw_string(uint8_t *shadow, uint32_t stride,
         if (bitmap) CFW_FONT_RELEASE(dsc);
     }
 
-    int32_t x = (int32_t)rd16(src);
-    int32_t y = (int32_t)rd16(src + 2);
+    int32_t x = (int32_t)(int16_t)rd16(src);
+    int32_t y = (int32_t)(int16_t)rd16(src + 2);
     uint8_t options = src[4];
     uint8_t lut[16];
     cfw_texture_make_lut(options, lut);
@@ -511,4 +512,14 @@ static int cfw_builtin_draw_string(uint8_t *shadow, uint32_t stride,
         x += (int32_t)rd16(dsc + CFW_GLYPH_ADV_W);
     }
     return 0;
+}
+
+/* Mode 15 entry: full 255-token scratch on the EvenHub worker's stack. */
+static int cfw_builtin_draw_string(uint8_t *shadow, uint32_t stride,
+                                   uint32_t panel_w, uint32_t panel_h,
+                                   const uint8_t *src, uint32_t len,
+                                   cfw_rectlist *rl) {
+    uint32_t tokens[255];
+    return cfw_builtin_draw_string_buf(shadow, stride, panel_w, panel_h,
+                                       src, len, rl, tokens, 255u);
 }

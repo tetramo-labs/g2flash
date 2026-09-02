@@ -112,12 +112,17 @@ typedef struct {
     uint32_t mic_lease_deadline;            /* FW_MS_TICK streaming-lease deadline; 0 = none */
     uint32_t mic_watchdog_timer;            /* one-shot osTimer tearing down a lapsed session */
     uint8_t  mic_notify_buf[32];            /* stable storage for the field-104 sid-0x09 notify */
+    /* --- Retained shape scene + animation (scene.c, modes 16-18). The scene
+     * body and its 640x480 frame are lazily allocated from heap 13; the frame
+     * timer is created on first use and deleted by mode 11 cleanup. --- */
+    struct cfw_scene_s *scene;
+    uint32_t scene_timer;                   /* osTimer pacing animation frames (0 = none) */
 } customCfwContext;
 
 #define CFW_CTX_SLOT  0x2029f4a8U    /* first word of the CFW-reserved TLSF tail */
 #define CFW_ALLOC_DIAG_SLOT 0x2029f4acU /* second word: magic | sticky failure bit */
 #define CFW_ALLOC_DIAG_MAGIC 0xA110CA7EU
-#define CFW_CTX_MAGIC 0xC0FFEE68U    /* bumped for the context layout change (mic fields) */
+#define CFW_CTX_MAGIC 0xC0FFEE69U    /* bumped for the context layout change (scene fields) */
 
 #define FW_MS_TICK  (*(volatile uint32_t *)0x20076d80U)  /* firmware 1 ms OS tick (SysTick chain) */
 

@@ -44,6 +44,37 @@ mode byte is `[x:u16][y:u16][options:u8][strlen:u8][UTF-8 bytes]`; options match
 the cached draw commands, and inline bytes 1–31 adjust x by -10 through 20 just
 as they do in cached-font mode 14.
 
+The Glassly build of this firmware (branch `glassly-cfw`, base 2.2.9.22) adds
+vector shapes and firmware-side animation on top of the texture cache:
+
+ * Mode 16 draws a list of 20-byte shape records straight into the shadow:
+   `[16][count][records]`. A record is
+   `[type][flags][color][width][p0..p7 as int16 LE]` and covers hairline and
+   wide lines, plain and rounded rectangles (fill or stroke), circles and rings,
+   triangles, quads, quadratic and cubic beziers, arcs and pie sectors, plus
+   cached images and text (built-in 20 px font or a cached mode-14 font, with the
+   string bytes read from the texture cache). Coordinates are signed pixels and
+   everything clips to the 640x480 panel. Mode 16 composes inside a mode-8 batch
+   like modes 13-15. See `patches/shapes.h` for the type table.
+ * Mode 17 keeps a retained scene of up to 128 shape slots (slot order is paint
+   order) that the glasses re-render themselves: `[17][flags][bg][ops...]` with
+   ops to set, delete, show/hide or move a slot, GLIDE it by a delta over N
+   frames, or TWEEN any parameters (including color and stroke width) to target
+   values, each with a CSS-style cubic-bezier easing curve. Flag bit 0 renders
+   and presents the scene; bit 1 clears it first. The scene renders into a
+   CFW-owned full-panel frame, so animation frames never touch EvenHub container
+   memory, and a lapsed framebuffer lease stops the animation timer. If heap 13
+   cannot spare that 150 KiB frame, a commit still draws the scene into the
+   container shadow and only animation is refused. The record grammar is
+   documented at the top of `patches/scene.c`.
+ * Mode 18 controls animation: freeze, set the frame period (10-250 ms, default
+   33), release the scene, or finish every animation and present the end state.
+
+The capability string advertises these as `shapes16 scene17 anim18`.
+`demos/shapes-demo.ts` exercises all three modes, and
+`patches/host/shapes_host_test.c` renders every primitive on the host so the
+rasterizer and easing math can be checked without glasses.
+
 The firmware also adds a microphone control plane (capability tokens `micctl`,
 `micmc`, `micraw`). Each temple carries a front + rear microphone pair, and the
 stock firmware only ever sends the phone a mono 16 kHz LC3 stream. The mic

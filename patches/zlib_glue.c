@@ -2,6 +2,8 @@
 #include "cfw_context.h"
 #include "rle.h"
 #include "debug.h"
+#include "shapes.h"
+#include "scene.h"
 
 /*
  * zlib (DEFLATE) image support for the G2 CFW — multi-mode load wrapper.
@@ -85,6 +87,20 @@
  *                              stock background 20 px font chain and its default
  *                              pair kerning. Bytes 1..31 adjust x by -10..20 as in
  *                              mode 14; options and clipping also match mode 14.
+ *   16          -> [16][count8][shape record x count] draw vector shapes straight into
+ *                              the shadow: lines, (rounded) rects, circles, triangles,
+ *                              quads, quadratic/cubic beziers, arcs, pie sectors, plus
+ *                              cached images and text as records. 20-byte records; see
+ *                              shapes.h. Composable inside mode 8.
+ *   17          -> [17][flags8][bg8][scene records]... patch the retained shape scene:
+ *                              up to 128 slots (paint order) that the firmware keeps and
+ *                              can re-render itself. Records set/delete/show/move slots,
+ *                              or start eased GLIDE/TWEEN animations over N frames with a
+ *                              cubic-bezier curve. Flag bit 0 renders and presents the
+ *                              scene from a CFW-owned 640x480 frame (not the container
+ *                              shadow). See scene.c for the record grammar.
+ *   18          -> [18][sub]... animation control: 0 freeze all, 1 [ms] frame period,
+ *                              2 release the scene, 3 finish all and present.
  *   anything else / too short  -> load_bmp_fast (rejects cleanly if not a BMP).
  *
  * The HIGH BIT of the mode byte is a "lenses differ" flag; most modes ignore it. For
@@ -286,6 +302,7 @@ static void mic_cleanup_session(void);   /* mic_control.c (same TU): mic hw + le
 
 static int inflate_rle(uint8_t *strm, uint8_t *base, uint32_t stride, uint32_t rowbytes, uint32_t rows);
 static void present_shadow(uint8_t *state, uint32_t w, uint32_t h, cfw_rectlist *rl);
+static void present_buffer(customCfwContext *ctx, const uint8_t *buf, cfw_rectlist *rl);
 static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, int present, cfw_rectlist *rl);
 
 
@@ -296,7 +313,8 @@ static int is_shadow_message(const uint8_t *src, uint32_t srclen) {
     if (src == 0 || srclen == 0) return 0;
     uint8_t mode = src[0] & 0x7fu;
     return mode == 3 || mode == 6 || mode == 8 || mode == 9 || mode == 11 ||
-           mode == 13 || mode == 14 || mode == 15;
+           mode == 13 || mode == 14 || mode == 15 || mode == 16 || mode == 17 ||
+           mode == 18;
 }
 
 /* The image worker: static, called from image_deferred (the deferred consumer, which
@@ -493,7 +511,7 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
     uint32_t w = IMAGE_W;
     uint32_t h = IMAGE_H;
 
-    if (mode == 13 || mode == 14 || mode == 15) {
+    if (mode == 13 || mode == 14 || mode == 15 || mode == 16) {
         uint8_t *shadow = cfw_shadow_buffer(state);
         if (shadow == 0) return -1;
         int r;
@@ -503,12 +521,22 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
         else if (mode == 14)
             r = cfw_texture_draw_string(shadow, (w + 1u) >> 1, w, h,
                                         src + 1, srclen - 1, rl);
-        else
+        else if (mode == 15)
             r = cfw_builtin_draw_string(shadow, (w + 1u) >> 1, w, h,
                                         src + 1, srclen - 1, rl);
+        else
+            r = cfw_shapes_immediate(shadow, (w + 1u) >> 1, w, h,
+                                     src + 1, srclen - 1, rl);
         if (r != 0) return r;
         if (present) present_shadow(state, w, h, rl);
         return 0;
+    }
+
+    if (mode == 17 || mode == 18) {
+        /* Retained scene: renders into and presents its own CFW-owned frame, so
+         * it is only accepted at top level (a mode-8 batch presents the shadow). */
+        return cfw_scene_dispatch(getCustomCfwContext(), state, mode, src + 1, srclen - 1,
+                                  present, rl);
     }
 
     if (mode == 8) {
@@ -517,7 +545,7 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
          * multi-op update (e.g. scroll = rect-copy + delta, no intermediate flash).
          * Sized no larger than an uncompressed 4bpp logical image; no nesting
          * (a sub-message may not itself be a multi-segment message). Only shadow
-         * operations (modes 3/6/9/13/14/15) are accepted. */
+         * operations (modes 3/6/9/13/14/15/16) are accepted. */
         if (!present) return -1;                       /* only valid at top level */
         if (srclen < 2) return -1;
         uint32_t bmp_max = 118 + ((((w + 1) >> 1) + 3) & ~3u) * h;
@@ -531,7 +559,8 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
             if (seglen < 1 || pos + seglen > srclen) return -1;
             uint8_t submode = src[pos] & 0x7fu;
             if (submode != 3 && submode != 6 && submode != 9 &&
-                submode != 13 && submode != 14 && submode != 15) return -1;
+                submode != 13 && submode != 14 && submode != 15 &&
+                submode != 16) return -1;
             if (image_dispatch(state, src + pos, seglen, 0, rl) != 0) return -1;
             pos += seglen;
         }
@@ -666,8 +695,15 @@ static void present_shadow(uint8_t *state, uint32_t w, uint32_t h, cfw_rectlist 
     customCfwContext *ctx = getCustomCfwContext();
     uint8_t *shadow = cfw_shadow_buffer(state);
     if (ctx == 0 || shadow == 0 || w != IMAGE_W || h != IMAGE_H) return;
+    present_buffer(ctx, shadow, rl);
+}
 
-    ctx->direct_shadow = shadow;
+/* Queue any full-panel packed-4bpp buffer (the container shadow, or the
+ * retained scene's own frame) as the next direct-framebuffer job. The caller
+ * owns the display gate. */
+static void present_buffer(customCfwContext *ctx, const uint8_t *buf, cfw_rectlist *rl) {
+    if (ctx == 0 || buf == 0) return;
+    ctx->direct_shadow = buf;
     ctx->direct_pending = 1;                          /* publish last */
     if (FW_DISPLAY_QUEUE(0, 0, 0, 0, PANEL_W, PANEL_H) != 0) {
         ctx->direct_pending = 0;
@@ -828,6 +864,11 @@ static int cfw_cleanup_session(void) {
     ctx->direct_shadow = 0;
     ctx->direct_failed = 0;
     cfw_texture_cache_release(ctx);
+    cfw_scene_release(ctx);
+    if (ctx->scene_timer) {
+        FW_TIMER_STOP(ctx->scene_timer);
+        if (FW_TIMER_DELETE(ctx->scene_timer) == 0) ctx->scene_timer = 0;
+    }
 
     /* Suppress callbacks before asking the timer service to stop/delete them;
      * a callback already dispatched on the timer thread will then be harmless. */
@@ -900,6 +941,9 @@ void display_copy_hook(void) {
     uint8_t *fb = FW_DISPLAY_FB;
     uint32_t t;
     cfw_time_start(&t);
+    /* An animation frame queued by scene_tick is rasterized here, on the display
+     * task, right before the copy (the timer thread only advanced the scene). */
+    cfw_scene_render_if_due(ctx, (uint8_t *)shadow);
     int ok = fb != 0;
     if (ok) {
         copy_panel(fb, shadow);

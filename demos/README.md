@@ -10,6 +10,10 @@ G2 glasses over Bluetooth and show off the [custom firmware](../) built by
 - **`video-bench.ts`** — streams a video (as a GIF) to the lens as fast as it
   acks and benchmarks the achieved framerate / byte count. Streams via the
   CFW's compressed packed-4bpp keyframe and delta modes.
+- **`shapes-demo.ts`** — draws a vector test card with mode 16, then builds a
+  retained scene (mode 17) and lets the firmware animate it: eased glides and
+  tweens of geometry, color and stroke width, driven by one small message per
+  transition. Needs the `glassly-cfw` build (`shapes16 scene17 anim18`).
 
 They depend on [`g2-kit`](https://github.com/jimrandomh/g2-kit-unofficial) (a
 reverse-engineered BLE library for the G2), pulled directly from GitHub — see
