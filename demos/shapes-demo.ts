@@ -88,9 +88,9 @@ const settings = await querySettings(session, nextMagic());
 if (settings) console.log(`firmware: L=${settings.leftSoftwareVersion} R=${settings.rightSoftwareVersion}`);
 let caps = await queryCapabilities(session, nextMagic());
 if (!caps) caps = await queryCapabilities(session, nextMagic());
-if (!caps || !hasFeature(caps, "scene17") || caps.version < 19) {
+if (!caps || !hasFeature(caps, "scene17")) {
   console.log(caps ? `CFW ${caps.raw}` : "no CFW capability field");
-  console.log("this demo needs the glassly-cfw build at EVENCFW/19 or later");
+  console.log("this demo needs the glassly-cfw build (scene17)");
   await session.close();
   process.exit(1);
 }
