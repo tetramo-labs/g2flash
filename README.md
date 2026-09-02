@@ -71,7 +71,9 @@ vector shapes and firmware-side animation on top of the texture cache:
  * Mode 18 controls animation: freeze, set the frame period (10-250 ms, default
    33), release the scene, or finish every animation and present the end state.
 
-The capability string advertises these as `shapes16 scene17 anim18 inlinetext17`.
+The capability string advertises these as `shapes16 scene17 anim18`; inline text
+records are implied by contract revision 19 (the capability response must fit one
+BLE frame, so no token was added).
 `demos/shapes-demo.ts` exercises all three modes, and
 `patches/host/shapes_host_test.c` renders every primitive on the host so the
 rasterizer and easing math can be checked without glasses.
