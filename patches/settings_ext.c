@@ -1,5 +1,6 @@
 #include "cfw_context.h"
 #include "protobuf.h"
+#include "scene.h"
 
 // CFW firmware-version advertisement and Faceclaw wake-takeover lease.
 //
@@ -113,6 +114,7 @@ __attribute__((used, noinline)) int cfw_fb_lease_active(void) {
     if ((int32_t)(ctx->direct_lease_deadline - FW_MS_TICK) <= 0) {
         ctx->direct_lease_deadline = 0;
         ctx->direct_active = 0;
+        cfw_scene_stop(ctx);
         cfw_texture_cache_release(ctx);
         return 0;
     }
@@ -261,12 +263,14 @@ static void faceclaw_apply_control(const uint8_t *data, uint32_t len) {
         if (ctx->direct_lease_deadline == 0 ||
             (int32_t)(ctx->direct_lease_deadline - FW_MS_TICK) <= 0) {
             ctx->direct_active = 0;
+            cfw_scene_stop(ctx);
             cfw_texture_cache_release(ctx);
         }
         ctx->direct_lease_deadline = FW_MS_TICK + FACECLAW_LEASE_MS;
     } else if (op == FACECLAW_OP_FB_RELEASE) {
         ctx->direct_lease_deadline = 0;
         ctx->direct_active = 0;
+        cfw_scene_stop(ctx);
         cfw_texture_cache_release(ctx);
     } else if (op == FACECLAW_OP_WEAR_QUERY) {
         unsigned status = FW_WEAR_STATUS();
@@ -343,12 +347,25 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
     );
 }
 
-// Firmware revision string "Faceclaw/<n>" (see the header comment). Revision
-// history, for reference when bumping:
-//   1 -> first revision using this scheme. Same feature set as the last
-//        token-based advertisement, "EVENCFW/22 img640 imgz rle wakelease
-//        directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14
-//        font15 micctl taplong11 ringbat17".
+// Capability string "EVENCFW/<ver> <space-separated feature tokens>":
+//   EVENCFW/18 -> magic prefix + contract version (detect: starts-with "EVENCFW/")
+//   imgz       -> zlib (DEFLATE) compressed image payloads
+//   rle        -> compact run-length encoded delta rows
+//   wakelease  -> fail-open Faceclaw ownership of idle wakes / local Even AI
+//   directfb   -> bypass LVGL and copy the packed shadow into the panel framebuffer
+//   img640     -> shadow drawing modes use the full 640x480 panel independent of the carrier
+//   fbguard    -> preserve direct frames across stock widget repaints under a fail-open lease
+//   wearnotify -> lifecycle-independent wear events + private current-state query
+//   cleanup11  -> mode 11 returns a departing custom-app session to stock state
+//   texcache12 -> mode 12 updates a lease-scoped, phone-owned 64 KiB texture cache
+//   teximg13   -> mode 13 draws/recolors a 4bpp RLE image from the texture cache
+//   texstr14   -> mode 14 draws/recolors strings through a cached glyph-offset table
+//   font15     -> mode 15 draws UTF-8 with the built-in 20 px font and kerning
+//   micctl     -> private mic-control channel (field 103 / read-back field 104)
+//   taplong11  -> source-qualified tap-then-long gesture as private event type 11
+//   shapes16   -> mode 16 rasterizes vector shape records straight into the shadow
+//   scene17    -> mode 17 retained shape scene with eased glide/tween animation
+//   anim18     -> mode 18 animation control (freeze, frame period, release, finish)
 //
 // The string is a normal rodata literal now that build.py emits/relocates .rodata
 // (earlier this had to be spelled out byte-by-byte to avoid a rodata section).
@@ -356,7 +373,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "Faceclaw/1";
+        static const char caps[] = "EVENCFW/18 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes16 scene17 anim18";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

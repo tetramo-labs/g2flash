@@ -118,6 +118,11 @@ typedef struct {
     uint32_t mic_lease_deadline;            /* FW_MS_TICK streaming-lease deadline; 0 = none */
     uint32_t mic_watchdog_timer;            /* one-shot osTimer tearing down a lapsed session */
     uint8_t  mic_notify_buf[32];            /* stable storage for the field-104 sid-0x09 notify */
+    /* --- Retained shape scene + animation (scene.c, modes 16-18). The scene
+     * body and its 640x480 frame are lazily allocated from heap 13; the frame
+     * timer is created on first use and deleted by mode 11 cleanup. --- */
+    struct cfw_scene_s *scene;
+    uint32_t scene_timer;                   /* osTimer pacing animation frames (0 = none) */
     /* --- Ambient light sensor (mode 16, als_sensor.c). Passive mode redirects
      * the sensor-hub's ALS timer message to als_hub_handler through the RAM
      * dispatch table and polls the OPT3001 itself, so the stock adjuster never
@@ -141,8 +146,7 @@ typedef struct {
 #define CFW_ALLOC_DIAG_MAGIC 0xA110CA7EU
 
 // Marker used to validate that the CFW context pointer hasn't been clobbered.
-// Does not need updating.
-#define CFW_CTX_MAGIC 0xC0FFEE6AU
+#define CFW_CTX_MAGIC 0xC0FFEE6BU    /* combined scene, ALS and compass context */
 
 #define FW_MS_TICK  (*(volatile uint32_t *)0x20076d80U)  /* firmware 1 ms OS tick (SysTick chain) */
 

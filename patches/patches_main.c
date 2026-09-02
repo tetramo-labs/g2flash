@@ -28,6 +28,8 @@
 #include "rle.c"
 #include "texture_cache.c"
 #include "zlib_glue.c"
+#include "shapes.c"
+#include "scene.c"
 #include "compass.c"
 #include "ring_battery.c"
 #include "settings_ext.c"
