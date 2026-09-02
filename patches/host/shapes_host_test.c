@@ -329,6 +329,53 @@ static void test_scene(const char *dir) {
     g_fail_frame_alloc = 0;
 }
 
+/* Inline-text records: variable length in mode 16, stored per slot in the scene. */
+static void test_inline_text(void) {
+    /* [count][rect 20 B][inline 13+5 B] */
+    uint8_t msg[1 + 20 + 13 + 5];
+    msg[0] = 2;
+    { int16_t v[] = { 8, 8, 100, 40, 0 }; rec(msg + 1, CFW_SHAPE_RECT, 15, 1, v, 5); }
+    uint8_t *t = msg + 21;
+    t[0] = CFW_SHAPE_TEXT_INLINE; t[1] = 1; t[2] = 0x1F; t[3] = 0;
+    put16(t + 4, 10); put16(t + 6, 12); put16(t + 8, 25); put16(t + 10, 40);   /* clip 25 px wide */
+    t[12] = 5; t[13] = 'h'; t[14] = 'e'; t[15] = 'l'; t[16] = 'l'; t[17] = 'o';
+    bzero(g_shadow, sizeof g_shadow);
+    cfw_rectlist rl = { 0 };
+    CHECK(cfw_shape_record_len(t, 18) == 18);
+    CHECK(cfw_shape_record_len(t, 17) == 0);                         /* truncated */
+    CHECK(cfw_shapes_immediate(g_shadow, IMAGE_STRIDE, IMAGE_W, IMAGE_H, msg, sizeof msg, &rl) == 0);
+    /* the stub draws 10 px per byte from (10,12); the 25 px clip leaves x = 10..34 lit */
+    CHECK(pixel_at(g_shadow, 12, 20) == 15 && pixel_at(g_shadow, 34, 20) == 15 && pixel_at(g_shadow, 35, 20) == 0);
+    t[12] = 0;
+    CHECK(cfw_shapes_immediate(g_shadow, IMAGE_STRIDE, IMAGE_W, IMAGE_H, msg, sizeof msg, &rl) == -1);
+    t[12] = 5;
+    CHECK(cfw_shapes_immediate(g_shadow, IMAGE_STRIDE, IMAGE_W, IMAGE_H, msg, sizeof msg - 1, &rl) == -1);
+
+    /* scene: SET an inline slot, then glide it; the bytes live in the slot */
+    uint8_t *cache = g_ctx.texture_cache;
+    bzero((uint8_t *)&g_ctx, sizeof g_ctx);
+    g_ctx.magic = CFW_CTX_MAGIC;
+    g_ctx.texture_cache = cache;
+    uint8_t sm[2 + 2 + 18 + 11];
+    sm[0] = CFW_SCENE_FLAG_COMMIT | CFW_SCENE_FLAG_CLEAR; sm[1] = 0;
+    sm[2] = CFW_SCENE_OP_SET; sm[3] = 3;
+    for (int i = 0; i < 18; i++) sm[4 + i] = t[i];
+    uint8_t *g = sm + 22;
+    g[0] = CFW_SCENE_OP_GLIDE; g[1] = 3; put16(g + 2, 100); put16(g + 4, 0); g[6] = 4; g[7] = 0; g[8] = 0; g[9] = 255; g[10] = 255;
+    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 17, sm, sizeof sm, 1, &rl) == 0);
+    cfw_scene *sc = cfw_scene_peek(&g_ctx);
+    CHECK(sc && sc->slots[3].type == CFW_SHAPE_TEXT_INLINE && sc->slots[3].p[4] == 5 && sc->slots[3].frames == 4);
+    CHECK(sc->text[3][0] == 'h' && sc->text[3][4] == 'o');
+    CHECK(pixel_at(sc->fb, 12, 20) == 15 && pixel_at(sc->fb, 35, 20) == 0);
+    for (int f = 0; f < 4; f++) { g_ctx.direct_pending = 0; scene_tick(&g_ctx); cfw_scene_render_if_due(&g_ctx, sc->fb); }
+    CHECK(sc->slots[3].p[0] == 110 && sc->slots[3].frames == 0);
+    CHECK(pixel_at(sc->fb, 112, 20) == 15 && pixel_at(sc->fb, 12, 20) == 0);
+    /* a SET with a bad length is rejected before anything is applied */
+    sm[4 + 12] = 200;
+    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 17, sm, sizeof sm, 1, &rl) == -1);
+    { uint8_t m[] = { 2 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 18, m, 1, 1, &rl) == 0); }
+}
+
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : ".";
     static uint8_t fake_cache[CFW_TEXTURE_CACHE_SIZE];
@@ -336,6 +383,7 @@ int main(int argc, char **argv) {
     test_immediate(dir);
     test_easing();
     test_scene(dir);
+    test_inline_text();
     printf("%s (%d failures)\n", g_fail ? "FAILED" : "OK", g_fail);
     return g_fail ? 1 : 0;
 }

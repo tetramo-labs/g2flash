@@ -339,7 +339,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 }
 
 // Capability string "EVENCFW/<ver> <space-separated feature tokens>":
-//   EVENCFW/18 -> magic prefix + contract version (detect: starts-with "EVENCFW/")
+//   EVENCFW/19 -> magic prefix + contract version (detect: starts-with "EVENCFW/")
 //   imgz       -> zlib (DEFLATE) compressed image payloads
 //   rle        -> compact run-length encoded delta rows
 //   wakelease  -> fail-open Faceclaw ownership of idle wakes / local Even AI
@@ -357,6 +357,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 //   shapes16   -> mode 16 rasterizes vector shape records straight into the shadow
 //   scene17    -> mode 17 retained shape scene with eased glide/tween animation
 //   anim18     -> mode 18 animation control (freeze, frame period, release, finish)
+//   inlinetext17 -> TEXT_INLINE records carry built-in-font strings in modes 16/17
 //
 // The string is a normal rodata literal now that build.py emits/relocates .rodata
 // (earlier this had to be spelled out byte-by-byte to avoid a rodata section).
@@ -364,7 +365,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "EVENCFW/18 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes16 scene17 anim18";
+        static const char caps[] = "EVENCFW/19 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes16 scene17 anim18 inlinetext17";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

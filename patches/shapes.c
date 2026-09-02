@@ -392,12 +392,22 @@ static void rs_pie(const cfw_raster *r, int32_t cx, int32_t cy, int32_t rad, int
  * glides, which translate exactly these). */
 static const uint8_t cfw_shape_xmask_tab[CFW_SHAPE_TYPE_MAX + 1] = {
     0x00, 0x05, 0x01, 0x01, 0x01, 0x01, 0x15, 0x15, 0x55, 0x55,
-    0x15, 0x55, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x15, 0x55, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
 };
 static const uint8_t cfw_shape_ymask_tab[CFW_SHAPE_TYPE_MAX + 1] = {
     0x00, 0x0a, 0x02, 0x02, 0x02, 0x02, 0x2a, 0x2a, 0xaa, 0xaa,
-    0x2a, 0xaa, 0x02, 0x02, 0x02, 0x02, 0x02,
+    0x2a, 0xaa, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
 };
+
+/* Byte length of the record at `rec`, or 0 when it is truncated or malformed. */
+static uint32_t cfw_shape_record_len(const uint8_t *rec, uint32_t avail) {
+    if (avail < 1u) return 0;
+    if (rec[0] != CFW_SHAPE_TEXT_INLINE) return avail >= CFW_SHAPE_RECORD_BYTES ? CFW_SHAPE_RECORD_BYTES : 0;
+    if (avail < CFW_SHAPE_INLINE_HDR) return 0;
+    uint32_t len = rec[CFW_SHAPE_INLINE_HDR - 1u];
+    if (len == 0 || len > CFW_SHAPE_INLINE_MAX || CFW_SHAPE_INLINE_HDR + len > avail) return 0;
+    return CFW_SHAPE_INLINE_HDR + len;
+}
 
 static void cfw_shape_masks(uint8_t type, uint8_t *xmask, uint8_t *ymask) {
     if (type > CFW_SHAPE_TYPE_MAX) type = 0;
@@ -410,12 +420,22 @@ static void cfw_shape_decode(const uint8_t *rec, cfw_shape *out) {
     out->flags = rec[1];
     out->color = rec[2];
     out->width = rec[3];
+    out->text = 0;
+    if (rec[0] == CFW_SHAPE_TEXT_INLINE) {
+        for (uint32_t i = 0; i < 4u; i++) out->p[i] = (int16_t)rd16(rec + 4 + 2 * i);
+        out->p[4] = (int16_t)rec[CFW_SHAPE_INLINE_HDR - 1u];
+        for (uint32_t i = 5; i < CFW_SHAPE_PARAMS; i++) out->p[i] = 0;
+        out->text = rec + CFW_SHAPE_INLINE_HDR;
+        return;
+    }
     for (uint32_t i = 0; i < CFW_SHAPE_PARAMS; i++)
         out->p[i] = (int16_t)rd16(rec + 4 + 2 * i);
 }
 
 static int cfw_shape_valid(const cfw_shape *s) {
     if (s->type == CFW_SHAPE_NONE || s->type > CFW_SHAPE_TYPE_MAX) return 0;
+    if (s->type == CFW_SHAPE_TEXT_INLINE)
+        return s->text != 0 && s->p[4] > 0 && (uint16_t)s->p[4] <= CFW_SHAPE_INLINE_MAX;
     if (s->type == CFW_SHAPE_TEXT || s->type == CFW_SHAPE_TEXT_CACHED) {
         uint32_t off = (uint16_t)s->p[2], len = (uint16_t)s->p[3];
         if (len > CFW_SHAPE_TEXT_MAX || off + len > CFW_TEXTURE_CACHE_SIZE) return 0;
@@ -468,7 +488,31 @@ static void cfw_shape_draw_texture(const cfw_raster *r, const cfw_shape *s, cfw_
     }
 }
 
+/* Built-in font string from the record itself, clipped to its box when w/h > 0. */
+static void cfw_shape_draw_inline_text(const cfw_raster *r, const cfw_shape *s, cfw_rectlist *rl) {
+    uint32_t len = (uint16_t)s->p[4];
+    if (s->text == 0 || len == 0 || len > CFW_SHAPE_INLINE_MAX) return;
+    int32_t x = s->p[0], y = s->p[1], w = s->p[2], h = s->p[3];
+    int32_t clip_w = r->w, clip_h = r->h;
+    if (w > 0 && x + w < clip_w) clip_w = x + w;
+    if (h > 0 && y + h < clip_h) clip_h = y + h;
+    if (clip_w <= 0 || clip_h <= 0) return;
+    uint8_t buf[6 + CFW_SHAPE_INLINE_MAX];
+    buf[0] = (uint8_t)x; buf[1] = (uint8_t)((uint16_t)x >> 8);
+    buf[2] = (uint8_t)y; buf[3] = (uint8_t)((uint16_t)y >> 8);
+    buf[4] = s->color;
+    buf[5] = (uint8_t)len;
+    for (uint32_t i = 0; i < len; i++) buf[6 + i] = s->text[i];
+    uint32_t tokens[CFW_SHAPE_INLINE_MAX];
+    cfw_builtin_draw_string_buf(r->buf, r->stride, (uint32_t)clip_w, (uint32_t)clip_h,
+                                buf, 6 + len, rl, tokens, CFW_SHAPE_INLINE_MAX);
+}
+
 static void cfw_shape_draw(const cfw_raster *r, const cfw_shape *s, cfw_rectlist *rl) {
+    if (s->type == CFW_SHAPE_TEXT_INLINE) {
+        cfw_shape_draw_inline_text(r, s, rl);
+        return;
+    }
     if (s->type == CFW_SHAPE_IMAGE || s->type == CFW_SHAPE_TEXT ||
         s->type == CFW_SHAPE_TEXT_CACHED) {
         cfw_shape_draw_texture(r, s, rl);
@@ -544,17 +588,23 @@ static int cfw_shapes_immediate(uint8_t *shadow, uint32_t stride,
                                 cfw_rectlist *rl) {
     if (shadow == 0 || src == 0 || len < 1u) return -1;
     uint32_t count = src[0];
-    if (len != 1u + count * CFW_SHAPE_RECORD_BYTES) return -1;
+    uint32_t pos = 1;
     for (uint32_t i = 0; i < count; i++) {
+        uint32_t n = cfw_shape_record_len(src + pos, len - pos);
+        if (n == 0) return -1;
         cfw_shape s;
-        cfw_shape_decode(src + 1 + i * CFW_SHAPE_RECORD_BYTES, &s);
+        cfw_shape_decode(src + pos, &s);
         if (!cfw_shape_valid(&s)) return -1;
+        pos += n;
     }
+    if (pos != len) return -1;
     cfw_raster r = { shadow, stride, (int32_t)panel_w, (int32_t)panel_h };
+    pos = 1;
     for (uint32_t i = 0; i < count; i++) {
         cfw_shape s;
-        cfw_shape_decode(src + 1 + i * CFW_SHAPE_RECORD_BYTES, &s);
+        cfw_shape_decode(src + pos, &s);
         cfw_shape_draw(&r, &s, rl);
+        pos += cfw_shape_record_len(src + pos, len - pos);
     }
     rl_add(rl, 0, 0, panel_w, panel_h);
     return 0;

@@ -24,6 +24,9 @@
  *  14  IMAGE         x y texoff                       cached RLE image (mode 13 semantics)
  *  15  TEXT          x y texoff len                   UTF-8 bytes at texoff, built-in 20 px font
  *  16  TEXT_CACHED   x y texoff len fontoff           bytes at texoff drawn with a mode-14 font
+ *  17  TEXT_INLINE   x y w h len [bytes]              built-in font, string carried in the record;
+ *                                                    w/h > 0 clip to the box. The one variable-
+ *                                                    length record: 13 header bytes + len.
  *
  * `color` is the 4-bit gray for geometry. For IMAGE/TEXT types it is the
  * mode-13/14/15 options byte (low nibble top color, bit 4 transparent source
@@ -51,7 +54,10 @@
 #define CFW_SHAPE_IMAGE        14u
 #define CFW_SHAPE_TEXT         15u
 #define CFW_SHAPE_TEXT_CACHED  16u
-#define CFW_SHAPE_TYPE_MAX     16u
+#define CFW_SHAPE_TEXT_INLINE  17u
+#define CFW_SHAPE_TYPE_MAX     17u
+#define CFW_SHAPE_INLINE_HDR   13u   /* type flags color width x y w h len */
+#define CFW_SHAPE_INLINE_MAX   128u  /* bytes per inline string */
 
 #define CFW_SHAPE_FLAG_VISIBLE 0x01u
 #define CFW_SHAPE_TEXT_MAX     64u   /* bytes per TEXT/TEXT_CACHED slot */
@@ -71,8 +77,10 @@ typedef struct {
     uint8_t color;
     uint8_t width;
     int16_t p[CFW_SHAPE_PARAMS];
+    const uint8_t *text;   /* TEXT_INLINE bytes (p[4] = length) */
 } cfw_shape;
 
+static uint32_t cfw_shape_record_len(const uint8_t *rec, uint32_t avail);
 static void cfw_shape_decode(const uint8_t *rec, cfw_shape *out);
 static int  cfw_shape_valid(const cfw_shape *s);
 static void cfw_shape_draw(const cfw_raster *r, const cfw_shape *s, cfw_rectlist *rl);
