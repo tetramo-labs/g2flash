@@ -18,6 +18,7 @@
 #define CFW_SCENE_DEFAULT_PERIOD 33u           /* ms between animation frames */
 #define CFW_SCENE_MIN_PERIOD     10u
 #define CFW_SCENE_MAX_PERIOD     250u
+#define CFW_SCENE_TEXT_BYTES     CFW_SHAPE_INLINE_MAX   /* inline string store per slot */
 
 typedef struct {
     uint8_t  type;          /* CFW_SHAPE_*, 0 = empty slot */
@@ -44,6 +45,7 @@ typedef struct cfw_scene_s {
     volatile uint8_t render_due; /* display_copy_hook must re-render before copying */
     uint8_t  period_ms;     /* animation frame period */
     cfw_slot slots[CFW_SCENE_SLOTS];
+    uint8_t  text[CFW_SCENE_SLOTS][CFW_SCENE_TEXT_BYTES];  /* TEXT_INLINE bytes per slot */
 } cfw_scene;
 
 static int  cfw_scene_dispatch(customCfwContext *ctx, uint8_t *state, uint8_t mode,

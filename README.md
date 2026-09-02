@@ -52,8 +52,9 @@ vector shapes and firmware-side animation on top of the texture cache:
    `[type][flags][color][width][p0..p7 as int16 LE]` and covers hairline and
    wide lines, plain and rounded rectangles (fill or stroke), circles and rings,
    triangles, quads, quadratic and cubic beziers, arcs and pie sectors, plus
-   cached images and text (built-in 20 px font or a cached mode-14 font, with the
-   string bytes read from the texture cache). Coordinates are signed pixels and
+   cached images and text (built-in 20 px font with the string carried inline in
+   the record and clipped to its box, or read from the texture cache, or a cached
+   mode-14 font). Coordinates are signed pixels and
    everything clips to the 640x480 panel. Mode 16 composes inside a mode-8 batch
    like modes 13-15. See `patches/shapes.h` for the type table.
  * Mode 17 keeps a retained scene of up to 128 shape slots (slot order is paint
@@ -70,7 +71,7 @@ vector shapes and firmware-side animation on top of the texture cache:
  * Mode 18 controls animation: freeze, set the frame period (10-250 ms, default
    33), release the scene, or finish every animation and present the end state.
 
-The capability string advertises these as `shapes16 scene17 anim18`.
+The capability string advertises these as `shapes16 scene17 anim18 inlinetext17`.
 `demos/shapes-demo.ts` exercises all three modes, and
 `patches/host/shapes_host_test.c` renders every primitive on the host so the
 rasterizer and easing math can be checked without glasses.

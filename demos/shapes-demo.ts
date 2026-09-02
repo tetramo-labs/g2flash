@@ -39,7 +39,7 @@ const i16 = (v: number) => u16(v < 0 ? v + 0x10000 : v);
 const varint = (v: number) => { const out: number[] = []; do { let b = v & 0x7f; v >>>= 7; if (v) b |= 0x80; out.push(b); } while (v); return out; };
 
 const T = { LINE: 1, RECT: 2, RECT_FILL: 3, CIRCLE: 4, CIRCLE_FILL: 5, TRI: 6, TRI_FILL: 7, QUAD: 8,
-  QUAD_FILL: 9, BEZIER2: 10, BEZIER3: 11, ARC: 12, PIE: 13, IMAGE: 14, TEXT: 15, TEXT_CACHED: 16 } as const;
+  QUAD_FILL: 9, BEZIER2: 10, BEZIER3: 11, ARC: 12, PIE: 13, IMAGE: 14, TEXT: 15, TEXT_CACHED: 16, TEXT_INLINE: 17 } as const;
 const VISIBLE = 1;
 // CSS cubic-bezier control points scaled to 0..255
 const EASE = { linear: [0, 0, 255, 255], inOut: [107, 0, 148, 255], out: [0, 0, 148, 255], in: [107, 0, 255, 255] };
@@ -49,6 +49,11 @@ function record(type: number, color: number, width: number, ...p: number[]): num
   const out = [type, VISIBLE, color, width];
   for (let i = 0; i < 8; i++) out.push(...i16(p[i] ?? 0));
   return out;
+}
+/** Inline built-in-font text: [17][flags][options][0][x][y][w][h][len][bytes], clipped to w/h when > 0. */
+function inlineText(options: number, x: number, y: number, w: number, h: number, text: string): number[] {
+  const bytes = [...new TextEncoder().encode(text)].slice(0, 128);
+  return [T.TEXT_INLINE, VISIBLE, options, 0, ...i16(x), ...i16(y), ...i16(w), ...i16(h), bytes.length, ...bytes];
 }
 // mode 16: immediate shapes into the shadow
 const immediate = (...recs: number[][]) => Uint8Array.from([16, recs.length, ...recs.flat()]);
@@ -136,7 +141,7 @@ try {
   console.log("[16] test card");
   await send(immediate(
     record(T.RECT, 8, 2, 8, 8, 624, 464, 16),
-    record(T.TEXT, 15, 0, 40, 24, 0, TITLE.length),
+    inlineText(0x1F, 40, 24, 0, 0, "Glassly (inline text)"),
     record(T.LINE, 12, 4, 40, 60, 600, 60),
     record(T.CIRCLE_FILL, 15, 0, 120, 200, 60),
     record(T.CIRCLE, 12, 6, 300, 200, 60),
@@ -159,7 +164,7 @@ try {
     SET(4, record(T.RECT, 6, 1, 60, 400, 520, 16, 8)),                        // bar track
     SET(BAR, record(T.RECT_FILL, 12, 0, 60, 400, 1, 16, 8)),
     SET(GAUGE, record(T.ARC, 15, 8, 480, 200, 70, -90, -90)),
-    SET(6, record(T.TEXT, 9, 0, 40, 440, 32, SUB.length)),
+    SET(6, inlineText(0x19, 40, 440, 300, 30, "inline text, clipped to 300 px ............")),
     TWEEN(TITLE_SLOT, COLOR, 30, EASE.out, 15),
     GLIDE(BALL, 480, 0, 45, EASE.inOut),
     TWEEN(BAR, P(2), 60, EASE.linear, 520),
@@ -171,6 +176,7 @@ try {
     console.log(`[17] loop ${i + 1}/${LOOPS}: back`);
     await send(scene(COMMIT, 0,
       GLIDE(BALL, -480, 0, 45, EASE.inOut),
+      GLIDE(6, 0, -20, 45, EASE.inOut),
       TWEEN(BAR, P(2), 45, EASE.inOut, 1),
       TWEEN(GAUGE, P(4) | WIDTH, 45, EASE.inOut, -90, 2),
     ));
@@ -178,6 +184,8 @@ try {
     console.log(`[17] loop ${i + 1}/${LOOPS}: forth`);
     await send(scene(COMMIT, 0,
       GLIDE(BALL, 480, 0, 45, EASE.inOut),
+      GLIDE(6, 0, 20, 45, EASE.inOut),
+      SET(6, inlineText(0x1F, 40, 420, 300, 30, `inline text, update ${i + 1}`)),
       TWEEN(BAR, P(2), 45, EASE.inOut, 520),
       TWEEN(GAUGE, P(4) | WIDTH, 45, EASE.inOut, 270, 8),
     ));

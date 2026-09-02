@@ -13,7 +13,8 @@
  *         bit 2 FREEZE  stop every running animation at its current value first
  *   bg    4-bit gray the frame is cleared to before slots are painted
  *   records, applied in order after the whole message validates:
- *     [0][slot][20-byte shape record]                SET     define or replace a slot
+ *     [0][slot][shape record]                        SET     define or replace a slot
+ *                                                    (20 bytes, or 13 + len for TEXT_INLINE)
  *     [1][slot]                                      DELETE
  *     [2][slot][visible:u8]                          SHOW/HIDE
  *     [3][slot][dx:i16][dy:i16]                      MOVE    translate immediately
@@ -170,6 +171,7 @@ static void cfw_scene_render(cfw_scene *sc, uint8_t *fb, cfw_rectlist *rl) {
         s.color = sl->color;
         s.width = sl->width;
         for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) s.p[k] = sl->p[k];
+        s.text = sc->text[i];
         cfw_shape_draw(&r, &s, rl);
     }
     rl_add(rl, 0, 0, IMAGE_W, IMAGE_H);
@@ -280,7 +282,12 @@ static uint32_t cfw_scene_record_len(const uint8_t *p, uint32_t avail) {
     if (avail < 2u) return 0;
     uint32_t op = p[0], slot = p[1], need;
     switch (op) {
-    case CFW_SCENE_OP_SET:    need = 2u + CFW_SHAPE_RECORD_BYTES; break;
+    case CFW_SCENE_OP_SET: {
+        uint32_t rec = cfw_shape_record_len(p + 2, avail - 2u);
+        if (rec == 0) return 0;
+        need = 2u + rec;
+        break;
+    }
     case CFW_SCENE_OP_DELETE:
     case CFW_SCENE_OP_FREEZE:
     case CFW_SCENE_OP_FINISH: need = 2u; break;
@@ -363,6 +370,8 @@ static void cfw_scene_apply(cfw_scene *sc, const uint8_t *p) {
         sl->color = s.color;
         sl->width = s.width;
         for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) sl->p[k] = s.p[k];
+        if (s.type == CFW_SHAPE_TEXT_INLINE)
+            for (uint32_t k = 0; k < (uint16_t)s.p[4]; k++) sc->text[slot][k] = s.text[k];
         if (slot + 1u > sc->slot_hi) sc->slot_hi = slot + 1u;
         return;
     }
