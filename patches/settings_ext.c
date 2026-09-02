@@ -357,8 +357,9 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 //   shapes16   -> mode 16 rasterizes vector shape records straight into the shadow
 //   scene17    -> mode 17 retained shape scene with eased glide/tween animation
 //   anim18     -> mode 18 animation control (freeze, frame period, release, finish)
-//   (revision 19 adds TEXT_INLINE records to modes 16/17; no token: the response
-//   must stay under one frame, ~150 caps chars, or the glasses stop answering)
+//   (revision 19 adds TEXT_INLINE records to modes 16/17 with no token: the
+//   response must stay under one frame, ~150 caps chars, or the glasses stop
+//   answering. Only stock and this CFW exist, so the phone gates on scene17.)
 //
 // The string is a normal rodata literal now that build.py emits/relocates .rodata
 // (earlier this had to be spelled out byte-by-byte to avoid a rodata section).
