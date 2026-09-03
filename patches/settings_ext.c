@@ -61,6 +61,11 @@ typedef int  (*pb_decode_fn)(void *stream, const void *fields, void *dest);
 #define MIC_CONTROL_FIELD 103u
 void mic_apply_control(const uint8_t *data, uint32_t len);
 unsigned mic_append_status(unsigned char *buf, unsigned len, unsigned capacity);
+/* ANCS relay (ancs_relay.c, same translation unit). Field 106 carries the
+ * control ops (ENABLE/DISABLE/QUERY/ACTION/RENEW); relayed notification records
+ * and the STATUS reply go out as field 105 notifies. */
+#define ANCS_CONTROL_FIELD 106u
+void ancs_apply_control(const uint8_t *data, uint32_t len);
 typedef void (*display_start_fn)(unsigned app_id, void *arg, unsigned arg_len, void *cb);
 
 #define FW_SEND 0x0047d809 /* FUN_0047d808 | thumb bit */
@@ -301,6 +306,8 @@ static void faceclaw_scan_settings_control(const uint8_t *buf, uint32_t len) {
                 faceclaw_apply_control(p, item_len);
             else if (field == MIC_CONTROL_FIELD)
                 mic_apply_control(p, item_len);
+            else if (field == ANCS_CONTROL_FIELD)
+                ancs_apply_control(p, item_len);
             p += item_len;
         } else if (wire == 5) {
             if ((uint32_t)(end - p) < 4) return;
@@ -348,7 +355,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 }
 
 // Capability string "EVENCFW/<ver> <space-separated feature tokens>":
-//   EVENCFW/19 -> magic prefix + contract version (detect: starts-with "EVENCFW/")
+//   EVENCFW/20 -> magic prefix + contract version (detect: starts-with "EVENCFW/")
 //   imgz       -> zlib (DEFLATE) compressed image payloads
 //   rle        -> compact run-length encoded delta rows
 //   wakelease  -> fail-open Faceclaw ownership of idle wakes / local Even AI
@@ -368,7 +375,9 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 //   anim18     -> mode 18 animation control (freeze, frame period, release, finish)
 //   (revision 19 adds TEXT_INLINE records to modes 16/17 with no token: the
 //   response must stay under one frame, ~150 caps chars, or the glasses stop
-//   answering. Only stock and this CFW exist, so the phone gates on scene17.)
+//   answering. Only stock and this CFW exist, so the phone gates on scene17.
+//   Revision 20 adds the ANCS relay on sid-0x09 fields 105/106, again without
+//   a token; the phone gates it on the revision number.)
 //
 // The string is a normal rodata literal now that build.py emits/relocates .rodata
 // (earlier this had to be spelled out byte-by-byte to avoid a rodata section).
@@ -376,7 +385,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "EVENCFW/19 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes16 scene17 anim18";
+        static const char caps[] = "EVENCFW/20 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes16 scene17 anim18";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

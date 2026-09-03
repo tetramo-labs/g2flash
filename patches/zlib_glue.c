@@ -260,12 +260,12 @@ typedef int (*compass_config_fn)(uint32_t, const uint32_t *); /* sensor-hub Func
 
 #define RLE_CHUNK 256   /* mode-3/6 inflate scratch feeding the RLE decoder (stack) */
 
-void *zwrap_alloc(void *opaque, uint32_t items, uint32_t size) {
+static void *zwrap_alloc(void *opaque, uint32_t items, uint32_t size) {
     (void)opaque;
     return cfw_heap13_malloc(items * size);
 }
 
-void zwrap_free(void *opaque, void *ptr) {
+static void zwrap_free(void *opaque, void *ptr) {
     (void)opaque;
     cfw_heap13_free(ptr);
 }
@@ -277,7 +277,7 @@ void zwrap_free(void *opaque, void *ptr) {
  * thread — the only shared state is the singleton, guarded by magic + bounds.
  * Non-static (external linkage) so -O2 keeps it despite having no direct caller —
  * osTimerNew only ever receives it as a fn-ptr value. */
-void seq_tick(void *arg) {
+static void seq_tick(void *arg) {
     customCfwContext *ctx = (customCfwContext *)arg;
     if (ctx == 0 || ctx->magic != CFW_CTX_MAGIC) return;
     uint32_t c = ctx->seq_cursor;
@@ -308,6 +308,7 @@ static void cfw_snap_clear(cfw_snap *snap);
 static int is_shadow_message(const uint8_t *src, uint32_t srclen);
 static int cfw_cleanup_session(void);
 static void mic_cleanup_session(void);   /* mic_control.c (same TU): mic hw + lease teardown */
+static void ancs_cleanup_session(void);  /* ancs_relay.c (same TU): relay lease + drain timer */
 static void als_cleanup_session(void);   /* als_sensor.c (same TU): passive ALS teardown */
 int ring_battery_control(const uint8_t *src, uint32_t srclen); /* mode 17 */
 int als_control(const uint8_t *src, uint32_t srclen); /* als_sensor.c: mode 16 */
@@ -907,6 +908,7 @@ static int cfw_cleanup_session(void) {
     /* Stop any CFW microphone session (capture hardware, streaming lease, and
      * its watchdog timer) so a departing custom app cannot leave the mics on. */
     mic_cleanup_session();
+    ancs_cleanup_session();
 
     /* Give the ambient light sensor back to the stock auto-brightness machine. */
     als_cleanup_session();
