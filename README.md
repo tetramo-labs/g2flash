@@ -74,6 +74,21 @@ vector shapes and firmware-side animation on top of the texture cache:
 The capability string advertises these as `shapes16 scene17 anim18`; inline text
 records are implied by contract revision 19 (the capability response must fit one
 BLE frame, so no token was added).
+
+Revision 20 adds an ANCS relay. On iOS the stock firmware already reads the
+phone's notifications through the Apple Notification Center Service (the right
+lens subscribes; the phone app itself never can) but only tells the app which
+app posted one. The relay taps the stock ANCS client before its whitelist and
+its 63-byte title copies and forwards every notification to the phone as
+private sid-0x09 field-105 records: the Notification Source event (added,
+modified, removed, with flags, category and UID), each attribute (app id,
+title, subtitle, message, message size, date, action labels; chunked so no
+message exceeds 150 bytes) and the app's display name. The phone enables it
+with a fail-open 90-second lease on field 106 (`['A','N',1,op]`: enable,
+disable, query, perform a positive/negative action on a UID, renew). Records
+are queued on the BLE stack task and drained by a timer, so a slow link drops
+whole records (counted in the STATUS reply) rather than stalling the stack. The
+full contract is at the top of `patches/ancs_relay.c`.
 `demos/shapes-demo.ts` exercises all three modes, and
 `patches/host/shapes_host_test.c` renders every primitive on the host so the
 rasterizer and easing math can be checked without glasses.

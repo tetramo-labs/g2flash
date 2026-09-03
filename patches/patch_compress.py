@@ -21,7 +21,11 @@ Build a CFW image for g2_2.2.9.22 with:
   (10) a phone-controlled microphone configuration + multi-channel audio streaming
       channel (settings fields 103/104 + the 'SM' stream frame) riding the
       already-hooked sid-0x09 settings seams -- no new patch sites; see
-      mic_control.c for the contract and its hardware validation gate.
+      mic_control.c for the contract and its hardware validation gate, and
+  (11) an ANCS relay (sid-0x09 fields 105/106) that retargets four `bl` sites
+      inside the stock ANCC profile object so the right lens forwards every iOS
+      notification it receives (source event, attributes, app display name) to
+      the phone; see ancs_relay.c for the contract and threading model.
 
 REBASED 2.2.6.10 -> 2.2.9.22 (2026-08-22). Every address below was re-derived with
 normalized function/site matching and checked against the 2.2.9.22 disassembly. Two
@@ -184,6 +188,20 @@ WEAR_NOTIFY_BL_SITES = {
 # EvenHub active instead, so redirect through a wrapper that preserves the stock call
 # and additionally invokes that notifier while mode 10 owns the compass.
 COMPASS_EVENT_BL_SITE = (0x444dfc, "1d f0 76 fa")  # bl FUN_004622ec(display,0x41,&heading)
+# ANCS relay. The stock ANCC profile object (profile_ancc.c, 0x4d3e5e..0x4d50e0)
+# calls its own helpers with direct `bl`s; each is retargeted to a wrapper that
+# records the event for the phone and tail-calls the stock callee, so the stock
+# notification pipeline (whitelist, on-glass popup, lens sync) is untouched.
+# r0 is the 8-byte Notification Source record at the first two sites and the
+# active_notif_t (anccCb+8) at the attribute site; the app-attribute parser
+# takes no arguments and reads anccCb directly.
+ANCS_SOURCE_BL_SITE = (0x4d438c, "ff f7 89 fe")  # _anccNtfValueUpdate: bl anccActionListPush
+ANCS_REMOVE_BL_SITE = (0x4d4384, "ff f7 82 ff")  # _anccNtfValueUpdate: bl _anccNotiRemoveCback
+ANCS_ATTR_BL_SITE   = (0x4d4c7c, "ff f7 8d fc")  # _anccAttrHandler: bl _ancsAnccAttrCback
+ANCS_APP_BL_SITES = {
+    0x4d4bf4: "ff f7 aa fd",   # _anccAttrHandler, first fragment: bl _anccParseAppAttributes
+    0x4d4daa: "ff f7 cf fc",   # _anccAttrHandler, continuation:  bl _anccParseAppAttributes
+}
 
 def enc_bl(pc, target):
     """Encode a Thumb-2 BL (T1) from instruction address `pc` to `target`."""
@@ -305,6 +323,10 @@ def layout(img):
     display_copy_addr = base + _fn(built, "display_copy_hook")["offset"]
     wear_notify_addr = base + _fn(built, "faceclaw_send_wear_event")["offset"]
     compass_event_addr = base + _fn(built, "compass_event_forward")["offset"]
+    ancs_source_addr = base + _fn(built, "ancs_hook_source")["offset"]
+    ancs_remove_addr = base + _fn(built, "ancs_hook_remove")["offset"]
+    ancs_attr_addr   = base + _fn(built, "ancs_hook_attr")["offset"]
+    ancs_app_addr    = base + _fn(built, "ancs_hook_app")["offset"]
 
     # --- assemble the appended payload bytes (old_ps .. end) ---
     pad = blob_off - old_ps                     # alignment gap before the blob
@@ -385,6 +407,19 @@ def layout(img):
         (g2f(COMPASS_EVENT_BL_SITE[0]), COMPASS_EVENT_BL_SITE[1],
          enc_bl(COMPASS_EVENT_BL_SITE[0], compass_event_addr),
          "bl compass_event_forward (global IMU heading -> stock nav BLE notifier)"),
+        # ANCS relay: record each profile event for the phone, then run stock.
+        (g2f(ANCS_SOURCE_BL_SITE[0]), ANCS_SOURCE_BL_SITE[1],
+         enc_bl(ANCS_SOURCE_BL_SITE[0], ancs_source_addr),
+         "bl ancs_hook_source (ANCS added/modified -> relay, then list push)"),
+        (g2f(ANCS_REMOVE_BL_SITE[0]), ANCS_REMOVE_BL_SITE[1],
+         enc_bl(ANCS_REMOVE_BL_SITE[0], ancs_remove_addr),
+         "bl ancs_hook_remove (ANCS removed -> relay, then stock callback)"),
+        (g2f(ANCS_ATTR_BL_SITE[0]), ANCS_ATTR_BL_SITE[1],
+         enc_bl(ANCS_ATTR_BL_SITE[0], ancs_attr_addr),
+         "bl ancs_hook_attr (ANCS attribute -> relay, then stock callback)"),
+        *[(g2f(site), orig, enc_bl(site, ancs_app_addr),
+           f"bl ancs_hook_app @ {site:#x} (ANCS app display name -> relay, then stock parser)")
+          for site, orig in ANCS_APP_BL_SITES.items()],
     ]
     return bytes(append), in_place, (idx, comp_off, old_ps)
 

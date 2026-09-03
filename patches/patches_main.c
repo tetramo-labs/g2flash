@@ -32,5 +32,6 @@
 #include "scene.c"
 #include "settings_ext.c"
 #include "mic_control.c"
+#include "ancs_relay.c"
 #include "gesture_fwd.c"
 #include "debug.c"

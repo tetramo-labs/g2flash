@@ -117,12 +117,31 @@ typedef struct {
      * timer is created on first use and deleted by mode 11 cleanup. --- */
     struct cfw_scene_s *scene;
     uint32_t scene_timer;                   /* osTimer pacing animation frames (0 = none) */
+    /* --- ANCS relay (ancs_relay.c, sid-0x09 fields 105/106). The stock ANCC
+     * profile callbacks (BLE stack task) append records to a single-producer,
+     * single-consumer byte ring; ancs_relay_tick drains it from the RTOS timer
+     * thread through the stock protobuf sender. The ring is allocated on the
+     * first ENABLE and kept for the life of the context so no producer can race
+     * a free. Appended at the tail so every existing field offset is unchanged. --- */
+    uint8_t  *ancs_ring;                    /* ANCS_RING_BYTES; 0 until the first ENABLE */
+    volatile uint16_t ancs_head;            /* producer write index (BLE stack task) */
+    volatile uint16_t ancs_tail;            /* consumer read index (timer thread) */
+    volatile uint8_t  ancs_idle;            /* drain timer parked; the next push restarts it */
+    uint8_t  ancs_epoch;                    /* bumped by a fresh ENABLE; stale ring records are skipped */
+    uint16_t ancs_seq;                      /* relay messages handed to the sender (consumer-owned) */
+    uint16_t ancs_drops;                    /* records not queued: ring full or oversize (producer-owned) */
+    uint8_t  ancs_send_errs;                /* sender refusals, saturating (consumer-owned) */
+    uint8_t  ancs_pad0[3];
+    uint32_t ancs_lease_deadline;           /* FW_MS_TICK deadline; 0 = relay off */
+    uint32_t ancs_timer;                    /* one-shot osTimer draining the ring (0 = none) */
+    uint8_t  ancs_notify_buf[168];          /* stable storage for the field-105 sid-0x09 notify */
+    uint8_t  ancs_status_buf[24];           /* stable storage for the STATUS reply (settings thread) */
 } customCfwContext;
 
 #define CFW_CTX_SLOT  0x2029f4a8U    /* first word of the CFW-reserved TLSF tail */
 #define CFW_ALLOC_DIAG_SLOT 0x2029f4acU /* second word: magic | sticky failure bit */
 #define CFW_ALLOC_DIAG_MAGIC 0xA110CA7EU
-#define CFW_CTX_MAGIC 0xC0FFEE69U    /* bumped for the context layout change (scene fields) */
+#define CFW_CTX_MAGIC 0xC0FFEE6AU    /* bumped for the context layout change (ANCS relay fields) */
 
 #define FW_MS_TICK  (*(volatile uint32_t *)0x20076d80U)  /* firmware 1 ms OS tick (SysTick chain) */
 

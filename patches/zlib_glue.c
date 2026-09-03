@@ -299,6 +299,7 @@ static void cfw_snap_clear(cfw_snap *snap);
 static int is_shadow_message(const uint8_t *src, uint32_t srclen);
 static int cfw_cleanup_session(void);
 static void mic_cleanup_session(void);   /* mic_control.c (same TU): mic hw + lease teardown */
+static void ancs_cleanup_session(void);  /* ancs_relay.c (same TU): relay lease + drain timer */
 
 static int inflate_rle(uint8_t *strm, uint8_t *base, uint32_t stride, uint32_t rowbytes, uint32_t rows);
 static void present_shadow(uint8_t *state, uint32_t w, uint32_t h, cfw_rectlist *rl);
@@ -883,6 +884,7 @@ static int cfw_cleanup_session(void) {
     /* Stop any CFW microphone session (capture hardware, streaming lease, and
      * its watchdog timer) so a departing custom app cannot leave the mics on. */
     mic_cleanup_session();
+    ancs_cleanup_session();
 
     int compass_was_forwarding = ctx->compass_forward != 0;
     ctx->compass_forward = 0;
