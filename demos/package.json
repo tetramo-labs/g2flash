@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Demos for the faceclaw G2 custom firmware: a video-streaming benchmark and a CFW-detection probe, talking to the glasses over BLE.",
+  "description": "Demos for the faceclaw G2 custom firmware: a video-streaming benchmark, a CFW-detection probe, the shapes demo and suite, and the example miniapp's Bad Apple tests, talking to the glasses over BLE.",
   "dependencies": {
     "g2-kit": "github:jimrandomh/g2-kit-unofficial#e8530502419bed4f5fb02c370c522208117c01d2",
     "omggif": "^1.0.10"
@@ -17,6 +17,7 @@
     "detect": "bun detect-cfw.ts",
     "bench": "bun video-bench.ts",
     "shapes": "bun shapes-demo.ts",
-    "suite": "bun shapes-suite.ts"
+    "suite": "bun shapes-suite.ts",
+    "bad-apple": "bun bad-apple-tests.ts"
   }
 }
