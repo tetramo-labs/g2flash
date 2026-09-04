@@ -10,11 +10,20 @@
 // (the CFW draws it inline, one slot per line, and clips), so a truncated
 // text box never marks a frame degraded here. Images are not supported.
 //
+// Pacing: a step's frame is sent `holdMs` after the previous step's frame was
+// sent (never before that frame was acked), so each frame is on the glasses
+// for about its hold and a later frame never waits for an earlier frame's
+// transitions to finish — captions scroll while they glide, a readout ticks
+// beside a tweening gauge, a second glide composes with the first. Only a
+// case's last frame waits for its transitions before the hold and blank.
+//
 //     bun shapes-suite.ts                    # every case
 //     bun shapes-suite.ts rect animation     # by group
 //     bun shapes-suite.ts anim-glide         # by id
 //     bun shapes-suite.ts --list             # ids and groups, no connection
 //     bun shapes-suite.ts --self-test        # encoder vs the phone's unit-test vectors
+//     bun shapes-suite.ts --dump FILE        # write every payload + wait for the host replay
+//     G2_TRACE=1 bun shapes-suite.ts         # per-frame op counts and timings
 //     G2_DRY_RUN=1 bun shapes-suite.ts       # host pipeline only, no glasses
 //     G2_HOLD_SCALE=0.5 G2_OUT=results.json bun shapes-suite.ts
 //
@@ -368,11 +377,15 @@ const SHAPE_CASES: ShapesCase[] = [
     title: "element budget",
     description: "More discs than the budget: the tail is dropped and reported, the rest draws.",
     steps: (c) => {
+      // Small enough discs that budget + 4 of them fit on the canvas: the
+      // budget, not the clamp, must be what drops the tail.
       const n = c.maxTextElements + 4;
+      const pitch = 24;
+      const cols = Math.max(1, Math.floor((c.width - 8) / pitch));
       const discs: RenderElement[] = Array.from({ length: n }, (_, i) => ({
         type: "circle",
         id: `d${i}`,
-        box: { x: 8 + (i % 12) * 46, y: 8 + Math.floor(i / 12) * 46, w: 40, h: 40 },
+        box: { x: 8 + (i % cols) * pitch, y: 8 + Math.floor(i / cols) * pitch, w: 20, h: 20 },
         style: { fill: true, color: 4 + (i % 12) },
       }));
       return [{ elements: discs, holdMs: HOLD }];
@@ -1195,18 +1208,6 @@ function diffScene(prev: FrameElement[], next: Diffable[], nextSyntheticId: () =
   return { elements, removed: [...prevUnmatched].map((j) => prev[j].id) };
 }
 
-/** Longest tween the CFW encodes (255 frames at ~30 fps); nothing waits past it. */
-const MAX_SETTLE_MS = 255 * 33;
-
-function settleTimeOf(elements: FrameElement[]): number {
-  let ms = 0;
-  for (const el of elements) {
-    if (el.change !== "updated" && el.change !== "moved") continue;
-    ms = Math.max(ms, el.transition?.durationMs ?? 0);
-  }
-  return Math.min(ms, MAX_SETTLE_MS);
-}
-
 // ============================================================================
 // Mode-17 retained-scene encoder — G2CfwScene.swift
 // ============================================================================
@@ -1370,30 +1371,33 @@ function setRecord(s: Slot, index: number): number[] {
   return out;
 }
 
-/** `[5][slot][mask:u16][frames][curve x4][value:i16 per set bit]`, or null when the change is not a pure geometry/stroke change of the same shape type. */
+/**
+ * `[5][slot][mask:u16][frames][curve x4][value:i16 per set bit]`, or null when
+ * the change is not a pure geometry/stroke change of the same shape type.
+ *
+ * The mask always covers every tweenable parameter (plus color and width where
+ * the type allows), not just the ones that changed. The firmware takes an
+ * unmasked parameter's end value from the slot's CURRENT value, which is
+ * mid-flight when a previous tween is still running; a partial mask would then
+ * freeze that parameter wherever the earlier tween had got to. The phone's
+ * G2CfwScene.swift sends changed parameters only, so its composed glides land
+ * off-target on this firmware.
+ */
 function tweenRecord(old: Slot, next: Slot, index: number, frames: number, curve: number[]): number[] | null {
   if (old.type !== next.type || old.text.length !== next.text.length || old.text.some((v, i) => v !== next.text[i])) return null;
   const tweenable = tweenableMask(next.type);
-  let mask = 0;
-  const values: number[] = [];
   for (let k = 0; k < 8; k++) {
-    if (old.params[k] === next.params[k]) continue;
-    if (!(tweenable & (1 << k))) return null;
-    mask |= 1 << k;
-    values.push(next.params[k]);
+    if (old.params[k] !== next.params[k] && !(tweenable & (1 << k))) return null;
   }
   const isTexture = next.type >= T.IMAGE;
-  if (old.color !== next.color) {
-    const inlineFade = next.type === T.TEXT_INLINE && (old.color & 0xf0) === (next.color & 0xf0);
-    if (isTexture && !inlineFade) return null;
-    mask |= 0x100;
-    values.push(next.color);
-  }
-  if (old.width !== next.width) {
-    if (isTexture) return null;
-    mask |= 0x200;
-    values.push(next.width);
-  }
+  const inlineFade = next.type === T.TEXT_INLINE && (old.color & 0xf0) === (next.color & 0xf0);
+  if (old.color !== next.color && isTexture && !inlineFade) return null;
+  if (old.width !== next.width && isTexture) return null;
+  let mask = tweenable;
+  const values: number[] = [];
+  for (let k = 0; k < 8; k++) if (tweenable & (1 << k)) values.push(next.params[k]);
+  if (!isTexture || inlineFade) { mask |= 0x100; values.push(next.color); }
+  if (!isTexture) { mask |= 0x200; values.push(next.width); }
   if (mask === 0) return null;
   return [5, index, mask & 0xff, mask >> 8, frames, ...curve.slice(0, 4), ...values.flatMap(i16)];
 }
@@ -1408,7 +1412,7 @@ class CfwScene {
   indices(): number[][] { return this.elements.map((e) => e.indices); }
 
   /** One mode-17 patch (COMMIT, plus CLEAR on a repack), or null when the frame does not fit the slot table. */
-  encode(frame: FrameElement[], replay = false): { payload: Uint8Array; ops: number; repack: boolean; tweens: number } | null {
+  encode(frame: FrameElement[], replay = false): { payload: Uint8Array; sets: number; deletes: number; tweens: number; repack: boolean; animMs: number } | null {
     const desired = frame.map((el) => ({
       id: el.id,
       slots: slotsFor(el),
@@ -1454,13 +1458,15 @@ class CfwScene {
     }
 
     const ops: number[] = [];
-    let count = 0;
+    let sets = 0;
+    let deletes = 0;
     let tweens = 0;
+    let animFrames = 0;
     if (!repack) {
       const kept = new Set(desired.map((d) => d.id));
       for (const state of this.elements) {
         if (kept.has(state.id)) continue;
-        for (const index of state.indices) { ops.push(1, index); count++; }
+        for (const index of state.indices) { ops.push(1, index); deletes++; }
       }
     }
     const committed: ElementState[] = [];
@@ -1474,18 +1480,18 @@ class CfwScene {
           if (slotsEqual(old, s)) return;
           if (item.frames >= 2) {
             const tween = tweenRecord(old, s, index, item.frames, item.curve);
-            if (tween) { ops.push(...tween); count++; tweens++; return; }
+            if (tween) { ops.push(...tween); tweens++; animFrames = Math.max(animFrames, item.frames); return; }
           }
         }
         ops.push(...setRecord(s, index));
-        count++;
+        sets++;
       });
       committed.push({ id: item.id, slots: item.slots, indices });
     });
 
     this.elements = committed;
     this.needsRepack = false;
-    return { payload: Uint8Array.from([17, repack ? 0x03 : 0x01, 0, ...ops]), ops: count, repack, tweens };
+    return { payload: Uint8Array.from([17, repack ? 0x03 : 0x01, 0, ...ops]), sets, deletes, tweens, repack, animMs: animFrames * FRAME_PERIOD_MS };
   }
 }
 
@@ -1503,10 +1509,10 @@ interface CaseResult {
   degraded?: boolean;
   dropped?: string[];
   presented?: boolean;
-  /** Slowest render() round-trip in the case: frame acked by the glasses, transitions done. */
-  renderMs?: number;
-  /** Slowest BLE ack alone. */
+  /** Slowest BLE ack of a frame in the case. */
   ackMs?: number;
+  /** Longest transition the case started on the glasses. */
+  settleMs?: number;
   steps?: number;
   /** Renders per second over the whole case, holds included. */
   stepsPerSecond?: number;
@@ -1514,13 +1520,19 @@ interface CaseResult {
   bytes?: number;
 }
 
-const DRY_RUN = process.env.G2_DRY_RUN === "1";
+const args = process.argv.slice(2);
+const DUMP = args.includes("--dump") ? args[args.indexOf("--dump") + 1] : undefined;
+const DRY_RUN = process.env.G2_DRY_RUN === "1" || DUMP !== undefined;
+const TRACE = process.env.G2_TRACE === "1";
 const HOLD_SCALE = DRY_RUN ? 0 : Math.max(0, Number(process.env.G2_HOLD_SCALE ?? "1"));
 const ACK_MS = 8_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const hold = (ms: number) => { const s = Math.round(ms * HOLD_SCALE); return s > 0 ? sleep(s) : Promise.resolve(); };
+const sleepUntil = (t: number) => { const ms = t - performance.now(); return ms > 0 ? sleep(ms) : Promise.resolve(); };
+const scaled = (ms: number) => Math.round(ms * HOLD_SCALE);
 
 // ── self-test: the encoder vectors from G2CfwSceneTests.swift, byte for byte ──
+// One deliberate difference: TWEEN masks here cover every tweenable parameter
+// (see tweenRecord), where the Swift encoder masks only the changed ones.
 async function selfTest(): Promise<void> {
   const failures: string[] = [];
   let checks = 0;
@@ -1561,9 +1573,9 @@ async function selfTest(): Promise<void> {
   await r.render([{ type: "circle", id: "ball", box: { x: 200, y: 0, w: 21, h: 21 }, style: { fill: true }, transition: { durationMs: 330, easing: "linear" } }]);
   b = r.lastPayload;
   eq("tween header", sub(b, 0, 3), [17, 0x01, 0]);
-  eq("tween record", sub(b, 3, 12), [5, 0, 0x01, 0x00, 10, 0, 0, 255, 255]);
-  eq("tween target", sub(b, 12, 14), le(242));
-  eq("tween length", [b.length], [14]);
+  eq("tween record", sub(b, 3, 12), [5, 0, 0x07, 0x03, 10, 0, 0, 255, 255]);
+  eq("tween target", sub(b, 12, 22), le(242, 106, 10, 15, 0)); // cx cy r color width: the unchanged ones ride along
+  eq("tween length", [b.length], [22]);
 
   // a geometry change without a transition, and a type change, re-SET
   r = fresh();
@@ -1596,12 +1608,13 @@ async function selfTest(): Promise<void> {
   eq("text line 2 box", sub(b, 26, 34), le(44, 135, 198, 31));
   eq("text line 2 bytes", sub(b, 35, 40), Array.from(new TextEncoder().encode("there")));
   await r.render([t(40, "hi\nthere", 9, { durationMs: 330 })]);
-  eq("text move tweens", sub(r.lastPayload, 3, 8), [5, 0, 0x02, 0x00, 10]);
+  eq("text move tweens", sub(r.lastPayload, 3, 8), [5, 0, 0x0f, 0x01, 10]);
+  eq("text move targets", sub(r.lastPayload, 12, 22), le(44, 138, 198, 58, 0x19));
   await r.render([t(40, "ho\nthere", 9, { durationMs: 330 })]);
   eq("text change re-SETs", sub(r.lastPayload, 3, 6), [0, 0, 17]);
   await r.render([t(40, "ho\nthere", 3, { durationMs: 330 })]);
-  eq("text fade tweens", sub(r.lastPayload, 3, 8), [5, 0, 0x00, 0x01, 10]);
-  eq("text fade target", sub(r.lastPayload, 12, 14), le(0x13));
+  eq("text fade tweens", sub(r.lastPayload, 3, 8), [5, 0, 0x0f, 0x01, 10]);
+  eq("text fade target", sub(r.lastPayload, 20, 22), le(0x13));
 
   eq("easing", easingCurve("ease-in-out"), [107, 0, 148, 255]);
   eq("text bytes strip controls", textBytes("a\u0001b\u00e9", 3), [0x61, 0x62]);
@@ -1612,12 +1625,11 @@ async function selfTest(): Promise<void> {
   process.exit(failures.length ? 1 : 0);
 }
 
-const args = process.argv.slice(2);
 if (args.includes("--list")) {
   for (const c of SHAPE_CASES) console.log(`${c.id.padEnd(28)} ${c.group.padEnd(10)} ${c.title}`);
   process.exit(0);
 }
-const selectors = args.filter((a) => !a.startsWith("--"));
+const selectors = args.filter((a, i) => !a.startsWith("--") && args[i - 1] !== "--dump");
 const selected = selectors.length ? SHAPE_CASES.filter((c) => selectors.includes(c.id) || selectors.includes(c.group)) : SHAPE_CASES;
 if (!selected.length) {
   console.error(`no cases match ${selectors.join(", ")}; try --list`);
@@ -1636,6 +1648,23 @@ function leasePb(op: number): { pb: Uint8Array; magic: number } {
 }
 
 interface Link { send(payload: Uint8Array): Promise<void>; close(): Promise<void>; firmware: string; cfw: string }
+
+/**
+ * A hidden 2-frame tween before the first case: creates the firmware's
+ * animation timer and runs one tick while nothing is on screen, so the first
+ * visible transition is not also the first animation of the session.
+ */
+const WARM_UP = Uint8Array.from([
+  17, 0x03, 0,
+  0, 0, T.CIRCLE_FILL, 0, 0, 0, ...i16(0), ...i16(0), ...i16(1), ...i16(0), ...i16(0), ...i16(0), ...i16(0), ...i16(0),
+  5, 0, 0x01, 0x00, 2, 0, 0, 255, 255, ...i16(1),
+]);
+
+/** `--dump`: the payload stream for patches/host/scene_replay_host.c — [1][len:u16][bytes], [2][ms:u32] wait, [3][len:u8][label]. */
+const dump: number[] = [];
+const dumpMessage = (payload: Uint8Array) => { if (DUMP) dump.push(1, payload.length & 0xff, payload.length >> 8, ...payload); };
+const dumpWait = (ms: number) => { if (DUMP && ms > 0) dump.push(2, ms & 0xff, (ms >> 8) & 0xff, (ms >> 16) & 0xff, (ms >> 24) & 0xff); };
+const dumpLabel = (label: string) => { if (DUMP) { const b = new TextEncoder().encode(label).slice(0, 255); dump.push(3, b.length, ...b); } };
 
 async function openLink(): Promise<Link> {
   const session = await G2Session.open();
@@ -1681,6 +1710,8 @@ async function openLink(): Promise<Link> {
     }
     sid++;
   };
+  await send(WARM_UP);
+  await sleep(150);
   return {
     firmware,
     cfw: caps.raw,
@@ -1703,6 +1734,8 @@ class Renderer {
   lastAckMs = 0;
   lastBytes = 0;
   lastPayload: Uint8Array = new Uint8Array();
+  /** Longest tween the last frame started on the glasses (frames × 33 ms). */
+  lastSettleMs = 0;
 
   constructor(private readonly link: Link | null) {}
 
@@ -1723,18 +1756,23 @@ class Renderer {
     }
     this.lastBytes = encoded.payload.length;
     this.lastPayload = encoded.payload;
-    if (!this.link) { this.lastAckMs = 0; return { ...base, presented: true }; }
+    this.lastSettleMs = encoded.animMs;
+    dumpMessage(encoded.payload);
     const t0 = performance.now();
-    try {
-      await this.link.send(encoded.payload);
-    } catch (err) {
-      this.scene.invalidate();
-      this.prev = [];
-      throw err;
+    if (this.link) {
+      try {
+        await this.link.send(encoded.payload);
+      } catch (err) {
+        this.scene.invalidate();
+        this.prev = [];
+        throw err;
+      }
     }
-    this.lastAckMs = performance.now() - t0;
-    const settle = settleTimeOf(diffed);
-    if (settle > 0) await sleep(settle);
+    this.lastAckMs = this.link ? performance.now() - t0 : 0;
+    if (TRACE) {
+      const ops = [encoded.repack ? "repack" : "", encoded.sets ? `${encoded.sets} set` : "", encoded.tweens ? `${encoded.tweens} tween` : "", encoded.deletes ? `${encoded.deletes} delete` : ""].filter(Boolean).join(", ");
+      console.log(`      ${String(encoded.payload.length).padStart(5)} B  ${String(Math.round(this.lastAckMs)).padStart(4)} ms ack  settle ${this.lastSettleMs} ms  ${ops || "no change"}${processed.dropped.length ? `  dropped ${processed.dropped.join(",")}` : ""}`);
+    }
     return { ...base, presented: true };
   }
 }
@@ -1743,27 +1781,37 @@ async function runCase(shapesCase: ShapesCase, renderer: Renderer): Promise<Case
   const head = { id: shapesCase.id, group: shapesCase.group, title: shapesCase.title };
   const steps = shapesCase.steps(CANVAS);
   const expectation = shapesCase.expect(CANVAS);
-  let renderMs = 0;
   let ackMs = 0;
+  let settleMs = 0;
   let bytes = 0;
   const started = performance.now();
+  dumpLabel(shapesCase.id);
   try {
+    // The glasses keep animating after a frame is acked; a later frame never
+    // waits for that (it is the point of the compose cases), but the case's
+    // last frame does before its hold, so nothing is blanked mid-transition.
+    let animEndsAt = 0;
     for (let i = 0; i < steps.length; i++) {
-      const t0 = performance.now();
+      const sentAt = performance.now();
       const result = await renderer.render(steps[i].elements);
-      renderMs = Math.max(renderMs, performance.now() - t0);
+      const ackedAt = performance.now();
       ackMs = Math.max(ackMs, renderer.lastAckMs);
+      settleMs = Math.max(settleMs, renderer.lastSettleMs);
       bytes += renderer.lastBytes;
+      animEndsAt = Math.max(animEndsAt, ackedAt + renderer.lastSettleMs);
       if (i < steps.length - 1) {
-        await hold(steps[i].holdMs);
+        dumpWait(steps[i].holdMs);
+        await sleepUntil(sentAt + scaled(steps[i].holdMs));
         continue;
       }
       const verdict = result.presented === false ? { pass: false, reason: `not shown on the glasses: ${result.reason ?? "unknown"}` } : evaluateResult(result, expectation);
       const elapsed = Math.max(1, performance.now() - started);
-      await hold(steps[i].holdMs);
+      dumpWait(Math.max(steps[i].holdMs, renderer.lastSettleMs));
+      await sleepUntil(Math.max(sentAt + scaled(steps[i].holdMs), HOLD_SCALE > 0 ? animEndsAt : 0));
       if (shapesCase.blankAfter) {
         await renderer.render([]);
-        await hold(700);
+        dumpWait(700);
+        await sleep(scaled(700));
       }
       return {
         ...head,
@@ -1773,8 +1821,8 @@ async function runCase(shapesCase: ShapesCase, renderer: Renderer): Promise<Case
         degraded: result.degraded === true,
         dropped: result.dropped ?? [],
         presented: result.presented,
-        renderMs: Math.round(renderMs),
         ackMs: Math.round(ackMs),
+        settleMs,
         steps: steps.length,
         stepsPerSecond: Math.round((steps.length / elapsed) * 1000 * 10) / 10,
         bytes,
@@ -1790,22 +1838,31 @@ if (args.includes("--self-test")) await selfTest();
 const link = DRY_RUN ? null : await openLink();
 const renderer = new Renderer(link);
 const results: CaseResult[] = [];
+if (DUMP) { dumpLabel("warm-up"); dumpMessage(WARM_UP); dumpWait(150); }
 console.log(`${DRY_RUN ? "dry run: " : ""}${selected.length} case${selected.length === 1 ? "" : "s"}, canvas ${CANVAS.width}×${CANVAS.height}, budget ${CANVAS.maxTextElements}`);
 try {
   for (let i = 0; i < selected.length; i++) {
     const c = selected[i];
     const r = await runCase(c, renderer);
     results.push(r);
-    const timing = r.state === "error" ? "" : `  ${String(r.renderMs).padStart(5)} ms render, ${String(r.ackMs).padStart(4)} ms ack, ${r.steps} step${r.steps === 1 ? "" : "s"} @ ${r.stepsPerSecond}/s, ${r.bytes} B`;
+    const timing = r.state === "error" ? "" : `  ${String(r.ackMs).padStart(4)} ms ack, ${String(r.settleMs).padStart(4)} ms anim, ${r.steps} step${r.steps === 1 ? "" : "s"} @ ${r.stepsPerSecond}/s, ${r.bytes} B`;
     console.log(`[${String(i + 1).padStart(2)}/${selected.length}] ${r.state.toUpperCase().padEnd(5)} ${r.id.padEnd(26)} ${r.reason}${timing}`);
   }
 } finally {
   if (link) {
     try { await renderer.render([]); } catch {}
     await link.close();
+  } else if (DUMP) {
+    dumpLabel("teardown");
+    await renderer.render([]);
+    dumpMessage(Uint8Array.from([18, 2]));
   }
 }
 
+if (DUMP) {
+  await Bun.write(DUMP, Uint8Array.from(dump));
+  console.log(`wrote ${dump.length} bytes to ${DUMP}`);
+}
 const passed = results.filter((r) => r.state === "pass").length;
 const failed = results.filter((r) => r.state === "fail");
 const errored = results.filter((r) => r.state === "error");

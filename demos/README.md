@@ -90,17 +90,50 @@ bun shapes-suite.ts                    # every case
 bun shapes-suite.ts rect animation     # by group
 bun shapes-suite.ts anim-glide         # by id
 bun shapes-suite.ts --list             # ids and groups, no connection
+bun shapes-suite.ts --self-test        # encoder vs the phone's unit-test vectors
 G2_DRY_RUN=1 bun shapes-suite.ts       # host pipeline only, no glasses
+G2_TRACE=1 bun shapes-suite.ts         # per-frame op counts, bytes, ack times
 G2_HOLD_SCALE=0.5 G2_OUT=results.json bun shapes-suite.ts
 ```
 
-Each case renders its frames in order (one mode-17 patch per frame, awaited
-until the glasses ack it and its transitions have played), then judges the last
-frame's `dropped` / `degraded` report against the case's expectation for a
-576×288 canvas that draws every shape and animates. `G2_OUT` writes the
+Each case renders its frames in order, one mode-17 patch per frame, then judges
+the last frame's `dropped` / `degraded` report against the case's expectation
+for a 576×288 canvas that draws every shape and animates. `G2_OUT` writes the
 per-case results as JSON. The verdicts come from the ported phone-side logic;
 what the panel actually shows is yours to eyeball, which is why the holds are
 there (`G2_HOLD_SCALE=0` skips them).
+
+Pacing: a step's frame goes out `holdMs` after the previous frame went out
+(never before that frame was acked), so a frame stays up for about its hold and
+no frame waits for an earlier frame's transitions — captions scroll while they
+glide, the stage-5 readout ticks beside the tweening gauge, and a second glide
+lands mid-flight in the compose cases. Only a case's last frame waits for its
+transitions before the hold and the blank. The session starts with a hidden
+two-frame tween so the first visible transition is not also the firmware's first
+animation.
+
+Every TWEEN carries the element's full tweenable geometry (plus color and stroke
+width), not only the parameters that changed: the firmware takes an unmasked
+parameter's end value from the slot's current, possibly mid-flight, value, so a
+partial mask would freeze that axis when a second move lands during the first.
+The phone's `G2CfwScene.swift` masks changed parameters only; that is on the
+list for the glassly audit.
+
+### Replaying the suite through the firmware code
+
+`--dump` writes every payload, the wait between them and a label per case;
+`patches/host/scene_replay_host.c` pushes that stream through the real
+`scene.c` on the host, ticking the animation timer through each wait, and
+reports rejected messages, every tween's start/end/frames and how many ticks it
+got before the next message, and any slot still animating when the next case
+starts.
+
+```bash
+bun shapes-suite.ts --dump /tmp/suite.bin
+cd ../patches/host
+cc -std=c11 -O1 -Wall -Wno-unused-function -I.. -o /tmp/scene_replay scene_replay_host.c
+/tmp/scene_replay /tmp/suite.bin
+```
 
 ## Requires the custom firmware
 
