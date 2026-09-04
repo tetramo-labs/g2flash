@@ -16,6 +16,7 @@
   "scripts": {
     "detect": "bun detect-cfw.ts",
     "bench": "bun video-bench.ts",
-    "shapes": "bun shapes-demo.ts"
+    "shapes": "bun shapes-demo.ts",
+    "suite": "bun shapes-suite.ts"
   }
 }
