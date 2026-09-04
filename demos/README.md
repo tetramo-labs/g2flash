@@ -14,6 +14,11 @@ G2 glasses over Bluetooth and show off the [custom firmware](../) built by
   retained scene (mode 17) and lets the firmware animate it: eased glides and
   tweens of geometry, color and stroke width, driven by one small message per
   transition. Needs the `glassly-cfw` build (`shapes16 scene17 anim18`).
+- **`shapes-suite.ts`** — the glassly example-miniapp shapes test suite (every
+  `render()` shape element plus the transition contract, 43 cases) run straight
+  against the glasses. The phone's render pipeline and its mode-17 scene encoder
+  are ported into the script, so it prints the same pass/fail verdicts as the
+  miniapp's tester page, plus per-case ack and render timings.
 
 They depend on [`g2-kit`](https://github.com/jimrandomh/g2-kit-unofficial) (a
 reverse-engineered BLE library for the G2), pulled directly from GitHub — see
@@ -77,6 +82,25 @@ Useful environment variables:
 Sweep `G2_WINDOW` (e.g. `1`, `2`, `4`) to see how much the ack round-trip is
 costing — higher windows overlap the next frame's BLE transfer with the current
 frame's on-device processing.
+
+## Shapes test suite
+
+```bash
+bun shapes-suite.ts                    # every case
+bun shapes-suite.ts rect animation     # by group
+bun shapes-suite.ts anim-glide         # by id
+bun shapes-suite.ts --list             # ids and groups, no connection
+G2_DRY_RUN=1 bun shapes-suite.ts       # host pipeline only, no glasses
+G2_HOLD_SCALE=0.5 G2_OUT=results.json bun shapes-suite.ts
+```
+
+Each case renders its frames in order (one mode-17 patch per frame, awaited
+until the glasses ack it and its transitions have played), then judges the last
+frame's `dropped` / `degraded` report against the case's expectation for a
+576×288 canvas that draws every shape and animates. `G2_OUT` writes the
+per-case results as JSON. The verdicts come from the ported phone-side logic;
+what the panel actually shows is yours to eyeball, which is why the holds are
+there (`G2_HOLD_SCALE=0` skips them).
 
 ## Requires the custom firmware
 
