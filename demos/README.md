@@ -19,6 +19,11 @@ G2 glasses over Bluetooth and show off the [custom firmware](../) built by
   against the glasses. The phone's render pipeline and its mode-17 scene encoder
   are ported into the script, so it prints the same pass/fail verdicts as the
   miniapp's tester page, plus per-case ack and render timings.
+- **`bad-apple-tests.ts`** — the example miniapp's three Bad Apple tests
+  (`--text`, `--bitmap`, `--shapes`): the same clip played the three ways a
+  miniapp can animate, sent as what the phone puts on the air for each — the
+  raster path for the text wall and the image element, mode-17 tweens for the
+  rects — with per-mode wire bytes, achieved framerate and skipped frames.
 
 They depend on [`g2-kit`](https://github.com/jimrandomh/g2-kit-unofficial) (a
 reverse-engineered BLE library for the G2), pulled directly from GitHub — see
@@ -135,8 +140,36 @@ cc -std=c11 -O1 -Wall -Wno-unused-function -I.. -o /tmp/scene_replay scene_repla
 /tmp/scene_replay /tmp/suite.bin
 ```
 
+## Bad Apple tests
+
+```bash
+bun bad-apple-tests.ts                       # text, bitmap, shapes in turn
+bun bad-apple-tests.ts --shapes              # one mode (or several, in order)
+bun bad-apple-tests.ts --shapes --loops 3    # play the clip three times
+bun bad-apple-tests.ts --frames 100 --fps 15 # shorter, faster
+bun bad-apple-tests.ts --dry-run             # decode + encode + report, no glasses
+bun bad-apple-tests.ts --trace               # per-frame wire bytes and ack times
+bun bad-apple-tests.ts --gif other.gif       # another grayscale GIF
+```
+
+The clip is `bad_apple_quarter.gif` sampled exactly as the miniapp's
+`scripts/generate-bad-apple.ts` samples it (156×80, 1-bit, 10 fps, 300
+frames), so it is the miniapp's clip. Each mode mirrors how the phone delivers
+that miniapp render on the CFW:
+
+| Mode | The miniapp sends | On the air |
+|------|-------------------|------------|
+| `--text` | one `font:"mono"` text element of ▀ ▄ █ half-blocks, 78×40 cells | the phone rasterizes mono text outside mode 14's ASCII range, so a mode-6 keyframe then mode-3 bounding-box deltas |
+| `--bitmap` | one 156×80 4bpp BMP image element per frame (~9 KB base64) | a full-canvas tile misses the 64 KiB texture cache, so the same raster path at finer pixels |
+| `--shapes` | ≤80 filled rects with stable ids and a one-frame linear transition | mode-17 patches: new rects SET, moved rects TWEEN, vanished rects DELETE; the glasses animate the silhouette |
+
+Every mode plays by the clock and skips the frames the ack cadence cannot keep
+up with, as the miniapp's player does, so the achieved framerate and the
+skipped count are the measurement. The summary also shows the bytes the
+miniapp would push across the phone bridge per frame, next to the wire bytes.
+
 ## Requires the custom firmware
 
-`video-bench.ts` uses display modes that only exist in the CFW; against stock
-firmware it won't render. Build and flash the firmware first (see the
+`video-bench.ts` and `bad-apple-tests.ts` use display modes that only exist in
+the CFW; against stock firmware they won't render. Build and flash the firmware first (see the
 [top-level README](../README.md)), then confirm with `detect-cfw.ts`.
