@@ -18,6 +18,10 @@
     "bench": "bun video-bench.ts",
     "shapes": "bun shapes-demo.ts",
     "suite": "bun shapes-suite.ts",
-    "bad-apple": "bun bad-apple-tests.ts"
+    "bad-apple": "bun bad-apple-tests.ts",
+    "vectors": "bun vector-suite.ts",
+    "test:vectors": "python3 ../patches/host/run_vector_tests.py",
+    "bad-apple:svg": "bun vector-suite.ts --bad-apple",
+    "prepare:bad-apple": "bun prepare-bad-apple.ts"
   }
 }

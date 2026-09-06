@@ -142,6 +142,51 @@ cc -std=c11 -O1 -Wall -Wno-unused-function -I.. -o /tmp/scene_replay scene_repla
 
 ## Bad Apple tests
 
+For revision-21 filled SVG paths and animated rotation, use:
+
+```sh
+bun run test:vectors                         # offline C + TS + video/pixel suite
+bun vector-suite.ts --device                 # direct BLE visual suite
+bun vector-suite.ts --bad-apple --device      # vector video, clocked at 10 fps
+bun vector-suite.ts --bad-apple --svg-out /tmp/bad-apple-svg
+```
+
+The smooth version uses the [Alstroemeria Records YouTube upload](https://www.youtube.com/watch?v=i41KoE0iMYU)
+(downloaded at 1444×1080), traced with Potrace at 576×432. To prepare it,
+install `yt-dlp`, `ffmpeg` and `potrace`, then run from `demos`:
+
+```sh
+mkdir -p .cache/bad-apple
+yt-dlp --ignore-config --no-playlist -f 'bv*[height<=1080]+ba/b[height<=1080]' --merge-output-format mp4 --write-info-json -o '.cache/bad-apple/source.%(ext)s' 'https://www.youtube.com/watch?v=i41KoE0iMYU'
+bun prepare-bad-apple.ts
+bun vector-suite.ts --bad-apple --device
+```
+
+Preparation checks every Bézier path with the actual firmware C compiler.
+Complex frames are split into tiles to fit 512 edges per path, keeping the
+576×432 sampling and the original 4:3 proportions. All tiles replace the scene
+atomically. The default is 300 frames at 10 fps; preparation accepts `--frames`,
+`--fps`, `--input` and `--potrace`. A locally built Potrace at
+`.cache/potrace/bin/potrace` is also detected. Downloads and generated assets
+stay in the ignored `.cache` directory.
+
+`--bad-apple` prefers `.cache/bad-apple/smooth/video.json` when present.
+`--svg-video FILE` selects a prepared video explicitly; `--gif bad_apple_quarter.gif`
+selects the original bitmap contour version. The offline test suite always tests
+the original fixtures and also replays the prepared smooth video when present.
+The first 300 smooth frames use at most 5 paths and 1,156 total compiled edges;
+payloads average 1,471 bytes (95th percentile 2,785, maximum 3,641).
+
+`vector-suite.ts` is offline unless `--device` is supplied. It gates on
+`EVENCFW/21`, and uses the existing g2-kit connection configuration. No mobile
+app is involved. Lease acquire, renew and release include a basic-settings
+read so the firmware sends a reply; a lease control field alone is silent.
+The video consists of filled compound contours, including
+holes, instead of tracked rectangles. See
+[`patches/VECTOR_PROTOCOL.md`](../patches/VECTOR_PROTOCOL.md) for the binary
+contract, limits, host replay, and expected visual checks. Device ACKs alone
+do not verify pixels. The existing three-mode benchmark below is unchanged.
+
 ```bash
 bun bad-apple-tests.ts                       # text, bitmap, shapes in turn
 bun bad-apple-tests.ts --shapes              # one mode (or several, in order)

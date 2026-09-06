@@ -17,6 +17,9 @@
 
 /* ---- stand-ins for the parts of the CFW blob we are not testing ------------ */
 #include "cfw_context.h"
+#undef FW_MS_TICK
+static uint32_t g_now;
+#define FW_MS_TICK g_now
 #include "debug.h"
 #include "texture_cache.h"
 #include "malloc.h"
@@ -40,15 +43,21 @@ static void rl_add(cfw_rectlist *rl, uint32_t l, uint32_t t, uint32_t w, uint32_
         rl->r[rl->n].w = (uint16_t)w; rl->r[rl->n].h = (uint16_t)h; rl->n++;
     }
 }
-static void *cfw_heap13_malloc(uint32_t size) { return (g_fail_frame_alloc && size == IMAGE_BYTES) ? 0 : malloc(size); }
+static int g_alloc_fail_after=-1, g_alloc_live;
+static void *cfw_heap13_malloc(uint32_t size) {
+    if ((g_fail_frame_alloc && size == IMAGE_BYTES) || g_alloc_fail_after==0) return 0;
+    if (g_alloc_fail_after>0)g_alloc_fail_after--;
+    void *p=malloc(size);if(p)g_alloc_live++;return p;
+}
 static uint8_t *cfw_shadow_buffer(uint8_t *state) { return state ? g_container_shadow : 0; }
 static void present_shadow(uint8_t *state, uint32_t w, uint32_t h, cfw_rectlist *rl) {
     (void)state; (void)w; (void)h; g_presented_shadow++; if (rl) rl->direct_submitted = 1;
 }
-static void cfw_heap13_free(void *p) { free(p); }
+static void cfw_heap13_free(void *p) { if(p)g_alloc_live--;free(p); }
 static int  stub_timer_start(uint32_t h, uint32_t ms) { (void)h; (void)ms; g_timer_started++; return 0; }
 static int  stub_timer_stop(uint32_t h) { (void)h; g_timer_stopped++; return 0; }
-static uint32_t stub_timer_new(void *cb, uint32_t t, void *a, void *attr) { (void)cb; (void)t; (void)a; (void)attr; return 0x1234; }
+static int g_fail_timer;
+static uint32_t stub_timer_new(void *cb, uint32_t t, void *a, void *attr) { (void)cb; (void)t; (void)a; (void)attr; return g_fail_timer?0:0x1234; }
 static void stub_gate_wait(void) { g_gate_waits++; }
 static void stub_gate_signal(void) { g_gate_signals++; }
 #define FW_TIMER_START stub_timer_start
@@ -327,6 +336,7 @@ static void test_scene(const char *dir) {
     CHECK(g_presented_shadow == 1 && pixel_at(g_container_shadow, 300, 100) == 15);
     CHECK(cfw_scene_dispatch(&g_ctx, 0, 17, fb, sizeof fb, 1, &rl) == -1);   /* no shadow either */
     g_fail_frame_alloc = 0;
+    cfw_scene_release(&g_ctx);
 }
 
 /* Inline-text records: variable length in mode 16, stored per slot in the scene. */

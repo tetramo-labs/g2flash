@@ -75,6 +75,21 @@ The capability string advertises these as `shapes16 scene17 anim18`; inline text
 records are implied by contract revision 19 (the capability response must fit one
 BLE frame, so no token was added).
 
+Revision 21 adds retained compound SVG paths (mode-17 op 8) and duration-based
+rotation of geometric shapes and paths (op 9). Paths support nonzero/even-odd
+fills with holes, quadratic/cubic curves, and the existing move/scale/color
+tweens. Rotation uses fractional unwrapped angles and an independent animation
+channel, so shapes can move and rotate concurrently. The wire contract accepts
+compiled paths, not XML; text/image rotation and path morphing are not included.
+See [the protocol and test instructions](patches/VECTOR_PROTOCOL.md).
+
+Run the complete offline suite with
+`python3 patches/host/run_vector_tests.py --out /tmp/g2-vector-tests`.
+It tests the firmware C under sanitizers and replays the standalone shape and
+Bad Apple SVG payloads before any mobile integration. After installing revision
+21 on the glasses, `cd demos && bun vector-suite.ts --device` runs the visual
+suite; add `--bad-apple` for the vector video demo.
+
 Revision 20 adds an ANCS relay. On iOS the stock firmware already reads the
 phone's notifications through the Apple Notification Center Service (the right
 lens subscribes; the phone app itself never can) but only tells the app which

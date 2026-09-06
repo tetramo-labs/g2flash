@@ -355,7 +355,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 }
 
 // Capability string "EVENCFW/<ver> <space-separated feature tokens>":
-//   EVENCFW/20 -> magic prefix + contract version (detect: starts-with "EVENCFW/")
+//   EVENCFW/21 -> magic prefix + contract version (detect: starts-with "EVENCFW/")
 //   imgz       -> zlib (DEFLATE) compressed image payloads
 //   rle        -> compact run-length encoded delta rows
 //   wakelease  -> fail-open Faceclaw ownership of idle wakes / local Even AI
@@ -377,7 +377,9 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 //   response must stay under one frame, ~150 caps chars, or the glasses stop
 //   answering. Only stock and this CFW exist, so the phone gates on scene17.
 //   Revision 20 adds the ANCS relay on sid-0x09 fields 105/106, again without
-//   a token; the phone gates it on the revision number.)
+//   a token; the phone gates it on the revision number. Revision 21 adds
+//   scene ops 8 (compiled filled paths) and 9 (duration-based rotation),
+//   also gated by revision; see VECTOR_PROTOCOL.md.)
 //
 // The string is a normal rodata literal now that build.py emits/relocates .rodata
 // (earlier this had to be spelled out byte-by-byte to avoid a rodata section).
@@ -385,7 +387,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "EVENCFW/20 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes16 scene17 anim18";
+        static const char caps[] = "EVENCFW/21 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes16 scene17 anim18";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);
