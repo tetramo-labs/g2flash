@@ -4,6 +4,7 @@
 #include "malloc.h"
 #include "shapes.h"
 #include "scene.h"
+#include "vector.c"
 
 /* ---- Retained scene ----------------------------------------------------------
  *
@@ -24,6 +25,13 @@
  *                                                            bit 8 = color, bit 9 = width
  *     [6][slot]                                      FREEZE  stop, keep the current value
  *     [7][slot]                                      FINISH  stop, jump to the end value
+ *     [8][slot][visible][color][fillrule][x:i16][y:i16][scaleQ8:u16][len:u16][path...]
+ *                                                    SET_PATH (revision 21)
+ *     [9][slot][angleQ8:i32][pivotX:i16][pivotY:i16][durationMs:u16][curve x4]
+ *                                                    ROTATE (revision 21)
+ *   Path grammar, limits, atomic replacement and rotation semantics are in
+ *   VECTOR_PROTOCOL.md. Ops 8/9 require a concrete slot. A path is filled,
+ *   with p0/p1 = translation and p2 = uniform Q8 scale for GLIDE/TWEEN.
  *   slot 255 addresses every slot for ops 1, 2, 3, 4, 6 and 7.
  *   A glide on a slot that is already gliding composes: the remaining motion
  *   plus the new delta becomes one fresh eased move. A SET clears its slot's
@@ -58,6 +66,8 @@
 #define CFW_SCENE_OP_TWEEN   5u
 #define CFW_SCENE_OP_FREEZE  6u
 #define CFW_SCENE_OP_FINISH  7u
+#define CFW_SCENE_OP_PATH    8u
+#define CFW_SCENE_OP_ROTATE  9u
 #define CFW_SCENE_ALL_SLOTS  255u
 
 #define CFW_TWEEN_COLOR_BIT  0x100u
@@ -138,6 +148,11 @@ static uint8_t *cfw_scene_frame(cfw_scene *sc) {
     return sc->fb;
 }
 
+static void cfw_slot_clear(cfw_slot *sl) {
+    if (sl->path) cfw_heap13_free(sl->path);
+    bzero((uint8_t *)sl, sizeof(*sl));
+}
+
 /* Stop pacing frames. Safe from any thread, including the timer callback. */
 static void cfw_scene_stop(customCfwContext *ctx) {
     cfw_scene *sc = cfw_scene_peek(ctx);
@@ -154,6 +169,8 @@ static void cfw_scene_release(customCfwContext *ctx) {
     ctx->scene = 0;
     sc->magic = 0;
     if (sc->fb) cfw_heap13_free(sc->fb);
+    for (uint32_t i=0;i<sc->slot_hi;i++) cfw_slot_clear(&sc->slots[i]);
+    if (sc->vector_work) cfw_heap13_free(sc->vector_work);
     cfw_heap13_free(sc);
 }
 
@@ -172,7 +189,11 @@ static void cfw_scene_render(cfw_scene *sc, uint8_t *fb, cfw_rectlist *rl) {
         s.width = sl->width;
         for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) s.p[k] = sl->p[k];
         s.text = sc->text[i];
-        cfw_shape_draw(&r, &s, rl);
+        if (sl->path && sc->vector_work)
+            cv_path_draw(&r, sc->vector_work, sl->path, sl->p, &sl->rotation, sl->color);
+        else if (sc->vector_work)
+            cv_shape_draw(&r, sc->vector_work, &s, &sl->rotation, rl);
+        else cfw_shape_draw(&r, &s, rl);
     }
     rl_add(rl, 0, 0, IMAGE_W, IMAGE_H);
 }
@@ -199,11 +220,27 @@ static void cfw_slot_snap_end(cfw_slot *sl) {
     sl->frame = 0;
 }
 
+static void cfw_rotation_advance(cfw_rotation *t, uint32_t now) {
+    if (!t->duration) return;
+    uint32_t elapsed=now-t->started;
+    if (elapsed>=t->duration) {t->angle=t->to;t->duration=0;return;}
+    uint32_t progress=cfw_ease_progress(elapsed*32768u/t->duration,t->curve);
+    t->angle=cfw_lerp_q15(t->from,t->to,progress);
+}
+
+static void cfw_slot_finish(cfw_slot *sl) {
+    if(sl->frames)cfw_slot_snap_end(sl);
+    if(sl->rotation.duration){sl->rotation.angle=sl->rotation.to;sl->rotation.duration=0;}
+}
+
 /* Advance every animating slot by one frame. Returns 1 while any is still moving. */
 static int cfw_scene_advance(cfw_scene *sc) {
     int moving = 0;
+    uint32_t now=FW_MS_TICK;
     for (uint32_t i = 0; i < sc->slot_hi && i < CFW_SCENE_SLOTS; i++) {
         cfw_slot *sl = &sc->slots[i];
+        cfw_rotation_advance(&sl->rotation, now);
+        if (sl->rotation.duration) moving=1;
         if (sl->type == CFW_SHAPE_NONE || sl->frames == 0) continue;
         uint32_t frame = (uint32_t)sl->frame + 1u;
         if (frame >= sl->frames) {
@@ -250,6 +287,7 @@ static void cfw_slot_animate(cfw_slot *sl, const int16_t *to, uint8_t color_to,
 static void cfw_slot_glide(cfw_slot *sl, int32_t dx, int32_t dy, uint8_t frames, const uint8_t *curve) {
     uint8_t xm, ym;
     cfw_shape_masks(sl->type, &xm, &ym);
+    if (sl->type==CFW_SHAPE_PATH) {xm=1;ym=2;}
     int16_t to[CFW_SHAPE_PARAMS];
     for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) {
         /* compose with an in-flight glide: continue from the current value toward
@@ -267,6 +305,8 @@ static void cfw_slot_glide(cfw_slot *sl, int32_t dx, int32_t dy, uint8_t frames,
 static void cfw_slot_freeze(cfw_slot *sl) {
     sl->frames = 0;
     sl->frame = 0;
+    cfw_rotation_advance(&sl->rotation, FW_MS_TICK);
+    sl->rotation.duration=0;
 }
 
 /* --- mode 17 ---------------------------------------------------------------------- */
@@ -282,6 +322,18 @@ static uint32_t cfw_scene_record_len(const uint8_t *p, uint32_t avail) {
     if (avail < 2u) return 0;
     uint32_t op = p[0], slot = p[1], need;
     switch (op) {
+    case CFW_SCENE_OP_PATH:
+        if(avail<13 || p[4]>1 || p[3]>15 || (p[2]&~1u) || rd16(p+9)>2048) return 0;
+        need=13u+rd16(p+11);
+        if(need==13 || need>13+CFW_PATH_MAX_BYTES || slot==255) return 0;
+        break;
+    case CFW_SCENE_OP_ROTATE: {
+        if(avail<16 || slot==255) return 0;
+        int32_t angle=(int32_t)rd32(p+2);
+        /* Bound differences so lerp and all trig arithmetic stay defined. */
+        if(angle < -360*256*100 || angle > 360*256*100) return 0;
+        need=16;break;
+    }
     case CFW_SCENE_OP_SET: {
         uint32_t rec = cfw_shape_record_len(p + 2, avail - 2u);
         if (rec == 0) return 0;
@@ -318,7 +370,7 @@ static void cfw_scene_apply_one(cfw_scene *sc, cfw_slot *sl, const uint8_t *p) {
     uint32_t op = p[0];
     switch (op) {
     case CFW_SCENE_OP_DELETE:
-        bzero((uint8_t *)sl, sizeof(*sl));
+        cfw_slot_clear(sl);
         break;
     case CFW_SCENE_OP_SHOW:
         if (p[2]) sl->flags |= CFW_SHAPE_FLAG_VISIBLE;
@@ -350,8 +402,18 @@ static void cfw_scene_apply_one(cfw_scene *sc, cfw_slot *sl, const uint8_t *p) {
         cfw_slot_freeze(sl);
         break;
     case CFW_SCENE_OP_FINISH:
-        if (sl->frames) cfw_slot_snap_end(sl);
+        cfw_slot_finish(sl);
         break;
+    case CFW_SCENE_OP_ROTATE: {
+        cfw_rotation *t=&sl->rotation;
+        cfw_rotation_advance(t,FW_MS_TICK);
+        t->from=t->angle;t->to=(int32_t)rd32(p+2);
+        t->px=(int16_t)rd16(p+6);t->py=(int16_t)rd16(p+8);
+        t->duration=rd16(p+10);t->started=FW_MS_TICK;
+        for(uint32_t k=0;k<4;k++)t->curve[k]=p[12+k];
+        if(!t->duration)t->angle=t->to;
+        break;
+    }
     default:
         break;
     }
@@ -364,7 +426,7 @@ static void cfw_scene_apply(cfw_scene *sc, const uint8_t *p) {
         cfw_slot *sl = &sc->slots[slot];
         cfw_shape s;
         cfw_shape_decode(p + 2, &s);
-        bzero((uint8_t *)sl, sizeof(*sl));
+        cfw_slot_clear(sl);
         sl->type = s.type;
         sl->flags = s.flags;
         sl->color = s.color;
@@ -385,24 +447,29 @@ static void cfw_scene_apply(cfw_scene *sc, const uint8_t *p) {
 
 static int cfw_scene_any_animating(const cfw_scene *sc) {
     for (uint32_t i = 0; i < sc->slot_hi && i < CFW_SCENE_SLOTS; i++)
-        if (sc->slots[i].type != CFW_SHAPE_NONE && sc->slots[i].frames) return 1;
+        if (sc->slots[i].type != CFW_SHAPE_NONE && (sc->slots[i].frames || sc->slots[i].rotation.duration)) return 1;
     return 0;
 }
 
 /* Make sure the frame timer exists and is armed. EvenHub task only (creates
  * the osTimer lazily; it is deleted by mode 11 cleanup). Animation needs the
  * CFW-owned frame: without it the slots keep their end values instead. */
-static void cfw_scene_arm(customCfwContext *ctx, cfw_scene *sc) {
+/* Keep the PC-relative scene_tick address near its caller: this clang's
+ * Thumb MOVW/MOVT assembler rejects large negative local-symbol addends. */
+static __attribute__((always_inline)) inline void cfw_scene_arm(customCfwContext *ctx, cfw_scene *sc) {
     if (!cfw_scene_any_animating(sc)) { sc->anim_active = 0; return; }
     if (cfw_scene_frame(sc) == 0) {
         for (uint32_t i = 0; i < sc->slot_hi && i < CFW_SCENE_SLOTS; i++)
-            if (sc->slots[i].frames) cfw_slot_snap_end(&sc->slots[i]);
+            cfw_slot_finish(&sc->slots[i]);
         sc->anim_active = 0;
         return;
     }
     if (ctx->scene_timer == 0)
         ctx->scene_timer = FW_TIMER_NEW((void *)&scene_tick, 0, ctx, 0);
-    if (ctx->scene_timer == 0) { sc->anim_active = 0; return; }
+    if (ctx->scene_timer == 0) {
+        for(uint32_t i=0;i<sc->slot_hi;i++)cfw_slot_finish(&sc->slots[i]);
+        sc->anim_active = 0; return;
+    }
     sc->anim_active = 1;
     FW_TIMER_START(ctx->scene_timer, sc->period_ms);
 }
@@ -438,10 +505,58 @@ static int cfw_scene_patch(customCfwContext *ctx, uint8_t *state,
     }
     cfw_scene *sc = cfw_scene_get(ctx);
     if (sc == 0) return -1;
+    /* Stage all new paths, simulating slot types/counts to validate dependencies
+     * and the final resource budget. Failure never mutates the active scene.
+     * One SET_PATH per slot per message keeps staging bounded to 128 entries. */
+    cfw_path *staged[CFW_SCENE_SLOTS];
+    uint16_t counts[CFW_SCENE_SLOTS];
+    uint8_t types[CFW_SCENE_SLOTS];
+    for(uint32_t i=0;i<CFW_SCENE_SLOTS;i++) {
+        staged[i]=0;
+        counts[i]=(flags&CFW_SCENE_FLAG_CLEAR)?0:(sc->slots[i].path?sc->slots[i].path->count:0);
+        types[i]=(flags&CFW_SCENE_FLAG_CLEAR)?0:sc->slots[i].type;
+    }
+    uint32_t staged_edges=0;
+    pos=2;
+    while(pos<srclen) {
+        const uint8_t *p=src+pos;uint32_t op=p[0],slot=p[1];
+        if(op==CFW_SCENE_OP_PATH || op==CFW_SCENE_OP_ROTATE) {
+            if(!sc->vector_work)sc->vector_work=(cfw_vector_work *)cfw_heap13_malloc(sizeof(cfw_vector_work));
+            if(!sc->vector_work)goto fail;
+        }
+        if(op==CFW_SCENE_OP_PATH) {
+            if(staged[slot])goto fail;
+            int n=cv_compile(sc->vector_work,p+13,rd16(p+11));
+            if(n<0 || staged_edges+(uint32_t)n>CFW_PATH_SCENE_EDGES)goto fail;
+            cfw_path *path=(cfw_path *)cfw_heap13_malloc(sizeof(cfw_path)+(uint32_t)n*sizeof(cfw_edge));
+            if(!path)goto fail;
+            path->count=(uint16_t)n;path->rule=p[4];path->pad=0;
+            for(int i=0;i<n;i++)path->edges[i]=sc->vector_work->edges[i];
+            staged[slot]=path;counts[slot]=(uint16_t)n;types[slot]=CFW_SHAPE_PATH;
+            staged_edges+=(uint32_t)n;
+        } else if(op==CFW_SCENE_OP_SET) {types[slot]=p[2];counts[slot]=0;}
+        else if(op==CFW_SCENE_OP_DELETE) {
+            if(slot==255)for(uint32_t i=0;i<CFW_SCENE_SLOTS;i++){types[i]=0;counts[i]=0;}
+            else {types[slot]=0;counts[slot]=0;}
+        } else if(op==CFW_SCENE_OP_ROTATE) {
+            if(!types[slot] || (types[slot]>CFW_SHAPE_PIE && types[slot]!=CFW_SHAPE_PATH))goto fail;
+        } else if(op==CFW_SCENE_OP_TWEEN && types[slot]==CFW_SHAPE_PATH) {
+            uint32_t mask=rd16(p+2);
+            if(mask&~0x107u)goto fail;
+            const uint8_t *v=p+9;
+            for(uint32_t k=0;k<10;k++)if(mask&(1u<<k)) {
+                int32_t value=(int16_t)rd16(v);v+=2;
+                if((k==2 && (value<0 || value>2048)) || (k==8 && (value<0 || value>15)))goto fail;
+            }
+        }
+        pos+=cfw_scene_record_len(p,srclen-pos);
+    }
+    {uint32_t total=0;for(uint32_t i=0;i<CFW_SCENE_SLOTS;i++)total+=counts[i];
+     if(total>CFW_PATH_SCENE_EDGES)goto fail;}
     sc->bg = bg;
     if (flags & CFW_SCENE_FLAG_CLEAR) {
         for (uint32_t i = 0; i < sc->slot_hi && i < CFW_SCENE_SLOTS; i++)
-            bzero((uint8_t *)&sc->slots[i], sizeof(cfw_slot));
+            cfw_slot_clear(&sc->slots[i]);
         sc->slot_hi = 0;
     }
     if (flags & CFW_SCENE_FLAG_FREEZE)
@@ -449,12 +564,21 @@ static int cfw_scene_patch(customCfwContext *ctx, uint8_t *state,
     pos = 2;
     while (pos < srclen) {
         uint32_t n = cfw_scene_record_len(src + pos, srclen - pos);
-        cfw_scene_apply(sc, src + pos);
+        if(src[pos]==CFW_SCENE_OP_PATH) {
+            uint32_t slot=src[pos+1];cfw_slot *sl=&sc->slots[slot];
+            cfw_slot_clear(sl);sl->path=staged[slot];staged[slot]=0;
+            sl->type=CFW_SHAPE_PATH;sl->flags=src[pos+2];sl->color=src[pos+3];
+            sl->p[0]=(int16_t)rd16(src+pos+5);sl->p[1]=(int16_t)rd16(src+pos+7);sl->p[2]=(int16_t)rd16(src+pos+9);
+            if(slot+1>sc->slot_hi)sc->slot_hi=slot+1;
+        } else cfw_scene_apply(sc, src + pos);
         pos += n;
     }
     cfw_scene_arm(ctx, sc);
     if (flags & CFW_SCENE_FLAG_COMMIT) return cfw_scene_present(ctx, state, sc, rl);
     return 0;
+fail:
+    for(uint32_t i=0;i<CFW_SCENE_SLOTS;i++)if(staged[i])cfw_heap13_free(staged[i]);
+    return -1;
 }
 
 static int cfw_scene_control(customCfwContext *ctx, uint8_t *state,
@@ -483,7 +607,7 @@ static int cfw_scene_control(customCfwContext *ctx, uint8_t *state,
         if (sc == 0 || !cfw_fb_lease_active()) return -1;
         cfw_scene_stop(ctx);
         for (uint32_t i = 0; i < sc->slot_hi && i < CFW_SCENE_SLOTS; i++)
-            if (sc->slots[i].frames) cfw_slot_snap_end(&sc->slots[i]);
+            cfw_slot_finish(&sc->slots[i]);
         return cfw_scene_present(ctx, state, sc, rl);
     default:
         return -1;

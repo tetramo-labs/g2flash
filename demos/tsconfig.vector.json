@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["vector-protocol.ts", "vector-protocol.test.ts", "vector-cases.ts", "bad-apple-vector.ts", "vector-suite.ts", "svg-video.ts", "svg-video.test.ts", "prepare-bad-apple.ts", "omggif.d.ts"]
+}

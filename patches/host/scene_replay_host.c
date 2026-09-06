@@ -20,6 +20,9 @@
 #include <stdlib.h>
 
 #include "cfw_context.h"
+#undef FW_MS_TICK
+static uint32_t g_now;
+#define FW_MS_TICK g_now
 #include "debug.h"
 #include "texture_cache.h"
 #include "malloc.h"
@@ -168,6 +171,7 @@ static void run_wait(cfw_scene *sc, uint32_t ms) {
         uint8_t before[CFW_SCENE_SLOTS];
         for (uint32_t i = 0; i < CFW_SCENE_SLOTS; i++) before[i] = sc->slots[i].frames;
         g_ctx.direct_pending = 0;
+        g_now += sc->period_ms;
         scene_tick(&g_ctx);
         if (sc->fb) cfw_scene_render_if_due(&g_ctx, sc->fb);
         for (uint32_t i = 0; i < CFW_SCENE_SLOTS; i++) {

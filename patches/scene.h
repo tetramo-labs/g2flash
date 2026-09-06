@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include "cfw_context.h"
 #include "debug.h"
+#include "vector.h"
 
 /* ---- Retained shape scene + glide/tween animation (modes 17 and 18) --------
  *
@@ -34,6 +35,8 @@ typedef struct {
     uint8_t  color_from, color_to;
     uint8_t  width_from, width_to;
     uint8_t  pad[2];
+    cfw_rotation rotation;
+    cfw_path *path;         /* immutable compiled contour, owned by this slot */
 } cfw_slot;
 
 typedef struct cfw_scene_s {
@@ -44,6 +47,7 @@ typedef struct cfw_scene_s {
     uint8_t  anim_active;   /* at least one slot has frames left */
     volatile uint8_t render_due; /* display_copy_hook must re-render before copying */
     uint8_t  period_ms;     /* animation frame period */
+    cfw_vector_work *vector_work; /* lazy, serialized by the display gate */
     cfw_slot slots[CFW_SCENE_SLOTS];
     uint8_t  text[CFW_SCENE_SLOTS][CFW_SCENE_TEXT_BYTES];  /* TEXT_INLINE bytes per slot */
 } cfw_scene;
