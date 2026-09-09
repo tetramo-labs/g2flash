@@ -8,7 +8,7 @@
 
 /* ---- Retained scene ----------------------------------------------------------
  *
- * Wire format (mode 17):  [17][flags:u8][bg:u8][record]...
+ * Wire format (mode 37):  [37][flags:u8][bg:u8][record]...
  *   flags bit 0 COMMIT  render every visible slot into the scene frame and present it
  *         bit 1 CLEAR   empty all slots first
  *         bit 2 FREEZE  stop every running animation at its current value first
@@ -38,7 +38,7 @@
  *   animation. Curves are CSS cubic-bezier(x1,y1,x2,y2) control points in
  *   1/255 units; frames <= 1 applies the change immediately.
  *
- * Mode 18:  [18][sub]...
+ * Mode 38:  [38][sub]...
  *   0            freeze all animations
  *   1 [ms:u8]    frame period 10..250 ms (default 33)
  *   2            release the scene (slots + frame buffer)
@@ -51,7 +51,7 @@
  * so the timer thread itself never rasterizes. The scene never touches EvenHub
  * container memory, so a torn-down layout cannot be corrupted by a late frame.
  * If heap 13 cannot spare the 150 KiB frame, a COMMIT still draws the scene
- * into the container shadow on the EvenHub task (as safe as mode 16) and only
+ * into the container shadow on the EvenHub task (as safe as mode 36) and only
  * animation is refused, so shapes keep working under memory pressure. */
 
 #define CFW_SCENE_FLAG_COMMIT 0x01u
@@ -161,7 +161,7 @@ static void cfw_scene_stop(customCfwContext *ctx) {
 }
 
 /* Free everything. Only from contexts that own the display gate (mode 11
- * cleanup, mode 18), so no queued frame can still point at the buffer. */
+ * cleanup, mode 38), so no queued frame can still point at the buffer. */
 static void cfw_scene_release(customCfwContext *ctx) {
     cfw_scene_stop(ctx);
     cfw_scene *sc = cfw_scene_peek(ctx);
@@ -309,7 +309,7 @@ static void cfw_slot_freeze(cfw_slot *sl) {
     sl->rotation.duration=0;
 }
 
-/* --- mode 17 ---------------------------------------------------------------------- */
+/* --- mode 37 ---------------------------------------------------------------------- */
 
 static uint32_t cfw_popcount10(uint32_t v) {
     uint32_t n = 0;
@@ -618,8 +618,8 @@ static int cfw_scene_dispatch(customCfwContext *ctx, uint8_t *state, uint8_t mod
                               const uint8_t *src, uint32_t srclen,
                               int present, cfw_rectlist *rl) {
     if (!present || ctx == 0) return -1;       /* not composable inside mode 8 */
-    if (mode == 17) return cfw_scene_patch(ctx, state, src, srclen, rl);
-    if (mode == 18) return cfw_scene_control(ctx, state, src, srclen, rl);
+    if (mode == 37) return cfw_scene_patch(ctx, state, src, srclen, rl);
+    if (mode == 38) return cfw_scene_control(ctx, state, src, srclen, rl);
     return -1;
 }
 

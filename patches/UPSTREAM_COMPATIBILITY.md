@@ -1,62 +1,38 @@
-# Revision 23: combined graphics and upstream sensors
+# Revision 24: separate local packet numbers
 
-This revision merges upstream main through `1507192` with the revision-21
-graphics/SVG/rotation and revision-20 ANCS extensions. All existing capability
-tokens remain in the 151-byte `EVENCFW/23` string. Check revision >= 23 for the
-combined sensor contract; do not require upstream's `ringbat17` token.
-Adding that token and the battery field to the settings response would exceed
-the size already known to break settings reads (see commit `8746d55`). The
-settings response still includes the full microphone status. On the master lens,
-a successful response is followed by a separate battery notification.
-Clients that gate ring support only on `ringbat17` must also accept revision 23
-or discover it by the `RB` report.
+Local extension numbers are increased by 20. Upstream sensor numbers are
+unchanged. There are no length-based overloads or aliases.
 
-## Shared image-handler modes
-
-| Packet | Meaning |
-| --- | --- |
-| `[16,count,records...]` with complete records | Existing immediate shapes, including inline text; unchanged inside mode-8 batches |
-| `[16,0]` | ALS query; formerly an empty shape list, still writes no shadow pixels, now skips display presentation |
-| `[16,1,...]`, 2–9 bytes | ALS passive start, including upstream's omitted-parameter defaults |
-| `[16,2]` | ALS passive stop |
-| `[17,0]`, exactly 2 bytes | Read-only ring-battery query |
-| `[17,flags,bg,ops...]`, at least 3 bytes | Existing retained scene, including compiled paths and rotation |
-| `[18,op,...]` | Existing animation control |
-| `[19,op,...]` | ALS alias using the same payload as upstream mode 16; preferred for new clients |
-
-ALS packets do not acquire the display gate. Complete shape records and scenes
-still do. A one-record inline-text shape needs at least 15 bytes including the
-mode/count header, so it cannot be confused with a short ALS command. Empty
-scene updates always have their background byte, so they cannot become battery
-queries. Mode 11 still releases graphics, texture, microphone, ANCS, compass,
-and passive ALS session resources.
-
-## Settings channel fields
-
-The field number alone is insufficient to distinguish the two sensor/ANCS
-extensions; check direction and the versioned body prefix before decoding.
-
-| Direction / field | Body prefix | Meaning |
+| Extension | Old | Revision 24 |
 | --- | --- | --- |
-| Glasses → phone, 105 | `AN`, version 1 | Existing ANCS relay records and status |
-| Glasses → phone, 105 | `AL`, version 1 | 24-byte ambient-light report (see `als_sensor.c`) |
-| Phone → glasses, 106 | `AN`, version 1 | Existing ANCS control |
-| Glasses → phone, 106 | `RB`, version 1 | 5-byte ring-battery report (see `../docs/ring-battery.md`) |
+| Immediate shapes | Mode 16, `shapes16` | Mode 36, `shapes36` |
+| Retained scenes, SVG paths and rotation | Mode 17, `scene17` | Mode 37, `scene37` |
+| Animation control | Mode 18, `anim18` | Mode 38, `anim38` |
+| ANCS reports/status, glasses → phone | Settings field 105 | Settings field 125 |
+| ANCS control, phone → glasses | Settings field 106 | Settings field 126 |
 
-## Compass
+Only the outer packet/field numbers and capability tokens change. Shape type
+numbers (including inline text type 17), scene operation numbers (including
+path op 8 and rotation op 9), record formats and ANCS `AN` version-1 bodies
+remain unchanged. Protobuf bytes tags for ANCS are now `EA 07` (field 125)
+and `F2 07` (field 126).
 
-Mode 10 preserves `[10,0]` stop and `[10,1]` stock-default start, and adds
-`[10,2,interval:u16LE,min-change:u16LE]`. The interval is clamped to 50–2000 ms.
-The new sensor-hub hooks preserve the stock UI event and forward the heading
-with sample-matched diagnostics on sid 8, field 100 (`CM`, version 1).
-The former CFW display-forwarding hook is removed so it cannot duplicate the
-new notification. Stock navigation and ANCS hooks remain installed.
+Clients must migrate to the new numbers and check `EVENCFW/24` or later with
+`shapes36 scene37 anim38`. All repository demos and host replay consumers use
+the new numbers. External clients such as Glassly must update their encoders
+and ANCS listeners too; old packet numbers are not graphics/ANCS aliases.
 
-## Offline validation
+Upstream keeps mode 16 for ALS, mode 17 for ring battery, settings field 105
+for `AL` reports, and field 106 for `RB` reports. Mode 19 is no longer an ALS
+alias. Mode 10 compass controls/diagnostics and mode 11 session cleanup remain.
+
+The settings capability string stays at its proven 151-byte length and includes
+the full microphone status in the reply. Ring-battery status follows in a
+separate notification to avoid exceeding the known-working BLE packet size
+(see commit `8746d55`). Detect ring support by revision 24 or the `RB` report;
+the upstream `ringbat17` token remains omitted to preserve the size limit.
 
 Run `python3 patches/host/run_vector_tests.py --out /tmp/g2-vector-tests` for
-sanitized ANCS, routing, settings-size, ring-cache, compass, shape/scene, SVG,
-rotation, TypeScript, wire-fixture, video-replay, and ARM compilation checks.
-`./build_cfw.sh --skip-venv` regenerates the patch set for comparison, applies
-the committed JSON to stock firmware, and verifies the pinned output hash.
-These checks do not exercise physical sensors or BLE on glasses.
+sanitized C tests, TypeScript fixtures, video replay, and ARM compilation.
+`./build_cfw.sh --skip-venv` checks patch reproducibility and the image hash.
+Physical sensors and BLE still require device validation.

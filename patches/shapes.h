@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include "debug.h"
 
-/* ---- Shape records (modes 16 and 17) ---------------------------------------
+/* ---- Shape records (modes 36 and 37) ---------------------------------------
  *
  * One record is 20 bytes: [type:u8][flags:u8][color:u8][width:u8][p0..p7:int16 LE].
  * Geometry parameters are signed pixel coordinates in the 640x480 panel space

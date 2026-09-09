@@ -257,7 +257,7 @@ static void test_scene(const char *dir) {
     uint32_t len = (uint32_t)(p - msg);
 
     cfw_rectlist rl = { 0 };
-    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 17, msg, len, 1, &rl) == 0);
+    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, msg, len, 1, &rl) == 0);
     cfw_scene *sc = cfw_scene_peek(&g_ctx);
     CHECK(sc != 0 && sc->fb != 0);
     CHECK(sc->slot_hi == 6 && sc->anim_active == 1 && g_timer_started == 1 && g_presented == 1);
@@ -266,10 +266,10 @@ static void test_scene(const char *dir) {
     write_pgm(dir, "scene_f00", sc->fb);
 
     /* rejected: inside mode 8, unknown op, truncated tween, SET on slot 255 */
-    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 17, msg, len, 0, &rl) == -1);
-    { uint8_t bad[] = { 0, 0, 9, 0 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 17, bad, sizeof bad, 1, &rl) == -1); }
-    { uint8_t bad[] = { 0, 0, CFW_SCENE_OP_TWEEN, 1, 0x04, 0x01, 20, 0, 0, 255, 255, 1 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 17, bad, sizeof bad, 1, &rl) == -1); }
-    { uint8_t bad[2 + 2 + CFW_SHAPE_RECORD_BYTES] = { 0, 0, CFW_SCENE_OP_SET, 255, CFW_SHAPE_LINE, 1 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 17, bad, sizeof bad, 1, &rl) == -1); }
+    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, msg, len, 0, &rl) == -1);
+    { uint8_t bad[] = { 0, 0, 9, 0 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, bad, sizeof bad, 1, &rl) == -1); }
+    { uint8_t bad[] = { 0, 0, CFW_SCENE_OP_TWEEN, 1, 0x04, 0x01, 20, 0, 0, 255, 255, 1 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, bad, sizeof bad, 1, &rl) == -1); }
+    { uint8_t bad[2 + 2 + CFW_SHAPE_RECORD_BYTES] = { 0, 0, CFW_SCENE_OP_SET, 255, CFW_SHAPE_LINE, 1 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, bad, sizeof bad, 1, &rl) == -1); }
     CHECK(sc->slot_hi == 6);                              /* nothing above was applied */
 
     /* drive the timer callback like the RTOS would; the display hook renders */
@@ -302,21 +302,21 @@ static void test_scene(const char *dir) {
     /* composed glide: a second glide while moving continues to old target + delta */
     uint8_t g[] = { 0, 2, CFW_SCENE_OP_GLIDE, 0, (uint8_t)-100, 0xff, 0, 0, 10, 0, 0, 255, 255,
                     CFW_SCENE_OP_GLIDE, 0, (uint8_t)-100, 0xff, 0, 0, 10, 0, 0, 255, 255 };
-    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 17, g, sizeof g, 1, &rl) == 0);
+    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, g, sizeof g, 1, &rl) == 0);
     CHECK(sc->slots[0].to[0] == 300 && sc->slots[0].frames == 10);
-    /* mode 18: finish snaps to the end and presents; release frees */
-    { uint8_t m[] = { 3 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 18, m, 1, 1, &rl) == 0); }
+    /* mode 38: finish snaps to the end and presents; release frees */
+    { uint8_t m[] = { 3 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 38, m, 1, 1, &rl) == 0); }
     CHECK(sc->slots[0].p[0] == 300 && sc->slots[0].frames == 0);
-    { uint8_t m[] = { 1, 5 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 18, m, 2, 1, &rl) == 0); CHECK(sc->period_ms == CFW_SCENE_MIN_PERIOD); }
+    { uint8_t m[] = { 1, 5 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 38, m, 2, 1, &rl) == 0); CHECK(sc->period_ms == CFW_SCENE_MIN_PERIOD); }
     /* lease lapse stops the timer from inside the tick without touching memory */
     { uint8_t gl[] = { 0, 2, CFW_SCENE_OP_GLIDE, 0, 50, 0, 0, 0, 10, 0, 0, 255, 255 };
-      CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 17, gl, sizeof gl, 1, &rl) == 0); }
+      CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, gl, sizeof gl, 1, &rl) == 0); }
     g_lease = 0;
     int stops = g_timer_stopped;
     scene_tick(&g_ctx);
     CHECK(sc->anim_active == 0 && g_timer_stopped == stops + 1);
     g_lease = 1;
-    { uint8_t m[] = { 2 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 18, m, 1, 1, &rl) == 0); }
+    { uint8_t m[] = { 2 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 38, m, 1, 1, &rl) == 0); }
     CHECK(g_ctx.scene == 0);
 
     /* no room for the CFW frame: a commit still draws into the container shadow
@@ -329,17 +329,17 @@ static void test_scene(const char *dir) {
     uint8_t *q = fb + 4 + CFW_SHAPE_RECORD_BYTES;
     q[0] = CFW_SCENE_OP_GLIDE; q[1] = 0; put16(q + 2, 200); put16(q + 4, 0); q[6] = 10; q[7] = 0; q[8] = 0; q[9] = 255; q[10] = 255;
     int started = g_timer_started;
-    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 17, fb, sizeof fb, 1, &rl) == 0);
+    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, fb, sizeof fb, 1, &rl) == 0);
     sc = cfw_scene_peek(&g_ctx);
     CHECK(sc && sc->fb == 0 && sc->anim_active == 0 && g_timer_started == started);
     CHECK(sc->slots[0].p[0] == 300 && sc->slots[0].frames == 0);
     CHECK(g_presented_shadow == 1 && pixel_at(g_container_shadow, 300, 100) == 15);
-    CHECK(cfw_scene_dispatch(&g_ctx, 0, 17, fb, sizeof fb, 1, &rl) == -1);   /* no shadow either */
+    CHECK(cfw_scene_dispatch(&g_ctx, 0, 37, fb, sizeof fb, 1, &rl) == -1);   /* no shadow either */
     g_fail_frame_alloc = 0;
     cfw_scene_release(&g_ctx);
 }
 
-/* Inline-text records: variable length in mode 16, stored per slot in the scene. */
+/* Inline-text records: variable length in mode 36, stored per slot in the scene. */
 static void test_inline_text(void) {
     /* [count][rect 20 B][inline 13+5 B] */
     uint8_t msg[1 + 20 + 13 + 5];
@@ -372,7 +372,7 @@ static void test_inline_text(void) {
     for (int i = 0; i < 18; i++) sm[4 + i] = t[i];
     uint8_t *g = sm + 22;
     g[0] = CFW_SCENE_OP_GLIDE; g[1] = 3; put16(g + 2, 100); put16(g + 4, 0); g[6] = 4; g[7] = 0; g[8] = 0; g[9] = 255; g[10] = 255;
-    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 17, sm, sizeof sm, 1, &rl) == 0);
+    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, sm, sizeof sm, 1, &rl) == 0);
     cfw_scene *sc = cfw_scene_peek(&g_ctx);
     CHECK(sc && sc->slots[3].type == CFW_SHAPE_TEXT_INLINE && sc->slots[3].p[4] == 5 && sc->slots[3].frames == 4);
     CHECK(sc->text[3][0] == 'h' && sc->text[3][4] == 'o');
@@ -382,8 +382,8 @@ static void test_inline_text(void) {
     CHECK(pixel_at(sc->fb, 112, 20) == 15 && pixel_at(sc->fb, 12, 20) == 0);
     /* a SET with a bad length is rejected before anything is applied */
     sm[4 + 12] = 200;
-    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 17, sm, sizeof sm, 1, &rl) == -1);
-    { uint8_t m[] = { 2 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 18, m, 1, 1, &rl) == 0); }
+    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, sm, sizeof sm, 1, &rl) == -1);
+    { uint8_t m[] = { 2 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 38, m, 1, 1, &rl) == 0); }
 }
 
 int main(int argc, char **argv) {

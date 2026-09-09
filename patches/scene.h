@@ -4,14 +4,14 @@
 #include "debug.h"
 #include "vector.h"
 
-/* ---- Retained shape scene + glide/tween animation (modes 17 and 18) --------
+/* ---- Retained shape scene + glide/tween animation (modes 37 and 18) --------
  *
  * The scene is a flat, phone-owned list of shape slots (paint order = slot
  * order) that the firmware can re-render on its own timer, so a phone can
  * start a glide or a tween with one small message instead of streaming frames.
  * It renders into a CFW-owned full-panel 4bpp buffer (never into the EvenHub
  * container's memory), which is then presented through the same direct-
- * framebuffer job as every other custom mode. See the mode 17/18 paragraphs at
+ * framebuffer job as every other custom mode. See the mode 37/38 paragraphs at
  * the top of zlib_glue.c for the wire format. */
 
 #define CFW_SCENE_SLOTS          128u

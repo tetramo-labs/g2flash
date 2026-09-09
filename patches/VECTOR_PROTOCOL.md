@@ -1,9 +1,10 @@
 # Revision 21: filled paths and rotation
 
-`EVENCFW/21` extends mode 17 with operations 8 and 9. Existing modes, shape
-records, slot indices and operations keep their formats. The capability string
-keeps its existing length; check its numeric revision before sending either new
-operation. Modes 17/18 remain standalone messages, not mode-8 batch children.
+Revision 24 moves the graphics transport from modes 16/17/18 to **36/37/38**
+to avoid upstream sensor commands. The path and rotation operations introduced
+in revision 21 keep their record formats and opcodes (8 and 9). Check
+`EVENCFW/24` or later and the `scene37` capability before sending these packets.
+Modes 37/38 remain standalone messages, not mode-8 batch children.
 
 The glasses render retained vector paths themselves. The wire input is compiled
 geometry, not SVG XML. `demos/vector-protocol.ts` converts the supported SVG path
@@ -11,7 +12,7 @@ syntax into this format, independently of Glassly/mobile.
 
 ## SET_PATH (operation 8)
 
-Inside `[17][scene flags][background][operations...]`:
+Inside `[37][scene flags][background][operations...]`:
 
 ```text
 [8:u8][slot:u8][visible:u8][color:u8][fill-rule:u8]
@@ -58,7 +59,7 @@ Limits, enforced before applying the scene:
 SET_PATH replaces that slot, stops its old animations and resets its rotation
 to zero. Geometry is immutable until another SET_PATH replaces it. The path is
 represented internally as shape type 18; type 18 cannot be created by an
-ordinary SET or immediate mode-16 shape record.
+ordinary SET or immediate mode-36 shape record.
 
 Paths use the existing MOVE/GLIDE, SHOW, DELETE, FREEZE and FINISH operations.
 For their legacy TWEEN operation, only these mask bits are valid:
@@ -124,7 +125,7 @@ Successful replacement happens under the display gate. The previous path is
 freed only when the replacement is ready; the display task cannot see an
 incomplete upload. This also permits CLEAR plus replacements in one message.
 
-DELETE, CLEAR, SET replacement, SET_PATH replacement, mode 18 release and mode
+DELETE, CLEAR, SET replacement, SET_PATH replacement, mode 38 release and mode
 11 cleanup free the paths they supersede. Scratch workspace is about 10.5 KiB,
 allocated on first path/rotation use, and freed on scene release. The extended
 slot table plus inline text uses about 28 KiB; the framebuffer remains 150 KiB.
@@ -133,7 +134,7 @@ allocations and any texture cache. Actual available heap is hardware-dependent.
 
 Framebuffer lease expiry/release stops animation and rejects new scene writes;
 as with the previous retained scene implementation, scene storage is kept
-until explicit mode 18 release or mode 11 cleanup. Lease callbacks do not own
+until explicit mode 38 release or mode 11 cleanup. Lease callbacks do not own
 the display gate and must not free buffers the display task may still use.
 Clients should release the scene before releasing the lease, and replay the
 scene after reconnecting rather than assuming an old baseline.

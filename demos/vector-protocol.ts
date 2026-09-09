@@ -17,7 +17,7 @@ export function framebufferLease(op: 5 | 6, magic: number): Uint8Array {
   return Uint8Array.from([8, 2, 16, ...id, 0x22, 2, 8, 1, 0xaa, 6, 6, 70, 67, 1, op, 1, 0]);
 }
 export const scene = (ops: number[][], clear = false, bg = 0) =>
-  Uint8Array.from([17, clear ? 3 : 1, integer(bg, 0, 15, "background"), ...ops.flat()]);
+  Uint8Array.from([37, clear ? 3 : 1, integer(bg, 0, 15, "background"), ...ops.flat()]);
 export function shape(slot: number, type: number, params: number[], color = 15, width = 1): number[] {
   if (params.length > 8) throw new Error("At most eight shape parameters");
   return [0, slotId(slot), integer(type, 1, 13, "geometric shape"), 1,

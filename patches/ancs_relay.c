@@ -40,7 +40,7 @@
  * consumer needs that same task, so nothing here sends from a hook: the hooks
  * append fixed-format records to a lock-free single-producer / single-consumer
  * byte ring and, when the drain timer is parked, start it. ancs_relay_tick (RTOS
- * timer thread) pops a few records per tick, wraps each as a field-105 notify
+ * timer thread) pops a few records per tick, wraps each as a field-125 notify
  * and re-arms itself while the ring is non-empty. The ring is allocated on the
  * first ENABLE and kept for the life of the context, so no producer can race a
  * free; the control-point write used by ACTION posts a WSF message, which is
@@ -48,14 +48,14 @@
  * event-loop thread).
  *
  * CONTRACT (sid 0x09 G2SettingPackage; unknown fields to stock decoders).
- *   field 106 (phone -> glasses) ['A','N', ver=1, op, <payload>]
+ *   field 126 (phone -> glasses) ['A','N', ver=1, op, <payload>]
  *     op 1 ENABLE   arm or renew the fail-open ANCS_LEASE_MS relay lease; answers STATUS
  *     op 2 DISABLE  clear the lease and discard queued records; answers STATUS
  *     op 3 QUERY    answer STATUS
  *     op 4 ACTION   [uid LE32][action u8]  perform the notification's positive (0)
  *                   or negative (1) action through the ANCS control point
  *     op 5 RENEW    renew a live lease silently
- *   field 105 (glasses -> phone) ['A','N', ver=1, kind, <body>], one record each:
+ *   field 125 (glasses -> phone) ['A','N', ver=1, kind, <body>], one record each:
  *     kind 1 SOURCE [event_id][event_flags][category_id][category_count][uid LE32]
  *                   as received on the Notification Source (event 0 added,
  *                   1 modified, 2 removed; flags bit0 silent, bit1 important,
@@ -76,7 +76,7 @@
  */
 
 #define ANCS_PROTO_VERSION 1u
-#define ANCS_RELAY_FIELD   105u
+#define ANCS_RELAY_FIELD   125u
 
 #define ANCS_OP_ENABLE   1u
 #define ANCS_OP_DISABLE  2u
@@ -92,7 +92,7 @@
 #define ANCS_LEASE_MS    90000u
 #define ANCS_RING_BYTES  4096u                 /* power of two; divides the 16-bit index space */
 #define ANCS_RING_MASK   (ANCS_RING_BYTES - 1u)
-#define ANCS_MSG_MAX     150u                  /* field-105 payload bytes, 'A','N' header included */
+#define ANCS_MSG_MAX     150u                  /* field-125 payload bytes, 'A','N' header included */
 #define ANCS_HDR_LEN     4u                    /* 'A','N', version, kind */
 #define ANCS_ATTR_FIXED  (ANCS_HDR_LEN + 9u)   /* uid, attr id, total, offset */
 #define ANCS_APP_FIXED   (ANCS_HDR_LEN + 5u)   /* total, offset, id_len */
@@ -160,7 +160,7 @@ static void ancs_kick(customCfwContext *ctx) {
     if (ANCS_TIMER_START(ctx->ancs_timer, ANCS_TICK_MS) != 0) ctx->ancs_idle = 1;
 }
 
-/* Append one record [len][epoch][payload...]: the field-105 payload is
+/* Append one record [len][epoch][payload...]: the field-125 payload is
  * hdr+body. Space is checked before any byte is written and the head index is
  * published last, so the consumer only ever sees complete records. */
 static int ancs_push(customCfwContext *ctx, const uint8_t *hdr, uint32_t hdr_len,
@@ -273,10 +273,10 @@ __attribute__((used, noinline)) int ancs_hook_app(void) {
 /* ---- consumer (RTOS timer thread) ----------------------------------------- */
 
 static void ancs_frame_notify(uint8_t *p, uint32_t body_len) {
-    /* G2SettingPackage{commandId=3, magic=0, field 105}; tag 842 = ca 06. */
+    /* G2SettingPackage{commandId=3, magic=0, field 125}; tag 1002 = ea 07. */
     p[0] = 0x08; p[1] = 0x03;
     p[2] = 0x10; p[3] = 0x00;
-    p[4] = 0xCA; p[5] = 0x06; p[6] = (uint8_t)body_len;
+    p[4] = 0xEA; p[5] = 0x07; p[6] = (uint8_t)body_len;
 }
 
 void ancs_relay_tick(void *arg) {
@@ -367,7 +367,7 @@ static void ancs_perform_action(uint32_t uid, uint32_t action) {
     FW_ANCC_PERFORM((uint16_t *)(uintptr_t)hdl, uid, action);
 }
 
-/* Parse a field-106 record. Called from faceclaw_scan_settings_control for each
+/* Parse a field-126 record. Called from faceclaw_scan_settings_control for each
  * sid-0x09 settings WRITE, before the stock decoder runs. */
 void ancs_apply_control(const uint8_t *data, uint32_t len) {
     if (len < 4u || data[0] != 'A' || data[1] != 'N' ||

@@ -2,7 +2,7 @@
 #include "cfw_context.h"
 
 /*
- * als_sensor.c — ambient light sensor access for the G2 CFW (short mode 16 or mode 19).
+ * als_sensor.c — ambient light sensor access for the G2 CFW (image-handler mode 16).
  *
  * WHAT THE STOCK FIRMWARE DOES (2.2.9.22, recovered from the [sensor_als] driver)
  *
@@ -71,10 +71,6 @@
  *   [16][2]                 PASSIVE STOP: restore the stock handler; close the ALS if
  *                           the CFW opened it and auto-brightness is still off. If
  *                           auto-brightness is on the stock machine simply resumes.
- *
- * Revision 23 also accepts mode 19 with the same payload. Legacy mode 16 sensor
- * packets are limited to 2..9 bytes so complete shape records retain their mode.
- * Field 105 is shared with ANCS: dispatch by the 'AL' versus 'AN' body prefix.
  *
  * Reports are G2SettingPackage{commandId=3, magic=0, field 105} on sid 0x09 (the
  * same shape as the field-102 wake event and field-104 mic status), from the
@@ -303,7 +299,7 @@ static int als_passive_start(customCfwContext *ctx, uint8_t flags, uint32_t inte
     return 0;
 }
 
-/* Short mode-16 / mode-19 entry, called from image_dispatch on both lenses. */
+/* Mode-16 entry, called from image_dispatch on both lenses with src[0] == 16. */
 int als_control(const uint8_t *src, uint32_t srclen) {
     if (srclen < 2) return -1;
     customCfwContext *ctx = getCustomCfwContext();

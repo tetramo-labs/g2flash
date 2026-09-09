@@ -10,19 +10,19 @@ G2 glasses over Bluetooth and show off the [custom firmware](../) built by
 - **`video-bench.ts`** — streams a video (as a GIF) to the lens as fast as it
   acks and benchmarks the achieved framerate / byte count. Streams via the
   CFW's compressed packed-4bpp keyframe and delta modes.
-- **`shapes-demo.ts`** — draws a vector test card with mode 16, then builds a
-  retained scene (mode 17) and lets the firmware animate it: eased glides and
+- **`shapes-demo.ts`** — draws a vector test card with mode 36, then builds a
+  retained scene (mode 37) and lets the firmware animate it: eased glides and
   tweens of geometry, color and stroke width, driven by one small message per
-  transition. Needs the `glassly-cfw` build (`shapes16 scene17 anim18`).
+  transition. Needs the `glassly-cfw` build (`shapes36 scene37 anim38`).
 - **`shapes-suite.ts`** — the glassly example-miniapp shapes test suite (every
   `render()` shape element plus the transition contract, 43 cases) run straight
-  against the glasses. The phone's render pipeline and its mode-17 scene encoder
+  against the glasses. The phone's render pipeline and its mode-37 scene encoder
   are ported into the script, so it prints the same pass/fail verdicts as the
   miniapp's tester page, plus per-case ack and render timings.
 - **`bad-apple-tests.ts`** — the example miniapp's three Bad Apple tests
   (`--text`, `--bitmap`, `--shapes`): the same clip played the three ways a
   miniapp can animate, sent as what the phone puts on the air for each — the
-  raster path for the text wall and the image element, mode-17 tweens for the
+  raster path for the text wall and the image element, mode-37 tweens for the
   rects — with per-mode wire bytes, achieved framerate and skipped frames.
 
 They depend on [`g2-kit`](https://github.com/jimrandomh/g2-kit-unofficial) (a
@@ -101,7 +101,7 @@ G2_TRACE=1 bun shapes-suite.ts         # per-frame op counts, bytes, ack times
 G2_HOLD_SCALE=0.5 G2_OUT=results.json bun shapes-suite.ts
 ```
 
-Each case renders its frames in order, one mode-17 patch per frame, then judges
+Each case renders its frames in order, one mode-37 patch per frame, then judges
 the last frame's `dropped` / `degraded` report against the case's expectation
 for a 576×288 canvas that draws every shape and animates. `G2_OUT` writes the
 per-case results as JSON. The verdicts come from the ported phone-side logic;
@@ -206,7 +206,7 @@ that miniapp render on the CFW:
 |------|-------------------|------------|
 | `--text` | one `font:"mono"` text element of ▀ ▄ █ half-blocks, 78×40 cells | the phone rasterizes mono text outside mode 14's ASCII range, so a mode-6 keyframe then mode-3 bounding-box deltas |
 | `--bitmap` | one 156×80 4bpp BMP image element per frame (~9 KB base64) | a full-canvas tile misses the 64 KiB texture cache, so the same raster path at finer pixels |
-| `--shapes` | ≤80 filled rects with stable ids and a one-frame linear transition | mode-17 patches: new rects SET, moved rects TWEEN, vanished rects DELETE; the glasses animate the silhouette |
+| `--shapes` | ≤80 filled rects with stable ids and a one-frame linear transition | mode-37 patches: new rects SET, moved rects TWEEN, vanished rects DELETE; the glasses animate the silhouette |
 
 Every mode plays by the clock and skips the frames the ack cadence cannot keep
 up with, as the miniapp's player does, so the achieved framerate and the

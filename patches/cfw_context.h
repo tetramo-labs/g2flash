@@ -118,12 +118,12 @@ typedef struct {
     uint32_t mic_lease_deadline;            /* FW_MS_TICK streaming-lease deadline; 0 = none */
     uint32_t mic_watchdog_timer;            /* one-shot osTimer tearing down a lapsed session */
     uint8_t  mic_notify_buf[32];            /* stable storage for the field-104 sid-0x09 notify */
-    /* --- Retained shape scene + animation (scene.c, modes 16-18). The scene
+    /* --- Retained shape scene + animation (scene.c, modes 36-38). The scene
      * body and its 640x480 frame are lazily allocated from heap 13; the frame
      * timer is created on first use and deleted by mode 11 cleanup. --- */
     struct cfw_scene_s *scene;
     uint32_t scene_timer;                   /* osTimer pacing animation frames (0 = none) */
-    /* --- ANCS relay (ancs_relay.c, sid-0x09 fields 105/106). The stock ANCC
+    /* --- ANCS relay (ancs_relay.c, sid-0x09 fields 125/126). The stock ANCC
      * profile callbacks (BLE stack task) append records to a single-producer,
      * single-consumer byte ring; ancs_relay_tick drains it from the RTOS timer
      * thread through the stock protobuf sender. The ring is allocated on the
@@ -140,7 +140,7 @@ typedef struct {
     uint8_t  ancs_pad0[3];
     uint32_t ancs_lease_deadline;           /* FW_MS_TICK deadline; 0 = relay off */
     uint32_t ancs_timer;                    /* one-shot osTimer draining the ring (0 = none) */
-    uint8_t  ancs_notify_buf[168];          /* stable storage for the field-105 sid-0x09 notify */
+    uint8_t  ancs_notify_buf[168];          /* stable storage for the field-125 sid-0x09 notify */
     uint8_t  ancs_status_buf[24];           /* stable storage for the STATUS reply (settings thread) */
     /* --- Ambient light sensor (mode 16, als_sensor.c). Passive mode redirects
      * the sensor-hub's ALS timer message to als_hub_handler through the RAM

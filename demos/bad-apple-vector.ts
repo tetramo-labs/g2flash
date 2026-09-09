@@ -49,6 +49,6 @@ export async function badAppleVectors(gifFile: string, frames = 300, svgOut?: st
   const sizes=steps.map(s=>s.payload.length).sort((a,b)=>a-b);
   console.log(`[vectors] ${count} frames; payload mean ${Math.round(sizes.reduce((a,b)=>a+b,0)/Math.max(1,count))} B, p95 ${sizes[Math.floor(count*0.95)]??0} B, max ${sizes.at(-1)??0} B`);
   console.log(`[vectors] source-width/frame-count: ${[...histogram].map(([w,n])=>`${w}/${n}`).join(", ")}`);
-  steps.push({name:"release",payload:Uint8Array.from([18,2]),waitMs:0});
+  steps.push({name:"release",payload:Uint8Array.from([38,2]),waitMs:0});
   return steps;
 }

@@ -32,14 +32,18 @@ def main():
     # Exercise the production settings wrapper and display-gate predicate without
     # compiling the unrelated Thumb-only trampolines in their translation units.
     functions = []
-    for source, name in (("settings_ext.c", "settings_send_wrapper"),
+    for source, name in (("settings_ext.c", "faceclaw_read_varint"),
+                         ("settings_ext.c", "faceclaw_scan_settings_control"),
+                         ("settings_ext.c", "settings_send_wrapper"),
                          ("zlib_glue.c", "is_shadow_message")):
         code = (ROOT / "patches" / source).read_text()
-        match = re.search(r"^(?:static )?int " + name + r"\([^;\n]*\) \{\n.*?^\}", code, re.M | re.S)
+        match = re.search(r"^(?:static )?(?:int|void) " + name + r"\([^;{]*\) \{\n.*?^\}", code, re.M | re.S)
         if not match:
             raise RuntimeError(f"Cannot find production function {name}")
         functions.append(match[0])
-    (out / "upstream_functions.inc").write_text("\n\n".join(functions) + "\n")
+    settings = (ROOT / "patches/settings_ext.c").read_text()
+    fields = re.findall(r"^#define (?:FACECLAW|MIC|ANCS)_CONTROL_FIELD .*", settings, re.M)
+    (out / "upstream_functions.inc").write_text("\n\n".join(fields + functions) + "\n")
     for test in ("ancs_relay", "upstream"):
         binary = out / f"{test}_host_test"
         run("cc", "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Wno-unused-function", *flags,

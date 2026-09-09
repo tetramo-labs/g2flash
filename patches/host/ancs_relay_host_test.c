@@ -1,7 +1,7 @@
 /*
  * Host harness for ancs_relay.c: drives the four hook wrappers and the control
  * ops with fake stock structures, runs the drain timer by hand, and checks the
- * field-105 records that reach the sender.
+ * field-125 records that reach the sender.
  *
  *   cc -std=c11 -Wall -Wextra -Wno-unused-function -I patches \
  *      -o obj/ancs_relay_host_test patches/host/ancs_relay_host_test.c && obj/ancs_relay_host_test
@@ -106,9 +106,9 @@ static int failures;
 #define CHECK(cond) do { if (!(cond)) { failures++; \
     fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
 
-static const uint8_t frame_hdr[6] = { 0x08, 0x03, 0x10, 0x00, 0xCA, 0x06 };
+static const uint8_t frame_hdr[6] = { 0x08, 0x03, 0x10, 0x00, 0xEA, 0x07 };
 
-/* Returns the field-105 payload of message i (after the 7-byte protobuf frame). */
+/* Returns the field-125 payload of message i (after the 7-byte protobuf frame). */
 static const uint8_t *payload(int i, uint32_t *len) {
     CHECK(h_memcmp(sent[i], frame_hdr, 6) == 0);
     CHECK(sent[i][6] == sent_len[i] - 7);

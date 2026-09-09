@@ -25,7 +25,7 @@ Build a CFW image for g2_2.2.9.22 with:
   (11) LE 2M support, a 7.5 ms / latency-0 fast connection profile, and persistent
       fast-mode requests so the stock 60-second slow-mode timer cannot throttle
       custom image traffic, and
-  (12) an ANCS relay (sid-0x09 fields 105/106) that retargets four `bl` sites
+  (12) an ANCS relay (sid-0x09 fields 125/126) that retargets four `bl` sites
       inside the stock ANCC profile object so the right lens forwards every iOS
       notification it receives (source event, attributes, app display name) to
       the phone; see ancs_relay.c for the contract and threading model.
