@@ -52,10 +52,10 @@ typedef int  (*pb_decode_fn)(void *stream, const void *fields, void *dest);
 #define MIC_CONTROL_FIELD 103u
 void mic_apply_control(const uint8_t *data, uint32_t len);
 unsigned mic_append_status(unsigned char *buf, unsigned len, unsigned capacity);
-/* ANCS relay (ancs_relay.c, same translation unit). Field 106 carries the
+/* ANCS relay (ancs_relay.c, same translation unit). Field 126 carries the
  * control ops (ENABLE/DISABLE/QUERY/ACTION/RENEW); relayed notification records
- * and the STATUS reply go out as field 105 notifies. */
-#define ANCS_CONTROL_FIELD 106u
+ * and the STATUS reply go out as field 125 notifies. */
+#define ANCS_CONTROL_FIELD 126u
 void ancs_apply_control(const uint8_t *data, uint32_t len);
 typedef void (*display_start_fn)(unsigned app_id, void *arg, unsigned arg_len, void *cb);
 
@@ -346,7 +346,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 }
 
 // Capability string "EVENCFW/<ver> <space-separated feature tokens>":
-//   EVENCFW/23 -> magic prefix + contract version (detect: starts-with "EVENCFW/")
+//   EVENCFW/24 -> magic prefix + contract version (detect: starts-with "EVENCFW/")
 //   imgz       -> zlib (DEFLATE) compressed image payloads
 //   rle        -> compact run-length encoded delta rows
 //   wakelease  -> fail-open Faceclaw ownership of idle wakes / local Even AI
@@ -361,17 +361,13 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 //   font15     -> mode 15 draws UTF-8 with the built-in 20 px font and kerning
 //   micctl     -> private mic-control channel (field 103 / read-back field 104)
 //   taplong11  -> source-qualified tap-then-long gesture as private event type 11
-//   shapes16   -> mode 16 rasterizes vector shape records straight into the shadow
-//   scene17    -> mode 17 retained shape scene with eased glide/tween animation
-//   anim18     -> mode 18 animation control (freeze, frame period, release, finish)
-//   (revision 19 adds TEXT_INLINE records to modes 16/17 with no token: the
-//   response must stay under one frame, ~150 caps chars, or the glasses stop
-//   answering. Only stock and this CFW exist, so the phone gates on scene17.
-//   Revision 20 adds the ANCS relay on sid-0x09 fields 105/106, again without
-//   a token; the phone gates it on the revision number. Revision 21 adds
-//   scene ops 8 (compiled filled paths) and 9 (duration-based rotation),
-//   also gated by revision; see VECTOR_PROTOCOL.md.)
-//   Revision 23 also includes ALS, ring battery and compass diagnostics.
+//   shapes36   -> mode 36 rasterizes vector shape records straight into the shadow
+//   scene37    -> mode 37 retained shape scene with eased glide/tween animation
+//   anim38     -> mode 38 animation control (freeze, frame period, release, finish)
+//   Inline text, ANCS relay, compiled paths and rotation retain their record
+//   formats from revisions 19-21; only their outer transport IDs change below.
+//   Revision 24 moves local graphics to modes 36-38 and ANCS to fields 125/126.
+//   ALS and ring battery retain upstream modes 16/17 and fields 105/106.
 //   Discover them by revision; keep this string at its proven 151-byte size.
 //
 // The string is a normal rodata literal now that build.py emits/relocates .rodata
@@ -380,7 +376,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "EVENCFW/23 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes16 scene17 anim18";
+        static const char caps[] = "EVENCFW/24 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes36 scene37 anim38";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

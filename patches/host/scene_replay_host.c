@@ -1,7 +1,7 @@
 /*
  * Replay a demos/shapes-suite.ts payload dump through scene.c on the host.
  *
- * The suite writes every mode-17/18 message it would send, the wait between
+ * The suite writes every mode-37/38 message it would send, the wait between
  * messages and a label per case (`bun shapes-suite.ts --dump suite.bin`). This
  * drives the retained-scene code exactly as the firmware would — dispatch each
  * message, then run the animation timer through the wait — and reports every

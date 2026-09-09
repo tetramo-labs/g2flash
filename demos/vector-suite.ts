@@ -8,7 +8,7 @@ import {framebufferLease, i32, u16} from "./vector-protocol";
 const args=process.argv.slice(2);
 const option=(name:string)=>{const i=args.indexOf(name);if(i<0)return undefined;const v=args[i+1];if(!v || v.startsWith("--"))throw new Error(`Missing value for ${name}`);return v;};
 if(args.includes("--help")) {
-  console.log(`Revision 21 SVG paths and rotation suite (offline by default)
+  console.log(`Revision 24 SVG paths and rotation suite (offline by default)
   bun vector-suite.ts --dump /tmp/vector-suite.bin
   bun vector-suite.ts --device                  # visual checks on glasses
   bun vector-suite.ts --bad-apple --dump /tmp/bad-apple-vector.bin
@@ -74,7 +74,7 @@ try {
   await querySettings(session,nextMagic());
   let caps=await queryCapabilities(session,nextMagic());if(!caps)caps=await queryCapabilities(session,nextMagic());
   const revision=Number(caps?.raw.match(/^EVENCFW\/(\d+)/)?.[1]??0);
-  if(revision<21)throw new Error(`Requires EVENCFW/21 or later; got ${caps?.raw??"no capability response"}`);
+  if(revision<24 || !caps?.features.has("scene37"))throw new Error(`Requires EVENCFW/24 or later with scene37; got ${caps?.raw??"no capability response"}`);
   console.log(`firmware: ${caps!.raw}`);
   heartbeat=startHeartbeat({session,nextMagic});
   const create=buildCreateStartUpPageContainer({name:`s${suffix}`,items:["."],containerId:1,captureEvents:false,magic:nextMagic(),extraContainerNames:[container.name]});
@@ -100,7 +100,7 @@ try {
   console.log(`${sent} payloads ACKed, ${skipped} video frames skipped; worst ACK ${worst.toFixed(0)} ms`);
 } finally {
   if(renew)clearInterval(renew);
-  if(acquired){await send(Uint8Array.from([18,2])).catch(()=>{});await lease(6).catch(()=>{});}
+  if(acquired){await send(Uint8Array.from([38,2])).catch(()=>{});await lease(6).catch(()=>{});}
   heartbeat?.stop();await session.close();
 }
 // Noble's macOS adapter keeps native handles alive after the lenses disconnect.

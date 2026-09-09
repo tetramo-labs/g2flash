@@ -10,12 +10,11 @@ when disconnected or the stock cache is invalid. The slave lens sends nothing.
 The implementation reads the existing cache without opening a ring connection
 or changing its reporting cadence.
 
-In this combined revision-23 build the same notification follows a successful
+In this combined revision-24 build the same notification follows a successful
 settings read. It is separate from the settings reply to stay within the known
-working BLE packet size. Feature discovery uses revision 23 or the `RB` report;
+working BLE packet size. Feature discovery uses revision 24 or the `RB` report;
 the capability string keeps the existing graphics tokens instead of adding
-upstream's `ringbat17` token. Mode-17 scenes remain unchanged because their
-packets include at least the mode, flags, and background bytes.
+upstream's `ringbat17` token. Local scene packets use mode 37 and cannot collide with upstream mode 17.
 
 ## Stock ABI evidence (G2 2.2.9.22)
 

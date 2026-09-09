@@ -22,7 +22,7 @@ Build a CFW image for g2_2.2.9.22 with:
       channel (settings fields 103/104 + the 'SM' stream frame) riding the
       already-hooked sid-0x09 settings seams -- no new patch sites; see
       mic_control.c for the contract and its hardware validation gate, and
-  (11) an ANCS relay (sid-0x09 fields 105/106) that retargets four `bl` sites
+  (11) an ANCS relay (sid-0x09 fields 125/126) that retargets four `bl` sites
       inside the stock ANCC profile object so the right lens forwards every iOS
       notification it receives (source event, attributes, app display name) to
       the phone; see ancs_relay.c for the contract and threading model.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Staged demo of the Glassly CFW's vector and text modes (image-handler modes
-// 16, 17, 18). Each stage draws its own screen, runs, blanks the panel and
+// 36, 37, 38). Each stage draws its own screen, runs, blanks the panel and
 // pauses, so what you see on the glasses maps 1:1 onto the stage names printed
 // here. Text stages use inline TEXT records: the glasses draw the string with
 // their own font, so an update is one small message and the slot can glide,
@@ -10,7 +10,7 @@
 //     G2_STAGE=3 bun shapes-demo.ts     # one stage
 //     G2_PAUSE_MS=1500 G2_LOOPS=2 bun shapes-demo.ts
 //
-// Needs the glassly-cfw firmware (capability token scene17).
+// Needs the glassly-cfw firmware (capability token scene37).
 
 import {
   G2Session,
@@ -58,9 +58,9 @@ function text(options: number, x: number, y: number, w: number, h: number, s: st
   const bytes = [...new TextEncoder().encode(s)].slice(0, 128);
   return [T.TEXT_INLINE, VISIBLE, options, 0, ...i16(x), ...i16(y), ...i16(w), ...i16(h), bytes.length, ...bytes];
 }
-// mode 16: immediate shapes into the shadow
-const immediate = (...recs: number[][]) => Uint8Array.from([16, recs.length, ...recs.flat()]);
-// mode 17: retained scene ops
+// mode 36: immediate shapes into the shadow
+const immediate = (...recs: number[][]) => Uint8Array.from([36, recs.length, ...recs.flat()]);
+// mode 37: retained scene ops
 const COMMIT = 1, CLEAR = 2;
 const SET = (slot: number, rec: number[]) => [0, slot, ...rec];
 const DELETE = (slot: number) => [1, slot];
@@ -68,9 +68,9 @@ const GLIDE = (slot: number, dx: number, dy: number, frames: number, curve: numb
 const P = (i: number) => 1 << i, COLOR = 1 << 8, WIDTH = 1 << 9;   // tween mask bits
 const TWEEN = (slot: number, mask: number, frames: number, curve: number[], ...values: number[]) =>
   [5, slot, ...u16(mask), frames, ...curve, ...values.flatMap(i16)];
-const scene = (flags: number, bg: number, ...ops: number[][]) => Uint8Array.from([17, flags, bg, ...ops.flat()]);
-// mode 18: animation control
-const animCtl = (...b: number[]) => Uint8Array.from([18, ...b]);
+const scene = (flags: number, bg: number, ...ops: number[][]) => Uint8Array.from([37, flags, bg, ...ops.flat()]);
+// mode 38: animation control
+const animCtl = (...b: number[]) => Uint8Array.from([38, ...b]);
 
 // Framebuffer lease over sid 0x09 field 101 (['F','C',1,op,nonceLo,nonceHi]);
 // commandId=2 / magicRandom keep the stock decoder happy.
@@ -88,9 +88,9 @@ const settings = await querySettings(session, nextMagic());
 if (settings) console.log(`firmware: L=${settings.leftSoftwareVersion} R=${settings.rightSoftwareVersion}`);
 let caps = await queryCapabilities(session, nextMagic());
 if (!caps) caps = await queryCapabilities(session, nextMagic());
-if (!caps || !hasFeature(caps, "scene17")) {
+if (!caps || !hasFeature(caps, "scene37")) {
   console.log(caps ? `CFW ${caps.raw}` : "no CFW capability field");
-  console.log("this demo needs the glassly-cfw build (scene17)");
+  console.log("this demo needs the glassly-cfw build (scene37)");
   await session.close();
   process.exit(1);
 }
@@ -161,8 +161,8 @@ try {
     return `${count} updates in ${secs.toFixed(2)} s = ${(count / secs).toFixed(1)}/s, worst ack ${worst.toFixed(0)} ms`;
   }
 
-  // ---- 1. shapes card (mode 16, immediate) ---------------------------------------
-  await stage("shapes card (mode 16)", async (n) => {
+  // ---- 1. shapes card (mode 36, immediate) ---------------------------------------
+  await stage("shapes card (mode 36)", async (n) => {
     await send(immediate(
       record(T.RECT, 8, 2, 8, 8, 624, 464, 16),
       text(ink(15), 40, 24, 0, 0, `stage ${n}: every shape, drawn immediately`),
@@ -180,7 +180,7 @@ try {
   });
 
   // ---- 2. inline text: many lines, gray levels, clipping --------------------------
-  await stage("inline text lines (mode 17)", async (n) => {
+  await stage("inline text lines (mode 37)", async (n) => {
     const lines = ["The glasses draw this text themselves.", "Each line is one slot with its bytes inline.", "No texture cache, no bitmaps, no re-sends."];
     await send(scene(COMMIT | CLEAR, 0,
       label(n, "inline text lines"),

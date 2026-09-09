@@ -27,7 +27,7 @@ static uint32_t rotateop(uint32_t at,uint8_t slot,int32_t angle,int px,int py,ui
 }
 static int dispatch(uint32_t len) {
     cfw_rectlist rl={0};g_ctx.direct_pending=0;
-    return cfw_scene_dispatch(&g_ctx,g_container_shadow,17,msg,len,1,&rl);
+    return cfw_scene_dispatch(&g_ctx,g_container_shadow,37,msg,len,1,&rl);
 }
 static void reset(void) {
     g_alloc_fail_after=-1;g_fail_frame_alloc=0;g_fail_timer=0;g_lease=1;

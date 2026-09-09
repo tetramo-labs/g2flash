@@ -4,7 +4,6 @@
 #include "debug.h"
 #include "shapes.h"
 #include "scene.h"
-#include "image_controls.h"
 
 /*
  * zlib (DEFLATE) image support for the G2 CFW — multi-mode load wrapper.
@@ -91,21 +90,21 @@
  *                              stock background 20 px font chain and its default
  *                              pair kerning. Bytes 1..31 adjust x by -10..20 as in
  *                              mode 14; options and clipping also match mode 14.
- *   16          -> [16][count8][shape record x count] draw vector shapes straight into
+ *   36          -> [36][count8][shape record x count] draw vector shapes straight into
  *                              the shadow: lines, (rounded) rects, circles, triangles,
  *                              quads, quadratic/cubic beziers, arcs, pie sectors, plus
  *                              cached images and text as records. 20-byte records; see
  *                              shapes.h. Composable inside mode 8.
- *   17          -> [17][flags8][bg8][scene records]... patch the retained shape scene:
+ *   37          -> [37][flags8][bg8][scene records]... patch the retained shape scene:
  *                              up to 128 slots (paint order) that the firmware keeps and
  *                              can re-render itself. Records set/delete/show/move slots,
  *                              or start eased GLIDE/TWEEN animations over N frames with a
  *                              cubic-bezier curve. Flag bit 0 renders and presents the
  *                              scene from a CFW-owned 640x480 frame (not the container
  *                              shadow). See scene.c for the record grammar.
- *   18          -> [18][sub]... animation control: 0 freeze all, 1 [ms] frame period,
+ *   38          -> [38][sub]... animation control: 0 freeze all, 1 [ms] frame period,
  *                              2 release the scene, 3 finish all and present.
- *   16 (short)  -> [16][op]... ambient light sensor (2..9 bytes; no display change; master lens
+ *   16          -> [16][op]... ambient light sensor (no display change; master lens
  *                              only, see als_sensor.c). op 0 = QUERY one report; op 1
  *                              [flags][interval16][min-delta16][heartbeat16] = PASSIVE
  *                              START: the CFW polls the OPT3001 itself and the stock
@@ -113,7 +112,6 @@
  *                              PASSIVE STOP. Reports arrive as sid-0x09 field 105.
  *   17          -> [17][0] query cached R1 battery (no display change).
  *                              Master replies on sid-0x09 field 106; see ring_battery.c.
- *   19          -> unambiguous alias for the ambient light sensor controls.
  *   anything else / too short  -> load_bmp_fast (rejects cleanly if not a BMP).
  *
  * The HIGH BIT of the mode byte is a "lenses differ" flag; most modes ignore it. For
@@ -262,12 +260,14 @@ typedef int (*compass_config_fn)(uint32_t, const uint32_t *); /* sensor-hub Func
 
 #define RLE_CHUNK 256   /* mode-3/6 inflate scratch feeding the RLE decoder (stack) */
 
-void *zwrap_alloc(void *opaque, uint32_t items, uint32_t size) {
+/* Internal callbacks stay local so clang places their PC-relative addresses
+ * within its Thumb MOVW/MOVT local-symbol relocation range. */
+static void *zwrap_alloc(void *opaque, uint32_t items, uint32_t size) {
     (void)opaque;
     return cfw_heap13_malloc(items * size);
 }
 
-void zwrap_free(void *opaque, void *ptr) {
+static void zwrap_free(void *opaque, void *ptr) {
     (void)opaque;
     cfw_heap13_free(ptr);
 }
@@ -279,7 +279,7 @@ void zwrap_free(void *opaque, void *ptr) {
  * thread — the only shared state is the singleton, guarded by magic + bounds.
  * Non-static (external linkage) so -O2 keeps it despite having no direct caller —
  * osTimerNew only ever receives it as a fn-ptr value. */
-void seq_tick(void *arg) {
+static void seq_tick(void *arg) {
     customCfwContext *ctx = (customCfwContext *)arg;
     if (ctx == 0 || ctx->magic != CFW_CTX_MAGIC) return;
     uint32_t c = ctx->seq_cursor;
@@ -326,11 +326,10 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
  * barrier so no direct-framebuffer job can still reference session-owned state. */
 static int is_shadow_message(const uint8_t *src, uint32_t srclen) {
     if (src == 0 || srclen == 0) return 0;
-    if (cfw_is_als_control(src, srclen) || cfw_is_ring_battery_control(src, srclen)) return 0;
     uint8_t mode = src[0] & 0x7fu;
     return mode == 3 || mode == 6 || mode == 8 || mode == 9 || mode == 11 ||
-           mode == 13 || mode == 14 || mode == 15 || mode == 16 || mode == 17 ||
-           mode == 18;
+           mode == 13 || mode == 14 || mode == 15 || mode == 36 || mode == 37 ||
+           mode == 38;
 }
 
 /* The image worker: static, called from image_deferred (the deferred consumer, which
@@ -528,11 +527,11 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
         return -1;
     }
 
-    if (cfw_is_ring_battery_control(src, srclen)) {
+    if (mode == 17) {
         return ring_battery_control(src, srclen);
     }
 
-    if (cfw_is_als_control(src, srclen)) {
+    if (mode == 16) {
         /* Ambient light sensor query / passive polling control (no display change).
          * Runs on both lenses; als_control itself acts only on the master lens. */
         return als_control(src, srclen);
@@ -555,7 +554,7 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
     uint32_t w = IMAGE_W;
     uint32_t h = IMAGE_H;
 
-    if (mode == 13 || mode == 14 || mode == 15 || mode == 16) {
+    if (mode == 13 || mode == 14 || mode == 15 || mode == 36) {
         uint8_t *shadow = cfw_shadow_buffer(state);
         if (shadow == 0) return -1;
         int r;
@@ -576,7 +575,7 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
         return 0;
     }
 
-    if (mode == 17 || mode == 18) {
+    if (mode == 37 || mode == 38) {
         /* Retained scene: renders into and presents its own CFW-owned frame, so
          * it is only accepted at top level (a mode-8 batch presents the shadow). */
         return cfw_scene_dispatch(getCustomCfwContext(), state, mode, src + 1, srclen - 1,

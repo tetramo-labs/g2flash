@@ -12,7 +12,7 @@
 //             images rather than glyph cells.
 //   --shapes  up to 80 filled rects per frame covering the silhouette, ids
 //             carried from frame to frame, a one-frame linear transition:
-//             mode-17 scene patches where the moving parts are TWEENs and the
+//             mode-37 scene patches where the moving parts are TWEENs and the
 //             rest is untouched, so the glasses animate the silhouette.
 //
 // Frames come from bad_apple_quarter.gif sampled exactly as the miniapp's
@@ -30,7 +30,7 @@
 //
 // Every mode plays by the clock: the frame due now goes out, and a frame the
 // link could not keep up with is skipped rather than queued, as the miniapp
-// does. Needs the glassly-cfw firmware (scene17 anim18 directfb).
+// does. Needs the glassly-cfw firmware (scene37 anim38 directfb).
 
 import {
   G2Session,
@@ -254,7 +254,7 @@ class RectTracker {
   }
 }
 
-// ---- wire: mode-17 scene patches for filled rects ------------------------------------
+// ---- wire: mode-37 scene patches for filled rects ------------------------------------
 const i16 = (v: number) => { const u = v < 0 ? v + 0x10000 : v; return [u & 0xff, (u >> 8) & 0xff]; };
 const T = { RECT_FILL: 3, CIRCLE_FILL: 5 } as const;
 const COMMIT = 0x01, CLEAR = 0x02;
@@ -277,7 +277,7 @@ const tweenRect = (slot: number, r: Rect, frames: number) =>
  * lease should not also be its first animation.
  */
 const WARM_UP = Uint8Array.from([
-  17, COMMIT | CLEAR, 0,
+  37, COMMIT | CLEAR, 0,
   0, 0, T.CIRCLE_FILL, 0, 0, 0, ...i16(0), ...i16(0), ...i16(1), ...i16(0), ...i16(0), ...i16(0), ...i16(0), ...i16(0),
   5, 0, 0x01, 0x00, 2, 0, 0, 255, 255, ...i16(1),
 ]);
@@ -331,7 +331,7 @@ class RectScene {
     this.cooling = released;
     const flags = this.first ? COMMIT | CLEAR : COMMIT;
     this.first = false;
-    return { payload: Uint8Array.from([17, flags, 0, ...ops]), sets, tweens, deletes };
+    return { payload: Uint8Array.from([37, flags, 0, ...ops]), sets, tweens, deletes };
   }
 }
 
@@ -490,7 +490,7 @@ async function openLink(): Promise<Link> {
   if (settings) console.log(`firmware: L=${settings.leftSoftwareVersion} R=${settings.rightSoftwareVersion}`);
   let caps = await queryCapabilities(session, nextMagic());
   if (!caps) caps = await queryCapabilities(session, nextMagic());
-  const needed = ["directfb", ...(MODES.includes("shapes") ? ["scene17", "anim18"] : [])];
+  const needed = ["directfb", ...(MODES.includes("shapes") ? ["scene37", "anim38"] : [])];
   if (!caps || !needed.every((f) => hasFeature(caps!, f))) {
     console.log(caps ? `CFW ${caps.raw}` : "no CFW capability field");
     console.log(`these tests need the glassly-cfw build (${needed.join(" ")})`);
@@ -616,7 +616,7 @@ async function runShapes(clip: Clip, link: Link | null): Promise<Stats> {
     // ~20 B per rect element across the bridge: id, box, style, transition.
     return { payload: encoded.payload, bridge: rects.length * 20, detail: `${rects.length} rects: ${encoded.sets} set, ${encoded.tweens} tween, ${encoded.deletes} delete` };
   });
-  return { ...stats, note: `≤${MAX_SHAPE_RECTS} filled rects with stable ids and a ${transitionMs} ms linear transition: mode-17 patches, moving parts as TWEENs` };
+  return { ...stats, note: `≤${MAX_SHAPE_RECTS} filled rects with stable ids and a ${transitionMs} ms linear transition: mode-37 patches, moving parts as TWEENs` };
 }
 
 // ---- main ------------------------------------------------------------------------------------
@@ -634,7 +634,7 @@ try {
     results.push(stats);
     if (link) {
       // Blank between tests, and hand the panel back from the scene to the shadow.
-      if (mode === "shapes") await link.send(Uint8Array.from([18, 2]));
+      if (mode === "shapes") await link.send(Uint8Array.from([38, 2]));
       else await link.send(keyframe(new Uint8Array(PANEL_W * PANEL_H)));
       await sleep(800);
     }

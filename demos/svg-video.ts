@@ -51,7 +51,7 @@ export function svgVideoSteps(video: SvgVideo, limit = video.frames.length): Vec
     return {name: `svg-video-${i}`, payload, waitMs: 1000 / video.fps, probes: frame.probes,
       snapshot: [30, 60, 120, 180, 240, 299].includes(i)};
   });
-  steps.push({name: "release", payload: Uint8Array.from([18, 2]), waitMs: 0});
+  steps.push({name: "release", payload: Uint8Array.from([38, 2]), waitMs: 0});
   return steps;
 }
 

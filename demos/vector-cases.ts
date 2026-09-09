@@ -47,6 +47,6 @@ export function vectorCases(): VectorStep[] {
   add("all-geometric-shapes-initial", geometries.map(g=>shape(g.type-1,g.type,g.v,15,3)),true,700);
   add("all-geometric-shapes-rotate-halfway", geometries.map(g=>rotate(g.type-1,360,g.px,g.py,2500)),false,900);
   add("all-geometric-shapes-rotate-finish", [],false,1800);
-  steps.push({name:"release",payload:Uint8Array.from([18,2]),waitMs:0});
+  steps.push({name:"release",payload:Uint8Array.from([38,2]),waitMs:0});
   return steps;
 }

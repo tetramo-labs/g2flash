@@ -579,7 +579,7 @@ static void cfw_shape_draw(const cfw_raster *r, const cfw_shape *s, cfw_rectlist
     }
 }
 
-/* Mode 16 payload: [count:u8][record x count]. Draws straight into the shadow,
+/* Mode 36 payload: [count:u8][record x count]. Draws straight into the shadow,
  * so it composes with the other shadow modes inside a mode-8 batch. The whole
  * list is validated before any pixel is written. */
 static int cfw_shapes_immediate(uint8_t *shadow, uint32_t stride,

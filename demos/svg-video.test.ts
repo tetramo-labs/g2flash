@@ -16,11 +16,11 @@ test("video tile replacement clears old tiles and keeps frame timing", () => {
     {paths: []},
   ]};
   const steps = svgVideoSteps(video);
-  expect([...steps[0].payload.slice(0, 3)]).toEqual([17, 3, 0]);
+  expect([...steps[0].payload.slice(0, 3)]).toEqual([37, 3, 0]);
   expect([...steps[0].payload.slice(8, 12)]).toEqual([32, 0, 24, 0]);
-  expect([...steps[1].payload]).toEqual([17, 3, 0]);
+  expect([...steps[1].payload]).toEqual([37, 3, 0]);
   expect(steps[0].waitMs).toBe(200);
-  expect([...steps[2].payload]).toEqual([18, 2]);
+  expect([...steps[2].payload]).toEqual([38, 2]);
   expect(svgVideoSteps(video, 1).length).toBe(2);
   expect(() => svgVideoSteps({...video, fps: 0})).toThrow();
   expect(() => svgVideoSteps({...video, frames: [{paths: [{d: "M0 0Z", x: 0, y: 0, edges: 513}]}]})).toThrow();

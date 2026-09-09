@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <string.h>
 #include "cfw_context.h"
-#include "image_controls.h"
 #include "protobuf.c"
 
 static customCfwContext ctx;
@@ -49,6 +48,13 @@ static unsigned mic_append_status(unsigned char *buf, unsigned len, unsigned cap
     const unsigned char mic[21] = {'M', 'C', 1};
     return pb_append_bytes_field(buf, len, capacity, 104, mic, sizeof(mic));
 }
+static int ancs_controls;
+static void faceclaw_apply_control(const uint8_t *p, uint32_t n) { (void)p; (void)n; }
+static void mic_apply_control(const uint8_t *p, uint32_t n) { (void)p; (void)n; }
+static void ancs_apply_control(const uint8_t *p, uint32_t n) {
+    assert(n == 4 && p[0] == 'A' && p[1] == 'N' && p[2] == 1 && p[3] == 3);
+    ancs_controls++;
+}
 #include "upstream_functions.inc"
 
 #define COMPASS_HOST_TEST 1
@@ -70,35 +76,27 @@ static int compass_side(void) { return side; }
 #include "compass.c"
 
 static void routing(void) {
-    uint8_t p[64] = {16, 0};
-    assert(!cfw_is_als_control(0, 2) && !cfw_is_als_control(p, 1));
-    for (int op = 0; op <= 2; op++) {
-        p[1] = op;
-        assert(cfw_is_als_control(p, 2) && !is_shadow_message(p, 2));
+    uint8_t p[64] = {0};
+    assert(!is_shadow_message(0, 2) && !is_shadow_message(p, 0));
+    /* Upstream sensor modes never become graphics, regardless of length. */
+    for (unsigned mode = 16; mode <= 19; mode++) {
+        p[0] = mode;
+        for (unsigned len = 1; len <= sizeof(p); len++) assert(!is_shadow_message(p, len));
     }
-    p[1] = 1;
-    assert(cfw_is_als_control(p, 9) && !is_shadow_message(p, 9));
-    /* One fixed shape, two fixed shapes, and a minimal inline-text record. */
-    assert(!cfw_is_als_control(p, 22) && is_shadow_message(p, 22));
-    p[1] = 2;
-    assert(!cfw_is_als_control(p, 42) && is_shadow_message(p, 42));
-    p[1] = 1;
-    assert(!cfw_is_als_control(p, 15) && is_shadow_message(p, 15));
-    p[0] = 17; p[1] = 0;
-    assert(cfw_is_ring_battery_control(p, 2) && !is_shadow_message(p, 2));
-    for (int flags = 0; flags < 4; flags++) {
-        p[1] = flags;
-        assert(!cfw_is_ring_battery_control(p, 3) && is_shadow_message(p, 3));
+    const uint8_t modes[] = {3,6,8,9,11,13,14,15,36,37,38};
+    for (unsigned i = 0; i < sizeof(modes); i++) {
+        p[0] = modes[i]; assert(is_shadow_message(p, 3));
+        p[0] |= 0x80; assert(is_shadow_message(p, 3));
     }
-    p[0] = 18; assert(is_shadow_message(p, 2));
-    p[0] = 19; assert(cfw_is_als_control(p, 9) && !is_shadow_message(p, 9));
-    p[0] = 0x90; p[1] = 1;
-    assert(cfw_is_als_control(p, 9) && is_shadow_message(p, 22));
-    const uint8_t modes[] = {3,6,8,9,11,13,14,15};
-    for (unsigned i = 0; i < sizeof(modes); i++) { p[0] = modes[i]; assert(is_shadow_message(p, 3)); }
+    const uint8_t query[] = {0xf2, 0x07, 4, 'A', 'N', 1, 3};
+    const uint8_t old_query[] = {0xd2, 0x06, 4, 'A', 'N', 1, 3};
+    faceclaw_scan_settings_control(query, sizeof(query));
+    assert(ancs_controls == 1);
+    faceclaw_scan_settings_control(old_query, sizeof(old_query));
+    assert(ancs_controls == 1); /* upstream field 106 is never ANCS control */
 }
 static void batteries(void) {
-    const uint8_t query[] = {17,0}, scene[] = {17,0,0};
+    const uint8_t query[] = {17,0}, scene[] = {37,0,0};
     unsigned size;
     for (int connected = 0; connected <= 1; connected++) {
         ring_connected = connected;
@@ -125,7 +123,7 @@ static void settings(void) {
     sends = 0;
     assert(settings_send_wrapper(1,9,buf,44) == 0 && sends == 2);
     const uint8_t *caps = field(sent[0],sent_len[0],100,&n);
-    assert(caps && n == 151 && memcmp(caps,"EVENCFW/23 ",11) == 0);
+    assert(caps && n == 151 && memcmp(caps,"EVENCFW/24 ",11) == 0);
     assert(sent_len[0] == 44 + 155 + 24); /* exactly the pre-merge reply size */
     assert(field(sent[0],sent_len[0],104,&n) && n == 21);
     assert(!field(sent[0],sent_len[0],106,&n));

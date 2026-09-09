@@ -3,7 +3,7 @@
 // glasses over BLE. Every case is the same data as the miniapp's
 // src/shared/shapesSuite.ts; what the phone does between render() and the
 // radio (anchor resolution, validate / clamp / budget, frame diffing, the
-// mode-17 retained-scene encoder from G2CfwScene.swift) is ported below, so
+// mode-37 retained-scene encoder from G2CfwScene.swift) is ported below, so
 // the verdicts mean the same thing here as in the tester page.
 //
 // What differs from the phone: default-font text is not wrapped or measured
@@ -27,7 +27,7 @@
 //     G2_DRY_RUN=1 bun shapes-suite.ts       # host pipeline only, no glasses
 //     G2_HOLD_SCALE=0.5 G2_OUT=results.json bun shapes-suite.ts
 //
-// Needs the glassly-cfw firmware (capability tokens scene17 shapes16 anim18).
+// Needs the glassly-cfw firmware (capability tokens scene37 shapes36 anim38).
 
 import {
   G2Session,
@@ -1209,7 +1209,7 @@ function diffScene(prev: FrameElement[], next: Diffable[], nextSyntheticId: () =
 }
 
 // ============================================================================
-// Mode-17 retained-scene encoder — G2CfwScene.swift
+// Mode-37 retained-scene encoder — G2CfwScene.swift
 // ============================================================================
 
 const T = {
@@ -1411,7 +1411,7 @@ class CfwScene {
   invalidate() { this.needsRepack = true; }
   indices(): number[][] { return this.elements.map((e) => e.indices); }
 
-  /** One mode-17 patch (COMMIT, plus CLEAR on a repack), or null when the frame does not fit the slot table. */
+  /** One mode-37 patch (COMMIT, plus CLEAR on a repack), or null when the frame does not fit the slot table. */
   encode(frame: FrameElement[], replay = false): { payload: Uint8Array; sets: number; deletes: number; tweens: number; repack: boolean; animMs: number } | null {
     const desired = frame.map((el) => ({
       id: el.id,
@@ -1491,7 +1491,7 @@ class CfwScene {
 
     this.elements = committed;
     this.needsRepack = false;
-    return { payload: Uint8Array.from([17, repack ? 0x03 : 0x01, 0, ...ops]), sets, deletes, tweens, repack, animMs: animFrames * FRAME_PERIOD_MS };
+    return { payload: Uint8Array.from([37, repack ? 0x03 : 0x01, 0, ...ops]), sets, deletes, tweens, repack, animMs: animFrames * FRAME_PERIOD_MS };
   }
 }
 
@@ -1516,7 +1516,7 @@ interface CaseResult {
   steps?: number;
   /** Renders per second over the whole case, holds included. */
   stepsPerSecond?: number;
-  /** Total mode-17 bytes the case put on the air. */
+  /** Total mode-37 bytes the case put on the air. */
   bytes?: number;
 }
 
@@ -1555,7 +1555,7 @@ async function selfTest(): Promise<void> {
     { type: "rect", id: "r", box: { x: 1, y: 2, w: 30, h: 20 }, style: { border: 2, radius: 6, fill: true } },
   ]);
   let b = r.lastPayload;
-  eq("shapes header", sub(b, 0, 3), [17, 0x03, 0]);
+  eq("shapes header", sub(b, 0, 3), [37, 0x03, 0]);
   eq("line record", sub(b, 3, 9), [0, 0, 1, 1, 12, 3]);
   eq("line points", sub(b, 9, 17), le(42, 116, 62, 136));
   eq("circle record", sub(b, 25, 31), [0, 1, 5, 1, 15, 0]);
@@ -1572,7 +1572,7 @@ async function selfTest(): Promise<void> {
   await r.render([{ type: "circle", id: "ball", box: { x: 0, y: 0, w: 21, h: 21 }, style: { fill: true } }]);
   await r.render([{ type: "circle", id: "ball", box: { x: 200, y: 0, w: 21, h: 21 }, style: { fill: true }, transition: { durationMs: 330, easing: "linear" } }]);
   b = r.lastPayload;
-  eq("tween header", sub(b, 0, 3), [17, 0x01, 0]);
+  eq("tween header", sub(b, 0, 3), [37, 0x01, 0]);
   eq("tween record", sub(b, 3, 12), [5, 0, 0x07, 0x03, 10, 0, 0, 255, 255]);
   eq("tween target", sub(b, 12, 22), le(242, 106, 10, 15, 0)); // cx cy r color width: the unchanged ones ride along
   eq("tween length", [b.length], [22]);
@@ -1589,7 +1589,7 @@ async function selfTest(): Promise<void> {
   r = fresh();
   await r.render([{ type: "circle", id: "a", box: { x: 0, y: 0, w: 11, h: 11 } }, { type: "circle", id: "b", box: { x: 0, y: 0, w: 11, h: 11 } }]);
   await r.render([{ type: "circle", id: "b", box: { x: 0, y: 0, w: 11, h: 11 } }]);
-  eq("delete", r.lastPayload, [17, 0x01, 0, 1, 0]);
+  eq("delete", r.lastPayload, [37, 0x01, 0, 1, 0]);
   eq("delete indices", r.slotIndices(), [[1]]);
   await r.render([{ type: "circle", id: "a", box: { x: 0, y: 0, w: 11, h: 11 } }, { type: "circle", id: "b", box: { x: 0, y: 0, w: 11, h: 11 } }]);
   eq("reorder repacks", [r.lastPayload[1]], [0x03]);
@@ -1655,7 +1655,7 @@ interface Link { send(payload: Uint8Array): Promise<void>; close(): Promise<void
  * visible transition is not also the first animation of the session.
  */
 const WARM_UP = Uint8Array.from([
-  17, 0x03, 0,
+  37, 0x03, 0,
   0, 0, T.CIRCLE_FILL, 0, 0, 0, ...i16(0), ...i16(0), ...i16(1), ...i16(0), ...i16(0), ...i16(0), ...i16(0), ...i16(0),
   5, 0, 0x01, 0x00, 2, 0, 0, 255, 255, ...i16(1),
 ]);
@@ -1673,7 +1673,7 @@ async function openLink(): Promise<Link> {
   console.log(`firmware: ${firmware}`);
   let caps = await queryCapabilities(session, nextMagic());
   if (!caps) caps = await queryCapabilities(session, nextMagic());
-  const needed = ["scene17", "shapes16", "anim18"];
+  const needed = ["scene37", "shapes36", "anim38"];
   if (!caps || !needed.every((f) => hasFeature(caps!, f))) {
     console.log(caps ? `CFW ${caps.raw}` : "no CFW capability field");
     console.log(`this suite needs the glassly-cfw build (${needed.join(" ")})`);
@@ -1718,7 +1718,7 @@ async function openLink(): Promise<Link> {
     send,
     async close() {
       clearInterval(renew);
-      try { await send(Uint8Array.from([18, 2])); } catch {} // release the retained scene
+      try { await send(Uint8Array.from([38, 2])); } catch {} // release the retained scene
       await lease(6).catch(() => {}); // FB_RELEASE
       hb.stop();
       await session.close();
@@ -1855,7 +1855,7 @@ try {
   } else if (DUMP) {
     dumpLabel("teardown");
     await renderer.render([]);
-    dumpMessage(Uint8Array.from([18, 2]));
+    dumpMessage(Uint8Array.from([38, 2]));
   }
 }
 

@@ -47,18 +47,18 @@ as they do in cached-font mode 14.
 The Glassly build of this firmware (branch `glassly-cfw`, base 2.2.9.22) adds
 vector shapes and firmware-side animation on top of the texture cache:
 
- * Mode 16 draws a list of 20-byte shape records straight into the shadow:
-   `[16][count][records]`. A record is
+ * Mode 36 draws a list of 20-byte shape records straight into the shadow:
+   `[36][count][records]`. A record is
    `[type][flags][color][width][p0..p7 as int16 LE]` and covers hairline and
    wide lines, plain and rounded rectangles (fill or stroke), circles and rings,
    triangles, quads, quadratic and cubic beziers, arcs and pie sectors, plus
    cached images and text (built-in 20 px font with the string carried inline in
    the record and clipped to its box, or read from the texture cache, or a cached
    mode-14 font). Coordinates are signed pixels and
-   everything clips to the 640x480 panel. Mode 16 composes inside a mode-8 batch
+   everything clips to the 640x480 panel. Mode 36 composes inside a mode-8 batch
    like modes 13-15. See `patches/shapes.h` for the type table.
- * Mode 17 keeps a retained scene of up to 128 shape slots (slot order is paint
-   order) that the glasses re-render themselves: `[17][flags][bg][ops...]` with
+ * Mode 37 keeps a retained scene of up to 128 shape slots (slot order is paint
+   order) that the glasses re-render themselves: `[37][flags][bg][ops...]` with
    ops to set, delete, show/hide or move a slot, GLIDE it by a delta over N
    frames, or TWEEN any parameters (including color and stroke width) to target
    values, each with a CSS-style cubic-bezier easing curve. Flag bit 0 renders
@@ -68,14 +68,14 @@ vector shapes and firmware-side animation on top of the texture cache:
    cannot spare that 150 KiB frame, a commit still draws the scene into the
    container shadow and only animation is refused. The record grammar is
    documented at the top of `patches/scene.c`.
- * Mode 18 controls animation: freeze, set the frame period (10-250 ms, default
+ * Mode 38 controls animation: freeze, set the frame period (10-250 ms, default
    33), release the scene, or finish every animation and present the end state.
 
-The capability string advertises these as `shapes16 scene17 anim18`; inline text
+The capability string advertises these as `shapes36 scene37 anim38`; inline text
 records are implied by contract revision 19 (the capability response must fit one
 BLE frame, so no token was added).
 
-Revision 21 adds retained compound SVG paths (mode-17 op 8) and duration-based
+Revision 21 adds retained compound SVG paths (mode-37 op 8) and duration-based
 rotation of geometric shapes and paths (op 9). Paths support nonzero/even-odd
 fills with holes, quadratic/cubic curves, and the existing move/scale/color
 tweens. Rotation uses fractional unwrapped angles and an independent animation
@@ -83,19 +83,17 @@ channel, so shapes can move and rotate concurrently. The wire contract accepts
 compiled paths, not XML; text/image rotation and path morphing are not included.
 See [the protocol and test instructions](patches/VECTOR_PROTOCOL.md).
 
-Revision 23 combines these features and the ANCS relay with upstream's compass
-sampling controls/diagnostics, passive ambient-light sensing, and R1 battery
-reporting. Existing drawing packets retain modes 16–18; short sensor packets are
-distinguished by length. Mode 19 is an unambiguous ALS alias. The settings reply
-keeps its existing capability tokens and size, and a separate field-106 battery
-notification follows it. See [the combined wire contract](patches/UPSTREAM_COMPATIBILITY.md)
-for feature detection and shared-field decoding.
+Revision 24 moves the local graphics packets to modes **36/37/38** and ANCS
+fields to **125/126**, leaving upstream's sensor modes 16/17 and fields 105/106
+unmodified. All record formats and operation numbers stay the same. Clients
+must use the new numbers and capability tokens; old graphics packets are no
+longer accepted. See [the wire mapping](patches/UPSTREAM_COMPATIBILITY.md).
 
 Run the complete offline suite with
 `python3 patches/host/run_vector_tests.py --out /tmp/g2-vector-tests`.
 It tests the firmware C under sanitizers and replays the standalone shape and
 Bad Apple SVG payloads before any mobile integration. After installing revision
-21 on the glasses, `cd demos && bun vector-suite.ts --device` runs the visual
+24 on the glasses, `cd demos && bun vector-suite.ts --device` runs the visual
 suite; add `--bad-apple` for the vector video demo.
 
 Revision 20 adds an ANCS relay. On iOS the stock firmware already reads the
@@ -103,11 +101,11 @@ phone's notifications through the Apple Notification Center Service (the right
 lens subscribes; the phone app itself never can) but only tells the app which
 app posted one. The relay taps the stock ANCS client before its whitelist and
 its 63-byte title copies and forwards every notification to the phone as
-private sid-0x09 field-105 records: the Notification Source event (added,
+private sid-0x09 field-125 records: the Notification Source event (added,
 modified, removed, with flags, category and UID), each attribute (app id,
 title, subtitle, message, message size, date, action labels; chunked so no
 message exceeds 150 bytes) and the app's display name. The phone enables it
-with a fail-open 90-second lease on field 106 (`['A','N',1,op]`: enable,
+with a fail-open 90-second lease on field 126 (`['A','N',1,op]`: enable,
 disable, query, perform a positive/negative action on a UID, renew). Records
 are queued on the BLE stack task and drained by a timer, so a slow link drops
 whole records (counted in the STATUS reply) rather than stalling the stack. The
@@ -376,8 +374,8 @@ Thanks to kalanihelekunihi for [evenRealities-openCFW](https://github.com/kalani
 ### R1 battery reporting
 
 The stock R1 battery cache is available in settings field 106 through the exact
-read-only image-handler query `[17,0]`. Revision 23 also sends this report after
+read-only image-handler query `[17,0]`. Revision 24 also sends this report after
 a settings read, separately to preserve the settings reply's single-frame size.
-Detect support by revision 23 or the `RB` report; the upstream `ringbat17` token
+Detect support by revision 24 or the `RB` report; the upstream `ringbat17` token
 is omitted to retain all existing graphics tokens within the size limit.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
