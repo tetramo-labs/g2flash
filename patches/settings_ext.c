@@ -10,7 +10,7 @@
 // any timeout-based probing. The field is:
 //
 //   field 100, wire type 2 (length-delimited string):
-//     "EVENCFW/<ver> <space-separated feature tokens>"
+//     "GLASSLYCFW/<ver> <space-separated feature tokens>"
 //
 // Tag 100 is far above the stock message's fields (1..19), so stock decoders and
 // the phone bridge skip it as an unknown field -- fully backward compatible.
@@ -345,8 +345,8 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
     );
 }
 
-// Capability string "EVENCFW/<ver> <space-separated feature tokens>":
-//   EVENCFW/24 -> magic prefix + contract version (detect: starts-with "EVENCFW/")
+// Capability string "GLASSLYCFW/<ver> <space-separated feature tokens>":
+//   GLASSLYCFW/24 -> magic prefix + contract version (detect: starts-with "GLASSLYCFW/")
 //   imgz       -> zlib (DEFLATE) compressed image payloads
 //   rle        -> compact run-length encoded delta rows
 //   wakelease  -> fail-open Faceclaw ownership of idle wakes / local Even AI
@@ -368,7 +368,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 //   formats from revisions 19-21; only their outer transport IDs change below.
 //   Revision 24 moves local graphics to modes 36-38 and ANCS to fields 125/126.
 //   ALS and ring battery retain upstream modes 16/17 and fields 105/106.
-//   Discover them by revision; keep this string at its proven 151-byte size.
+//   Discover them by revision; the 154-byte string keeps the reply in one BLE frame.
 //
 // The string is a normal rodata literal now that build.py emits/relocates .rodata
 // (earlier this had to be spelled out byte-by-byte to avoid a rodata section).
@@ -376,12 +376,12 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "EVENCFW/24 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes36 scene37 anim38";
+        static const char caps[] = "GLASSLYCFW/24 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes36 scene37 anim38";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);
         len = mic_append_status(buf, len, SETTINGS_RESPONSE_CAPACITY);
-        /* Preserve the known-working settings reply size. The ring report is
+        /* Keep the settings reply inside one BLE frame. The ring report is
          * a separate notification, with the same field/body as upstream mode 17. */
         int result = ((send_fn)FW_SEND)(type, sid, buf, len);
         if (result == 0) {

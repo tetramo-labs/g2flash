@@ -123,8 +123,9 @@ static void settings(void) {
     sends = 0;
     assert(settings_send_wrapper(1,9,buf,44) == 0 && sends == 2);
     const uint8_t *caps = field(sent[0],sent_len[0],100,&n);
-    assert(caps && n == 151 && memcmp(caps,"EVENCFW/24 ",11) == 0);
-    assert(sent_len[0] == 44 + 155 + 24); /* exactly the pre-merge reply size */
+    assert(caps && n == 154 && memcmp(caps,"GLASSLYCFW/24 ",14) == 0);
+    assert(sent_len[0] == 44 + 158 + 24); /* full capabilities and microphone status */
+    assert(sent_len[0] + 2 <= 232); /* payload plus CRC stays in one BLE frame */
     assert(field(sent[0],sent_len[0],104,&n) && n == 21);
     assert(!field(sent[0],sent_len[0],106,&n));
     assert(field(sent[1],sent_len[1],106,&n) && n == 5 && sent_len[1] == 12);

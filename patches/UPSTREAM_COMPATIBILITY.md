@@ -17,7 +17,7 @@ path op 8 and rotation op 9), record formats and ANCS `AN` version-1 bodies
 remain unchanged. Protobuf bytes tags for ANCS are now `EA 07` (field 125)
 and `F2 07` (field 126).
 
-Clients must migrate to the new numbers and check `EVENCFW/24` or later with
+Clients must migrate to the new numbers and check `GLASSLYCFW/24` or later with
 `shapes36 scene37 anim38`. All repository demos and host replay consumers use
 the new numbers. External clients such as Glassly must update their encoders
 and ANCS listeners too; old packet numbers are not graphics/ANCS aliases.
@@ -26,9 +26,10 @@ Upstream keeps mode 16 for ALS, mode 17 for ring battery, settings field 105
 for `AL` reports, and field 106 for `RB` reports. Mode 19 is no longer an ALS
 alias. Mode 10 compass controls/diagnostics and mode 11 session cleanup remain.
 
-The settings capability string stays at its proven 151-byte length and includes
-the full microphone status in the reply. Ring-battery status follows in a
-separate notification to avoid exceeding the known-working BLE packet size
+The `GLASSLYCFW/24` capability string is 154 bytes and retains every feature
+token. With the 44-byte stock reply and full microphone status, the response
+is 226 bytes (228 including CRC), within the 232-byte BLE packet payload budget. Ring-battery status follows
+in a separate notification to avoid exceeding the known-working BLE packet size
 (see commit `8746d55`). Detect ring support by revision 24 or the `RB` report;
 the upstream `ringbat17` token remains omitted to preserve the size limit.
 
