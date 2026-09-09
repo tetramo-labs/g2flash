@@ -4,6 +4,7 @@
 #include "debug.h"
 #include "shapes.h"
 #include "scene.h"
+#include "image_controls.h"
 
 /*
  * zlib (DEFLATE) image support for the G2 CFW — multi-mode load wrapper.
@@ -104,7 +105,7 @@
  *                              shadow). See scene.c for the record grammar.
  *   18          -> [18][sub]... animation control: 0 freeze all, 1 [ms] frame period,
  *                              2 release the scene, 3 finish all and present.
- *   16          -> [16][op]... ambient light sensor (no display change; master lens
+ *   16 (short)  -> [16][op]... ambient light sensor (2..9 bytes; no display change; master lens
  *                              only, see als_sensor.c). op 0 = QUERY one report; op 1
  *                              [flags][interval16][min-delta16][heartbeat16] = PASSIVE
  *                              START: the CFW polls the OPT3001 itself and the stock
@@ -112,6 +113,7 @@
  *                              PASSIVE STOP. Reports arrive as sid-0x09 field 105.
  *   17          -> [17][0] query cached R1 battery (no display change).
  *                              Master replies on sid-0x09 field 106; see ring_battery.c.
+ *   19          -> unambiguous alias for the ambient light sensor controls.
  *   anything else / too short  -> load_bmp_fast (rejects cleanly if not a BMP).
  *
  * The HIGH BIT of the mode byte is a "lenses differ" flag; most modes ignore it. For
@@ -324,6 +326,7 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
  * barrier so no direct-framebuffer job can still reference session-owned state. */
 static int is_shadow_message(const uint8_t *src, uint32_t srclen) {
     if (src == 0 || srclen == 0) return 0;
+    if (cfw_is_als_control(src, srclen) || cfw_is_ring_battery_control(src, srclen)) return 0;
     uint8_t mode = src[0] & 0x7fu;
     return mode == 3 || mode == 6 || mode == 8 || mode == 9 || mode == 11 ||
            mode == 13 || mode == 14 || mode == 15 || mode == 16 || mode == 17 ||
@@ -525,11 +528,11 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
         return -1;
     }
 
-    if (mode == 17) {
+    if (cfw_is_ring_battery_control(src, srclen)) {
         return ring_battery_control(src, srclen);
     }
 
-    if (mode == 16) {
+    if (cfw_is_als_control(src, srclen)) {
         /* Ambient light sensor query / passive polling control (no display change).
          * Runs on both lenses; als_control itself acts only on the master lens. */
         return als_control(src, srclen);

@@ -83,6 +83,14 @@ channel, so shapes can move and rotate concurrently. The wire contract accepts
 compiled paths, not XML; text/image rotation and path morphing are not included.
 See [the protocol and test instructions](patches/VECTOR_PROTOCOL.md).
 
+Revision 23 combines these features and the ANCS relay with upstream's compass
+sampling controls/diagnostics, passive ambient-light sensing, and R1 battery
+reporting. Existing drawing packets retain modes 16–18; short sensor packets are
+distinguished by length. Mode 19 is an unambiguous ALS alias. The settings reply
+keeps its existing capability tokens and size, and a separate field-106 battery
+notification follows it. See [the combined wire contract](patches/UPSTREAM_COMPATIBILITY.md)
+for feature detection and shared-field decoding.
+
 Run the complete offline suite with
 `python3 patches/host/run_vector_tests.py --out /tmp/g2-vector-tests`.
 It tests the firmware C under sanitizers and replays the standalone shape and
@@ -377,6 +385,9 @@ Thanks to kalanihelekunihi for [evenRealities-openCFW](https://github.com/kalani
 
 ### R1 battery reporting
 
-CFW `ringbat17` exposes the stock R1 battery cache in settings field 106 and
-read-only image-handler mode 17. Faceclaw shows it as `R1` in the top bar.
+The stock R1 battery cache is available in settings field 106 through the exact
+read-only image-handler query `[17,0]`. Revision 23 also sends this report after
+a settings read, separately to preserve the settings reply's single-frame size.
+Detect support by revision 23 or the `RB` report; the upstream `ringbat17` token
+is omitted to retain all existing graphics tokens within the size limit.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).

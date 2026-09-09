@@ -199,10 +199,6 @@ WEAR_NOTIFY_BL_SITES = {
     0x4ac3ea: "d9 f7 58 ff",  # ON_HEAD:  bl 0x48629e
     0x4ac44e: "d9 f7 26 ff",  # OFF_HEAD: bl 0x48629e
 }
-# Capture the selected GAF source before the parser clears it, then attach the
-# matching record diagnostics at the sensor-hub heading report call.
-COMPASS_DECODE_BL_SITE = (0x4b6922, "65 f0 af fd")  # bl GAF decode, before output is cleared
-COMPASS_REPORT_BL_SITE = (0x4b632e, "ff f7 59 fc")  # bl DRV_IMUSendUIEvent(9,heading)
 # ANCS relay. The stock ANCC profile object (profile_ancc.c, 0x4d3e5e..0x4d50e0)
 # calls its own helpers with direct `bl`s; each is retargeted to a wrapper that
 # records the event for the phone and tail-calls the stock callee, so the stock
@@ -217,6 +213,10 @@ ANCS_APP_BL_SITES = {
     0x4d4bf4: "ff f7 aa fd",   # _anccAttrHandler, first fragment: bl _anccParseAppAttributes
     0x4d4daa: "ff f7 cf fc",   # _anccAttrHandler, continuation:  bl _anccParseAppAttributes
 }
+# Capture the selected GAF source before the parser clears it, then attach the
+# matching record diagnostics at the sensor-hub heading report call.
+COMPASS_DECODE_BL_SITE = (0x4b6922, "65 f0 af fd")  # bl GAF decode, before output is cleared
+COMPASS_REPORT_BL_SITE = (0x4b632e, "ff f7 59 fc")  # bl DRV_IMUSendUIEvent(9,heading)
 
 def enc_bl(pc, target):
     """Encode a Thumb-2 BL (T1) from instruction address `pc` to `target`."""
@@ -352,12 +352,12 @@ def layout(img):
     release_addr   = base + _fn(built, "gesture_release")["offset"]
     display_copy_addr = base + _fn(built, "display_copy_hook")["offset"]
     wear_notify_addr = base + _fn(built, "faceclaw_send_wear_event")["offset"]
-    compass_decode_addr = base + _fn(built, "compass_decode_capture")["offset"]
-    compass_report_addr = base + _fn(built, "compass_report_event")["offset"]
     ancs_source_addr = base + _fn(built, "ancs_hook_source")["offset"]
     ancs_remove_addr = base + _fn(built, "ancs_hook_remove")["offset"]
     ancs_attr_addr   = base + _fn(built, "ancs_hook_attr")["offset"]
     ancs_app_addr    = base + _fn(built, "ancs_hook_app")["offset"]
+    compass_decode_addr = base + _fn(built, "compass_decode_capture")["offset"]
+    compass_report_addr = base + _fn(built, "compass_report_event")["offset"]
 
     # --- assemble the appended payload bytes (old_ps .. end) ---
     pad = blob_off - old_ps                     # alignment gap before the blob
@@ -441,12 +441,6 @@ def layout(img):
         *[(g2f(site), orig, enc_bl(site, wear_notify_addr),
            f"bl faceclaw_send_wear_event @ {site:#x} (outside onboarding)")
           for site, orig in WEAR_NOTIFY_BL_SITES.items()],
-        (g2f(COMPASS_DECODE_BL_SITE[0]), COMPASS_DECODE_BL_SITE[1],
-         enc_bl(COMPASS_DECODE_BL_SITE[0], compass_decode_addr),
-         "bl compass_decode_capture (sample-matched GAF diagnostics)"),
-        (g2f(COMPASS_REPORT_BL_SITE[0]), COMPASS_REPORT_BL_SITE[1],
-         enc_bl(COMPASS_REPORT_BL_SITE[0], compass_report_addr),
-         "bl compass_report_event (stock UI + heading with diagnostics over BLE)"),
         # ANCS relay: record each profile event for the phone, then run stock.
         (g2f(ANCS_SOURCE_BL_SITE[0]), ANCS_SOURCE_BL_SITE[1],
          enc_bl(ANCS_SOURCE_BL_SITE[0], ancs_source_addr),
@@ -460,6 +454,12 @@ def layout(img):
         *[(g2f(site), orig, enc_bl(site, ancs_app_addr),
            f"bl ancs_hook_app @ {site:#x} (ANCS app display name -> relay, then stock parser)")
           for site, orig in ANCS_APP_BL_SITES.items()],
+        (g2f(COMPASS_DECODE_BL_SITE[0]), COMPASS_DECODE_BL_SITE[1],
+         enc_bl(COMPASS_DECODE_BL_SITE[0], compass_decode_addr),
+         "bl compass_decode_capture (sample-matched GAF diagnostics)"),
+        (g2f(COMPASS_REPORT_BL_SITE[0]), COMPASS_REPORT_BL_SITE[1],
+         enc_bl(COMPASS_REPORT_BL_SITE[0], compass_report_addr),
+         "bl compass_report_event (stock UI + heading with diagnostics over BLE)"),
     ]
     return bytes(append), in_place, (idx, comp_off, old_ps)
 
