@@ -7,6 +7,7 @@ installed demos dependencies. Output is retained for visual inspection.
 """
 import argparse
 import json
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -28,6 +29,22 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     host = out / "vector_host_test"
     flags = [] if opts.no_sanitize else ["-fsanitize=address,undefined", "-fno-sanitize-recover=all"]
+    # Exercise the production settings wrapper and display-gate predicate without
+    # compiling the unrelated Thumb-only trampolines in their translation units.
+    functions = []
+    for source, name in (("settings_ext.c", "settings_send_wrapper"),
+                         ("zlib_glue.c", "is_shadow_message")):
+        code = (ROOT / "patches" / source).read_text()
+        match = re.search(r"^(?:static )?int " + name + r"\([^;\n]*\) \{\n.*?^\}", code, re.M | re.S)
+        if not match:
+            raise RuntimeError(f"Cannot find production function {name}")
+        functions.append(match[0])
+    (out / "upstream_functions.inc").write_text("\n\n".join(functions) + "\n")
+    for test in ("ancs_relay", "upstream"):
+        binary = out / f"{test}_host_test"
+        run("cc", "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Wno-unused-function", *flags,
+            "-Ipatches", "-I" + str(out), "-o", binary, f"patches/host/{test}_host_test.c")
+        run(binary)
     run("cc", "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Wno-unused-function", *flags,
         "-Ipatches", "-o", host, "patches/host/vector_host_test.c")
     run(host, out)

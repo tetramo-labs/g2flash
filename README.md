@@ -83,6 +83,14 @@ channel, so shapes can move and rotate concurrently. The wire contract accepts
 compiled paths, not XML; text/image rotation and path morphing are not included.
 See [the protocol and test instructions](patches/VECTOR_PROTOCOL.md).
 
+Revision 23 combines these features and the ANCS relay with upstream's compass
+sampling controls/diagnostics, passive ambient-light sensing, and R1 battery
+reporting. Existing drawing packets retain modes 16–18; short sensor packets are
+distinguished by length. Mode 19 is an unambiguous ALS alias. The settings reply
+keeps its existing capability tokens and size, and a separate field-106 battery
+notification follows it. See [the combined wire contract](patches/UPSTREAM_COMPATIBILITY.md)
+for feature detection and shared-field decoding.
+
 Run the complete offline suite with
 `python3 patches/host/run_vector_tests.py --out /tmp/g2-vector-tests`.
 It tests the firmware C under sanitizers and replays the standalone shape and
@@ -137,6 +145,12 @@ fully documented):
  * Play sound effects with the piezo buzzer
  * Receive on-head detection wear/unwear events, to trigger a lock-screen
  * Use the magnetometer as a compass
+ * Read the ambient light sensor (a TI OPT3001 on the master temple) and,
+   optionally, run it in a "passive" mode where the firmware polls the sensor
+   for the phone but the stock auto-brightness adjuster never steps the panel,
+   so the phone can implement its own brightness policy (image-handler mode 16;
+   readings arrive as settings-channel field 105). See the contract comment in
+   `patches/als_sensor.c`.
  * Take over the wakeword ("hey Even") and replace what it opens with a
    different phone-side transcription and AI agent pipeline
  * Take over the screen-wake even on the dashboard, so that you can end the
@@ -358,3 +372,12 @@ a real device.
 # Acknowledgements
 
 Thanks to kalanihelekunihi for [evenRealities-openCFW](https://github.com/kalanihelekunihi/evenRealities-openCFW/) and Commute773 for [g2-kit-unofficial](https://github.com/Commute773/g2-kit-unofficial/), which were immensely helpful while creating this.
+
+### R1 battery reporting
+
+The stock R1 battery cache is available in settings field 106 through the exact
+read-only image-handler query `[17,0]`. Revision 23 also sends this report after
+a settings read, separately to preserve the settings reply's single-frame size.
+Detect support by revision 23 or the `RB` report; the upstream `ringbat17` token
+is omitted to retain all existing graphics tokens within the size limit.
+See [the wire contract and stock-firmware evidence](docs/ring-battery.md).

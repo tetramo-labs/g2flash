@@ -346,7 +346,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 }
 
 // Capability string "EVENCFW/<ver> <space-separated feature tokens>":
-//   EVENCFW/21 -> magic prefix + contract version (detect: starts-with "EVENCFW/")
+//   EVENCFW/23 -> magic prefix + contract version (detect: starts-with "EVENCFW/")
 //   imgz       -> zlib (DEFLATE) compressed image payloads
 //   rle        -> compact run-length encoded delta rows
 //   wakelease  -> fail-open Faceclaw ownership of idle wakes / local Even AI
@@ -371,6 +371,8 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 //   a token; the phone gates it on the revision number. Revision 21 adds
 //   scene ops 8 (compiled filled paths) and 9 (duration-based rotation),
 //   also gated by revision; see VECTOR_PROTOCOL.md.)
+//   Revision 23 also includes ALS, ring battery and compass diagnostics.
+//   Discover them by revision; keep this string at its proven 151-byte size.
 //
 // The string is a normal rodata literal now that build.py emits/relocates .rodata
 // (earlier this had to be spelled out byte-by-byte to avoid a rodata section).
@@ -378,11 +380,19 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "EVENCFW/21 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes16 scene17 anim18";
+        static const char caps[] = "EVENCFW/23 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes16 scene17 anim18";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);
         len = mic_append_status(buf, len, SETTINGS_RESPONSE_CAPACITY);
+        /* Preserve the known-working settings reply size. The ring report is
+         * a separate notification, with the same field/body as upstream mode 17. */
+        int result = ((send_fn)FW_SEND)(type, sid, buf, len);
+        if (result == 0) {
+            const uint8_t query[2] = {17, 0};
+            ring_battery_control(query, sizeof(query));
+        }
+        return result;
     }
     return ((send_fn)FW_SEND)(type, sid, buf, len);
 }

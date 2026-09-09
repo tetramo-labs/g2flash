@@ -4,6 +4,7 @@
 #include "debug.h"
 #include "shapes.h"
 #include "scene.h"
+#include "image_controls.h"
 
 /*
  * zlib (DEFLATE) image support for the G2 CFW — multi-mode load wrapper.
@@ -64,8 +65,11 @@
  *                              Pairs with a delta (usually via mode 8) to scroll.
  *   10          -> [10][enabled] compass control (no display change): invokes the
  *                              firmware's own compass start/stop routines on the
- *                              right arm. Stock navigation notifications carry the
- *                              resulting heading/calibration events back to the phone.
+ *                              right arm. enabled=2 adds [interval16][min-change16],
+ *                              both little-endian; interval is clamped to 50..2000 ms
+ *                              before configuring the stock compass event filter.
+ *                              Navigation heading notifications carry the result plus
+ *                              optional sample diagnostics (see compass.c).
  *   11          -> [11] cleanup the custom-app session before disconnect: release
  *                              leases/direct-framebuffer ownership, stop and delete
  *                              CFW timers, stop custom buzzer/compass activity, release
@@ -101,6 +105,15 @@
  *                              shadow). See scene.c for the record grammar.
  *   18          -> [18][sub]... animation control: 0 freeze all, 1 [ms] frame period,
  *                              2 release the scene, 3 finish all and present.
+ *   16 (short)  -> [16][op]... ambient light sensor (2..9 bytes; no display change; master lens
+ *                              only, see als_sensor.c). op 0 = QUERY one report; op 1
+ *                              [flags][interval16][min-delta16][heartbeat16] = PASSIVE
+ *                              START: the CFW polls the OPT3001 itself and the stock
+ *                              auto-brightness adjuster never steps the panel; op 2 =
+ *                              PASSIVE STOP. Reports arrive as sid-0x09 field 105.
+ *   17          -> [17][0] query cached R1 battery (no display change).
+ *                              Master replies on sid-0x09 field 106; see ring_battery.c.
+ *   19          -> unambiguous alias for the ambient light sensor controls.
  *   anything else / too short  -> load_bmp_fast (rejects cleanly if not a BMP).
  *
  * The HIGH BIT of the mode byte is a "lenses differ" flag; most modes ignore it. For
@@ -187,8 +200,7 @@ typedef void (*display_gate_fn)(void);               /* display semaphore take/g
 typedef int  (*display_queue_fn)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 typedef void (*display_copy_fn)(void);               /* stock 576x288 -> 640x480 packed copy */
 typedef int (*compass_control_fn)(void);              /* stock Start/StopIMUCompassFunc */
-typedef int (*display_event_forward_fn)(uint32_t, uint32_t, void *); /* display event -> active UI */
-typedef int (*compass_notify_fn)(uint32_t);           /* stock sid-0x08 compass notifier */
+typedef int (*compass_config_fn)(uint32_t, const uint32_t *); /* sensor-hub FuncConfig */
 
 /* firmware entry points (Thumb bit set for blx via constant pointer) */
 #define FW_INIT2   ((inflateInit2_fn)0x005d6167U)   /* FUN_005d6166 inflateInit2_ */
@@ -221,8 +233,7 @@ typedef int (*compass_notify_fn)(uint32_t);           /* stock sid-0x08 compass 
 #define FW_DISPLAY_COPY   ((display_copy_fn)0x004708d1U)  /* FUN_004708d0: stock packed-buffer copy */
 #define FW_COMPASS_START  ((compass_control_fn)0x0055d4d7U) /* FUN_0055d4d6 StartIMUCompassFunc */
 #define FW_COMPASS_STOP   ((compass_control_fn)0x0055d55fU) /* FUN_0055d55e StopIMUCompassFunc */
-#define FW_DISPLAY_EVENT_FORWARD ((display_event_forward_fn)0x004622edU) /* FUN_004622ec */
-#define FW_COMPASS_NOTIFY ((compass_notify_fn)0x0059f47dU) /* FUN_0059f47c navigation_notify_compass_changed_cmd */
+#define FW_COMPASS_CONFIG ((compass_config_fn)0x004b81d3U) /* FUN_004b81d2: FuncConfig(type,config) */
 #define FW_DISPLAY_FB     (*(uint8_t * volatile *)0x200008b4U) /* stock copier's 640x480 destination */
 #define BUZZ_TIMER_ADDR 0x200767a0U                   /* RAM: buzzer osTimer handle global */
 #define ZLIB_VER   ((const char *)0x007b75f8U)      /* "1.1.4" */
@@ -300,6 +311,9 @@ static int is_shadow_message(const uint8_t *src, uint32_t srclen);
 static int cfw_cleanup_session(void);
 static void mic_cleanup_session(void);   /* mic_control.c (same TU): mic hw + lease teardown */
 static void ancs_cleanup_session(void);  /* ancs_relay.c (same TU): relay lease + drain timer */
+static void als_cleanup_session(void);   /* als_sensor.c (same TU): passive ALS teardown */
+int ring_battery_control(const uint8_t *src, uint32_t srclen); /* mode 17 */
+int als_control(const uint8_t *src, uint32_t srclen); /* als_sensor.c: mode 16 */
 
 static int inflate_rle(uint8_t *strm, uint8_t *base, uint32_t stride, uint32_t rowbytes, uint32_t rows);
 static void present_shadow(uint8_t *state, uint32_t w, uint32_t h, cfw_rectlist *rl);
@@ -312,6 +326,7 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
  * barrier so no direct-framebuffer job can still reference session-owned state. */
 static int is_shadow_message(const uint8_t *src, uint32_t srclen) {
     if (src == 0 || srclen == 0) return 0;
+    if (cfw_is_als_control(src, srclen) || cfw_is_ring_battery_control(src, srclen)) return 0;
     uint8_t mode = src[0] & 0x7fu;
     return mode == 3 || mode == 6 || mode == 8 || mode == 9 || mode == 11 ||
            mode == 13 || mode == 14 || mode == 15 || mode == 16 || mode == 17 ||
@@ -468,12 +483,17 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
     }
 
     if (mode == 10) {
-        /* Compass control (no display change): [10][0] stops, [10][1] starts.
+        /* Compass control (no display change):
+         *   [10][0] stops
+         *   [10][1] starts with the stock 1000 ms / 5 degree configuration
+         *   [10][2][interval16][min-change16] starts, then applies the supplied
+         *       little-endian configuration through the stock sensor-hub API.
+         *       interval is clamped to 50..2000 ms; min-change is passed through.
          * The stock compass implementation owns the sensor setup, calibration,
          * sampling, and heading computation. Heading events normally reach the
          * sid-0x08 notifier only through Navigation's UI handler; mode 10 also
-         * enables compass_event_forward(), which taps the earlier global display
-         * event so Faceclaw does not need the stock Navigation app in foreground.
+         * enables compass_report_event(), which forwards the sensor-hub report
+         * with sample diagnostics without needing Navigation in foreground.
          * This deferred image handler runs on both lenses, but the stock firmware
          * logs that the left arm cannot open the IMU, so invoke it only on right. */
         if (srclen < 2) return -1;
@@ -483,16 +503,39 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
             ctx->compass_forward = 0;
             return FW_SIDE() == 1 ? FW_COMPASS_STOP() : 0;
         }
-        if (src[1] == 1) {
+        uint8_t enabled = src[1];
+        if (enabled == 1 || enabled == 2) {
+            uint32_t config[2];
+            if (enabled == 2) {
+                if (srclen < 6) return -1;
+                config[0] = (uint32_t)src[2] | ((uint32_t)src[3] << 8);
+                config[1] = (uint32_t)src[4] | ((uint32_t)src[5] << 8);
+                if (config[0] < 50u) config[0] = 50u;
+                if (config[0] > 2000u) config[0] = 2000u;
+            }
             ctx->compass_forward = 1;
             if (FW_SIDE() == 1) {
                 int r = FW_COMPASS_START();
+                if (r == 0 && enabled == 2) {
+                    r = FW_COMPASS_CONFIG(2, config);
+                    if (r != 0) FW_COMPASS_STOP();
+                }
                 if (r != 0) ctx->compass_forward = 0;
                 return r;
             }
             return 0;
         }
         return -1;
+    }
+
+    if (cfw_is_ring_battery_control(src, srclen)) {
+        return ring_battery_control(src, srclen);
+    }
+
+    if (cfw_is_als_control(src, srclen)) {
+        /* Ambient light sensor query / passive polling control (no display change).
+         * Runs on both lenses; als_control itself acts only on the master lens. */
+        return als_control(src, srclen);
     }
 
     if (mode == 11) {
@@ -816,22 +859,6 @@ static int load_bmp_fast(uint8_t *state, const uint8_t *bmp, uint32_t len) {
     return 0;
 }
 
-/* Wrapper for the one global display-dispatch call handling sensor event 9 /
- * UI event 0x41 (IMU_COMPASS_DIRECTION). The stock call is always preserved.
- * Navigation normally consumes this event and invokes FW_COMPASS_NOTIFY itself,
- * but its handler is absent while EvenHub/Faceclaw is active. Mode 10 marks the
- * CFW context so we invoke that same stock notifier directly with the already-
- * computed heading. This runs only on the right arm and allocates no CFW state. */
-int compass_event_forward(uint32_t display, uint32_t event, void *value) {
-    int r = FW_DISPLAY_EVENT_FORWARD(display, event, value);
-    customCfwContext *ctx = peekCustomCfwContext();
-    if (event == 0x41 && value != 0 && FW_SIDE() == 1 && ctx && ctx->compass_forward) {
-        int32_t heading = *(int32_t *)value;
-        if (heading >= 0) FW_COMPASS_NOTIFY((uint32_t)heading);
-    }
-    return r;
-}
-
 /* Return the full-panel packed-4bpp shadow stored in this container's display
  * allocation A. The 576x288 carrier allocates 165888 bytes for A; the 640x480
  * shadow needs 153600, leaving 12288 bytes unused. Buffer B is an independent,
@@ -885,6 +912,9 @@ static int cfw_cleanup_session(void) {
      * its watchdog timer) so a departing custom app cannot leave the mics on. */
     mic_cleanup_session();
     ancs_cleanup_session();
+
+    /* Give the ambient light sensor back to the stock auto-brightness machine. */
+    als_cleanup_session();
 
     int compass_was_forwarding = ctx->compass_forward != 0;
     ctx->compass_forward = 0;

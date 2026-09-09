@@ -14,8 +14,8 @@ Build a CFW image for g2_2.2.9.22 with:
   (6) a full-panel 640x480 packed-4bpp shadow copied directly into the physical
       framebuffer, and
   (7) stock wear-state notifications outside onboarding plus a current-state query, and
-  (8) Faceclaw compass forwarding from the global sensor display event to the stock
-      navigation BLE notifier while image-handler mode 10 is enabled, and
+  (8) Faceclaw compass heading + sample diagnostics from the sensor hub while
+      image-handler mode 10 is enabled, and
   (9) a lease-scoped 64 KiB texture cache plus cached-image/cached-string drawing
       through image-handler modes 12, 13, and 14, and built-in-font mode 15, and
   (10) a phone-controlled microphone configuration + multi-channel audio streaming
@@ -183,11 +183,6 @@ WEAR_NOTIFY_BL_SITES = {
     0x4ac3ea: "d9 f7 58 ff",  # ON_HEAD:  bl 0x48629e
     0x4ac44e: "d9 f7 26 ff",  # OFF_HEAD: bl 0x48629e
 }
-# Global display-thread routing of IMU sensor event 9 as UI event 0x41. Navigation's
-# UI handler normally receives this and calls the BLE compass notifier; Faceclaw has
-# EvenHub active instead, so redirect through a wrapper that preserves the stock call
-# and additionally invokes that notifier while mode 10 owns the compass.
-COMPASS_EVENT_BL_SITE = (0x444dfc, "1d f0 76 fa")  # bl FUN_004622ec(display,0x41,&heading)
 # ANCS relay. The stock ANCC profile object (profile_ancc.c, 0x4d3e5e..0x4d50e0)
 # calls its own helpers with direct `bl`s; each is retargeted to a wrapper that
 # records the event for the phone and tail-calls the stock callee, so the stock
@@ -202,6 +197,10 @@ ANCS_APP_BL_SITES = {
     0x4d4bf4: "ff f7 aa fd",   # _anccAttrHandler, first fragment: bl _anccParseAppAttributes
     0x4d4daa: "ff f7 cf fc",   # _anccAttrHandler, continuation:  bl _anccParseAppAttributes
 }
+# Capture the selected GAF source before the parser clears it, then attach the
+# matching record diagnostics at the sensor-hub heading report call.
+COMPASS_DECODE_BL_SITE = (0x4b6922, "65 f0 af fd")  # bl GAF decode, before output is cleared
+COMPASS_REPORT_BL_SITE = (0x4b632e, "ff f7 59 fc")  # bl DRV_IMUSendUIEvent(9,heading)
 
 def enc_bl(pc, target):
     """Encode a Thumb-2 BL (T1) from instruction address `pc` to `target`."""
@@ -264,11 +263,26 @@ def find_mainapp(img):
             return i, off, ps
     raise SystemExit("main-app component (ota/s200_firmware_ota.bin) not found")
 
+def validate_ring_battery_stock(img):
+    """Pin the read-only stock ABI used by ring_battery.c (2.2.9.22 only)."""
+    for address, expected, description in (
+        (0x00512d84, "0200d2b2652a00db6420384a1070c9b2002901d0012000e0002050707047334890f90000c0b27047304840787047", "cache setter and accessors"),
+        (0x00512e70, "a6720720", "cache address literal"),
+        (0x0047efa8, "80b534f01ff8002808d0fff77eff002801d0012000e00020c0b207e0fff77bff002801d0012000e00020c0b202bd", "dashboard connection predicate"),
+        (0x0047eeb2, "1a480078c0f30010c0b2704717480078c0f34010c0b27047", "connection-bit getters"),
+        (0x0047ef1c, "06740720", "connection-bit address literal"),
+        (0x004a9be2, "80b569f0ddf802bd", "dashboard battery getter"),
+    ):
+        expected = bytes.fromhex(expected)
+        if bytes(img[g2f(address):g2f(address) + len(expected)]) != expected:
+            raise ValueError(f"ring battery stock ABI mismatch: {description} at {address:#x}")
+
 def layout(img):
     """Compile the single injected code blob (patches_main.c, which #includes every
     patch source) and append it at the tail of the main-app payload. Returns
     (append_bytes, in_place_patches, mainapp=(idx,off,old_ps)). Enforces the MRAM
     ceiling (duplicate of g2flash.check_mainapp_fits_mram)."""
+    validate_ring_battery_stock(img)
     idx, comp_off, old_ps = find_mainapp(img)
 
     # This reservation is safe only if the stock image has no absolute pointer
@@ -322,11 +336,12 @@ def layout(img):
     release_addr   = base + _fn(built, "gesture_release")["offset"]
     display_copy_addr = base + _fn(built, "display_copy_hook")["offset"]
     wear_notify_addr = base + _fn(built, "faceclaw_send_wear_event")["offset"]
-    compass_event_addr = base + _fn(built, "compass_event_forward")["offset"]
     ancs_source_addr = base + _fn(built, "ancs_hook_source")["offset"]
     ancs_remove_addr = base + _fn(built, "ancs_hook_remove")["offset"]
     ancs_attr_addr   = base + _fn(built, "ancs_hook_attr")["offset"]
     ancs_app_addr    = base + _fn(built, "ancs_hook_app")["offset"]
+    compass_decode_addr = base + _fn(built, "compass_decode_capture")["offset"]
+    compass_report_addr = base + _fn(built, "compass_report_event")["offset"]
 
     # --- assemble the appended payload bytes (old_ps .. end) ---
     pad = blob_off - old_ps                     # alignment gap before the blob
@@ -404,9 +419,6 @@ def layout(img):
         *[(g2f(site), orig, enc_bl(site, wear_notify_addr),
            f"bl faceclaw_send_wear_event @ {site:#x} (outside onboarding)")
           for site, orig in WEAR_NOTIFY_BL_SITES.items()],
-        (g2f(COMPASS_EVENT_BL_SITE[0]), COMPASS_EVENT_BL_SITE[1],
-         enc_bl(COMPASS_EVENT_BL_SITE[0], compass_event_addr),
-         "bl compass_event_forward (global IMU heading -> stock nav BLE notifier)"),
         # ANCS relay: record each profile event for the phone, then run stock.
         (g2f(ANCS_SOURCE_BL_SITE[0]), ANCS_SOURCE_BL_SITE[1],
          enc_bl(ANCS_SOURCE_BL_SITE[0], ancs_source_addr),
@@ -420,6 +432,12 @@ def layout(img):
         *[(g2f(site), orig, enc_bl(site, ancs_app_addr),
            f"bl ancs_hook_app @ {site:#x} (ANCS app display name -> relay, then stock parser)")
           for site, orig in ANCS_APP_BL_SITES.items()],
+        (g2f(COMPASS_DECODE_BL_SITE[0]), COMPASS_DECODE_BL_SITE[1],
+         enc_bl(COMPASS_DECODE_BL_SITE[0], compass_decode_addr),
+         "bl compass_decode_capture (sample-matched GAF diagnostics)"),
+        (g2f(COMPASS_REPORT_BL_SITE[0]), COMPASS_REPORT_BL_SITE[1],
+         enc_bl(COMPASS_REPORT_BL_SITE[0], compass_report_addr),
+         "bl compass_report_event (stock UI + heading with diagnostics over BLE)"),
     ]
     return bytes(append), in_place, (idx, comp_off, old_ps)
 
