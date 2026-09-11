@@ -27,7 +27,7 @@
 //     G2_DRY_RUN=1 bun shapes-suite.ts       # host pipeline only, no glasses
 //     G2_HOLD_SCALE=0.5 G2_OUT=results.json bun shapes-suite.ts
 //
-// Needs the glassly-cfw firmware, revision 25 or later.
+// Needs the glassly-cfw firmware, revision 26 or later.
 
 import {
   G2Session,

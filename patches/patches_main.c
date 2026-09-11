@@ -32,6 +32,7 @@
 #include "scene.c"
 #include "compass.c"
 #include "ring_battery.c"
+#include "ble_link.c"
 #include "settings_ext.c"
 #include "mic_control.c"
 #include "ancs_relay.c"

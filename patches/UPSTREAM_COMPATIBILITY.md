@@ -26,6 +26,22 @@ Upstream keeps mode 16 for ALS, mode 17 for ring battery, settings field 105
 for `AL` reports, and field 106 for `RB` reports. Mode 19 is no longer an ALS
 alias. Mode 10 compass controls/diagnostics and mode 11 session cleanup remain.
 
+# Revision 26: BLE link speed control
+
+Upstream forces its fast BLE profile in flash (7.5 ms interval, every
+connection-parameter request turned into "fast"). Revision 26 keeps the LE 2M
+feature bit static but gates the two other effects on a context flag that the
+phone sets through sid-0x09 field 127, body `['B','L',1,op]` with op 0 = stock,
+1 = fast, 2 = query. The default is stock behaviour. Each lens has its own link,
+so send the control to both. Every settings READ reply carries field 128:
+`['B','L',1, fast, side, wantedMode, appliedMode, min16, max16, latency16]`
+(interval units 1.25 ms; modes 0xa3 fast, 0xa4 slow, 0 = update pending).
+Switching queues a connection-parameter request immediately through the stock
+state machine; mode 11 cleanup switches back to stock. The two forced in-place
+edits became `bl` retargets at `0x47ae52` and `0x47b444`; see
+`patches/ble_link.c` for the recovered stock mechanism. The settings reply is
+now 100 bytes. Hardware-unverified.
+
 # Revision 25: numeric revision only
 
 Following upstream's move from capability tokens to `Faceclaw/<n>`, field 100

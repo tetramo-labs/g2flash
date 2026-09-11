@@ -29,7 +29,7 @@ export interface GlasslyCfw {
 }
 
 // First top-level length-delimited field `fieldNo` of a protobuf message.
-function findLenDelimField(buf: Uint8Array, fieldNo: number): Uint8Array | null {
+export function findLenDelimField(buf: Uint8Array, fieldNo: number): Uint8Array | null {
   let p = 0;
   const readVarint = (): number => {
     let v = 0, shift = 0;
@@ -85,7 +85,7 @@ export async function queryGlasslyCfw(session: G2SessionLike, magic: number): Pr
 }
 
 /** Revision that introduced the bare numeric string; every demo here needs it. */
-export const REQUIRED_REVISION = 25;
+export const REQUIRED_REVISION = 26;
 
 export function describeCfw(cfw: GlasslyCfw | null): string {
   return cfw ? `CFW ${cfw.raw}` : "no CFW capability field";

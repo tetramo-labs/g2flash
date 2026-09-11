@@ -55,6 +55,28 @@ static void ancs_apply_control(const uint8_t *p, uint32_t n) {
     assert(n == 4 && p[0] == 'A' && p[1] == 'N' && p[2] == 1 && p[3] == 3);
     ancs_controls++;
 }
+
+/* BLE link speed: stock globals and calls become counters. */
+#define BLE_LINK_HOST_TEST 1
+static uint8_t stock_fast_profile[16] = {0,0,0,0, 0x0c,0, 0x18,0, 0,0, 0x58,2, 5,0, 0,0};
+static uint8_t stock_slow_profile[16] = {0,0,0,0, 0x24,0, 0x48,0, 4,0, 0x58,2, 5,0, 0,0};
+static const uint8_t *ble_profile_slot;
+static uint8_t ble_applied, ble_wanted;
+static unsigned ble_cancels, ble_posts, ble_post_fn, ble_post_arg, ble_post_ms, ble_sends, ble_sent_mode;
+static void *ble_sent_conn;
+#define BLE_PROFILE_SLOT ble_profile_slot
+#define BLE_STOCK_FAST_PROFILE ((const uint8_t *)stock_fast_profile)
+#define BLE_APPLIED_MODE ble_applied
+#define BLE_WANTED_MODE ble_wanted
+#define BLE_SET_WANTED(m) ((void)(ble_wanted = (uint8_t)(m)))
+#define BLE_DEFER_CANCEL(fn) ((void)(ble_cancels++, assert((fn) == BLE_REQUEST_CB)))
+#define BLE_DEFER_POST(fn, arg, ms) ((void)(ble_posts++, ble_post_fn = (fn), ble_post_arg = (arg), ble_post_ms = (ms)))
+#define BLE_REQUEST_CB 0x0047b475u
+#define BLE_SEND_REQUEST(mode, conn) (ble_sends++, ble_sent_mode = (mode), ble_sent_conn = (conn), 0)
+#define BLE_SIDE() ((uint32_t)side)
+#define BLE_PEEK() peekCustomCfwContext()
+#define BLE_CTX() peekCustomCfwContext()
+#include "ble_link.c"
 #include "upstream_functions.inc"
 
 #define COMPASS_HOST_TEST 1
@@ -123,8 +145,8 @@ static void settings(void) {
     sends = 0;
     assert(settings_send_wrapper(1,9,buf,44) == 0 && sends == 2);
     const uint8_t *caps = field(sent[0],sent_len[0],100,&n);
-    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/25",13) == 0);
-    assert(sent_len[0] == 44 + 16 + 24); /* revision string and microphone status */
+    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/26",13) == 0);
+    assert(sent_len[0] == 44 + 16 + 24 + 16); /* revision string, microphone and BLE status */
     assert(sent_len[0] + 2 <= 232); /* payload plus CRC stays in one BLE frame */
     assert(field(sent[0],sent_len[0],104,&n) && n == 21);
     assert(!field(sent[0],sent_len[0],106,&n));
@@ -163,8 +185,90 @@ static void headings(void) {
     have_ctx = 0; compass_report_event(9,0); have_ctx = 1;
     assert(sends == 0 && stock_events == before + 6);
 }
+static const uint8_t *ble_status(void) {
+    uint8_t buf[256] = {8,2,16,1,26,38};
+    unsigned n;
+    sends = 0;
+    assert(settings_send_wrapper(1,9,buf,44) == 0);
+    const uint8_t *st = field(sent[0], sent_len[0], 128, &n);
+    assert(st && n == 13 && st[0] == 'B' && st[1] == 'L' && st[2] == 1);
+    return st;
+}
+static void ble_link(void) {
+    const uint8_t fast[] = {0xfa, 0x07, 4, 'B', 'L', 1, 1};
+    const uint8_t stock[] = {0xfa, 0x07, 4, 'B', 'L', 1, 0};
+    const uint8_t query[] = {0xfa, 0x07, 4, 'B', 'L', 1, 2};
+    const uint8_t bad[] = {0xfa, 0x07, 4, 'B', 'X', 1, 1};
+    const uint8_t old_version[] = {0xfa, 0x07, 4, 'B', 'L', 2, 1};
+    const uint8_t unknown_op[] = {0xfa, 0x07, 4, 'B', 'L', 1, 9};
+    ctx.ble_fast = 0; side = 1;
+    ble_profile_slot = stock_fast_profile; ble_applied = 0xa3; ble_wanted = 0xa3;
+    ble_cancels = ble_posts = ble_sends = 0;
+
+    /* Default: every hook is a pass-through and the reply says stock. */
+    assert(ble_filter_mode(0xa4) == 0xa4 && ble_filter_mode(0xa3) == 0xa3);
+    assert(ble_hook_request(0xa3, (void *)0x1234) == 0 && ble_sends == 1);
+    assert(ble_sent_mode == 0xa3 && ble_sent_conn == (void *)0x1234 && ble_profile_slot == stock_fast_profile);
+    const uint8_t *st = ble_status();
+    assert(st[3] == 0 && st[4] == 1 && st[5] == 0xa3 && st[6] == 0xa3);
+    assert(st[7] == 0x0c && st[8] == 0 && st[9] == 0x18 && st[10] == 0 && st[11] == 0 && st[12] == 0);
+    faceclaw_scan_settings_control(bad, sizeof(bad));
+    faceclaw_scan_settings_control(old_version, sizeof(old_version));
+    faceclaw_scan_settings_control(unknown_op, sizeof(unknown_op));
+    faceclaw_scan_settings_control(query, sizeof(query));
+    faceclaw_scan_settings_control(stock, sizeof(stock));
+    assert(ctx.ble_fast == 0 && ble_posts == 0 && ble_cancels == 0 && ble_applied == 0xa3);
+
+    /* FAST: flag set, applied mode cleared, fast request queued the stock way. */
+    faceclaw_scan_settings_control(fast, sizeof(fast));
+    assert(ctx.ble_fast == 1 && ble_applied == 0 && ble_wanted == 0xa3);
+    assert(ble_cancels == 1 && ble_posts == 1 && ble_post_fn == 0x0047b475u && ble_post_arg == 0xa3 && ble_post_ms == 0);
+    faceclaw_scan_settings_control(fast, sizeof(fast));
+    assert(ble_posts == 1); /* repeated request is a no-op */
+    assert(ble_filter_mode(0xa4) == 0xa3 && ble_filter_mode(0xa3) == 0xa3 && ble_filter_mode(0) == 0xa3);
+    ble_sends = 0;
+    assert(ble_hook_request(0xa3, 0) == 0 && ble_sends == 1 && ble_sent_mode == 0xa3);
+    assert(ble_profile_slot == ctx.ble_fast_profile);
+    const uint8_t *p = ctx.ble_fast_profile;
+    assert(p[4] == 6 && p[5] == 0 && p[6] == 6 && p[7] == 0 && p[8] == 0 && p[9] == 0);
+    assert(p[10] == 0x58 && p[11] == 2 && p[12] == 5 && p[13] == 0); /* timeout and retries copied */
+    ble_profile_slot = stock_slow_profile;
+    assert(ble_hook_request(0xa4, 0) == 0 && ble_profile_slot == stock_slow_profile); /* mode-gated */
+    ble_profile_slot = ctx.ble_fast_profile; ble_applied = 0xa3;
+    st = ble_status();
+    assert(st[3] == 1 && st[7] == 6 && st[8] == 0 && st[9] == 6 && st[10] == 0 && st[11] == 0 && st[12] == 0);
+
+    /* STOCK: restore the stock pointer, re-request what the stock machine wants. */
+    ble_wanted = 0xa4;
+    faceclaw_scan_settings_control(stock, sizeof(stock));
+    assert(ctx.ble_fast == 0 && ble_profile_slot == stock_fast_profile && ble_applied == 0);
+    assert(ble_cancels == 2 && ble_posts == 2 && ble_post_arg == 0xa4 && ble_wanted == 0xa4);
+    faceclaw_scan_settings_control(fast, sizeof(fast));
+    assert(ble_posts == 3 && ble_post_arg == 0xa3);
+    ble_wanted = 0xa3; ble_profile_slot = stock_slow_profile;
+    faceclaw_scan_settings_control(stock, sizeof(stock));
+    assert(ble_posts == 4 && ble_post_arg == 0xa3 && ble_profile_slot == stock_slow_profile);
+
+    /* Mode-11 cleanup leaves the link at stock; a second cleanup does nothing. */
+    faceclaw_scan_settings_control(fast, sizeof(fast));
+    assert(ctx.ble_fast == 1 && ble_posts == 5);
+    ble_cleanup_session();
+    assert(ctx.ble_fast == 0 && ble_posts == 6 && ble_post_arg == 0xa3);
+    ble_cleanup_session();
+    assert(ble_posts == 6);
+
+    /* Without a context the hooks stay stock and the reply still parses. */
+    have_ctx = 0;
+    assert(ble_filter_mode(0xa4) == 0xa4);
+    ble_profile_slot = stock_fast_profile;
+    assert(ble_hook_request(0xa3, 0) == 0 && ble_profile_slot == stock_fast_profile);
+    ble_cleanup_session();
+    st = ble_status();
+    assert(st[3] == 0 && ble_posts == 6);
+    have_ctx = 1;
+}
 int main(void) {
-    routing(); batteries(); settings(); headings();
-    puts("PASS: merged mode routing, bounded settings replies, ring battery and compass diagnostics");
+    routing(); batteries(); settings(); headings(); ble_link();
+    puts("PASS: merged mode routing, bounded settings replies, ring battery, compass diagnostics and BLE link control");
     return 0;
 }

@@ -30,7 +30,7 @@
 //
 // Every mode plays by the clock: the frame due now goes out, and a frame the
 // link could not keep up with is skipped rather than queued, as the miniapp
-// does. Needs the glassly-cfw firmware, revision 25 or later.
+// does. Needs the glassly-cfw firmware, revision 26 or later.
 
 import {
   G2Session,

@@ -42,7 +42,7 @@ def main():
             raise RuntimeError(f"Cannot find production function {name}")
         functions.append(match[0])
     settings = (ROOT / "patches/settings_ext.c").read_text()
-    fields = re.findall(r"^#define (?:FACECLAW|MIC|ANCS)_CONTROL_FIELD .*", settings, re.M)
+    fields = re.findall(r"^#define (?:FACECLAW|MIC|ANCS|BLE)_CONTROL_FIELD .*", settings, re.M)
     (out / "upstream_functions.inc").write_text("\n\n".join(fields + functions) + "\n")
     for test in ("ancs_relay", "upstream"):
         binary = out / f"{test}_host_test"

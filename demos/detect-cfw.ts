@@ -10,8 +10,8 @@
 //
 // Expected on CFW:
 //     firmware: L=2.2.9.22 R=2.2.9.22
-//     CFW detected: GLASSLYCFW/25
-//       revision 25 (required: 25)
+//     CFW detected: GLASSLYCFW/26
+//       revision 26 (required: 26)
 // Expected on stock:
 //     no CFW capability field — stock firmware (or pre-caps CFW build)
 

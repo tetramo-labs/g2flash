@@ -66,6 +66,12 @@ unsigned mic_append_status(unsigned char *buf, unsigned len, unsigned capacity);
  * and the STATUS reply go out as field 125 notifies. */
 #define ANCS_CONTROL_FIELD 126u
 void ancs_apply_control(const uint8_t *data, uint32_t len);
+/* BLE link speed (ble_link.c, same translation unit). Field 127 selects the
+ * stock or the 7.5 ms fast connection profile; field 128 reports the state on
+ * every settings READ. */
+#define BLE_CONTROL_FIELD 127u
+void ble_apply_control(const uint8_t *data, uint32_t len);
+unsigned ble_append_status(unsigned char *buf, unsigned len, unsigned capacity);
 typedef void (*display_start_fn)(unsigned app_id, void *arg, unsigned arg_len, void *cb);
 
 #define FW_SEND 0x0047d809 /* FUN_0047d808 | thumb bit */
@@ -308,6 +314,8 @@ static void faceclaw_scan_settings_control(const uint8_t *buf, uint32_t len) {
                 mic_apply_control(p, item_len);
             else if (field == ANCS_CONTROL_FIELD)
                 ancs_apply_control(p, item_len);
+            else if (field == BLE_CONTROL_FIELD)
+                ble_apply_control(p, item_len);
             p += item_len;
         } else if (wire == 5) {
             if ((uint32_t)(end - p) < 4) return;
@@ -356,6 +364,9 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   26 -> BLE link speed control: field 127 selects stock (default) or the
+//         7.5 ms fast profile at runtime, field 128 reports it on every
+//         settings read. The fast profile is no longer forced on.
 //   25 -> first revision using the bare numeric scheme. Same feature set as the
 //         last token-based advertisement, "GLASSLYCFW/24 img640 imgz rle
 //         wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13
@@ -373,11 +384,12 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/25";
+        static const char caps[] = "GLASSLYCFW/26";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);
         len = mic_append_status(buf, len, SETTINGS_RESPONSE_CAPACITY);
+        len = ble_append_status(buf, len, SETTINGS_RESPONSE_CAPACITY);
         /* Keep the settings reply inside one BLE frame. The ring report is
          * a separate notification, with the same field/body as upstream mode 17. */
         int result = ((send_fn)FW_SEND)(type, sid, buf, len);

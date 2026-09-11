@@ -13,7 +13,11 @@ G2 glasses over Bluetooth and show off the [custom firmware](../) built by
 - **`shapes-demo.ts`** — draws a vector test card with mode 36, then builds a
   retained scene (mode 37) and lets the firmware animate it: eased glides and
   tweens of geometry, color and stroke width, driven by one small message per
-  transition. Needs the `glassly-cfw` build, revision 25 or later.
+  transition. Needs the `glassly-cfw` build, revision 26 or later.
+- **`ble-mode.ts`** — switches the BLE link between the stock connection
+  profile (default) and the 7.5 ms fast profile, or queries it:
+  `bun ble-mode.ts [stock|fast|query]`. Sends sid 0x09 field 127 to both
+  lenses and prints the field-128 status from each reply.
 - **`shapes-suite.ts`** — the glassly example-miniapp shapes test suite (every
   `render()` shape element plus the transition contract, 43 cases) run straight
   against the glasses. The phone's render pipeline and its mode-37 scene encoder

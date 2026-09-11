@@ -22,9 +22,10 @@ Build a CFW image for g2_2.2.9.22 with:
       channel (settings fields 103/104 + the 'SM' stream frame) riding the
       already-hooked sid-0x09 settings seams -- no new patch sites; see
       mic_control.c for the contract and its hardware validation gate, and
-  (11) LE 2M support, a 7.5 ms / latency-0 fast connection profile, and persistent
-      fast-mode requests so the stock 60-second slow-mode timer cannot throttle
-      custom image traffic, and
+  (11) LE 2M support plus a phone-selectable 7.5 ms / latency-0 fast connection
+      profile (settings field 127; stock behaviour by default) that also keeps
+      the stock 60-second slow-mode timer from throttling image traffic while
+      it is on, and
   (12) an ANCS relay (sid-0x09 fields 125/126) that retargets four `bl` sites
       inside the stock ANCC profile object so the right lens forwards every iOS
       notification it receives (source event, attributes, app display name) to
@@ -81,18 +82,23 @@ MRAM_END      = 0x00800000
 APP_MAX_END   = 0x007F0000   # conservative ceiling: leave the top ~56 KB for NV + flag
 BLOB_ALIGN    = 4            # 4-byte-align each appended blob (Thumb literal pools)
 
-# BLE policy validated with sustained 2,000-byte/window-3 transfers (~41 KiB/s)
-# and a day of battery use. These are Apollo host changes, not EM9305 ROM edits.
-# Startup Set Local Feature (vendor opcode 0xfff2): byte 1 bit 0 is LE 2M.
+# BLE policy. Upstream validated the 7.5 ms profile with sustained 2,000-byte/
+# window-3 transfers (~41 KiB/s) and a day of battery use, but forced it on in
+# flash. Here it is selected at runtime (ble_link.c, settings field 127) and the
+# stock profile is the default. These are Apollo host changes, not EM9305 ROM
+# edits. Startup Set Local Feature (vendor opcode 0xfff2): byte 1 bit 0 is LE
+# 2M; that bit stays enabled statically because it only exposes the PHY.
 BLE_2M_SITE = (0x4c6b30, "7c 20 50 70")  # movs r0,#0x7c; strb r0,[r2,#1]
-# Fast profile min/max intervals (1.25 ms units), then latency/timeout/retries.
-BLE_FAST_INTERVAL_SITE = (0x7ae7b8, "0c 00 18 00 00 00 58 02 05 00 00 00")
-# _connectParamReq_impl saves its mode argument: movs r5,r0; bl 0x4745bc.
-# Force 0xa3 (fast), including when the delayed 0xa4 (slow) request arrives.
-# Keep the normal connection validation, already-fast check and deferral logic.
-# This intentionally applies while idle too; Android can still negotiate another
-# interval, and the phone must request 2M PHY to use the newly exposed feature.
-BLE_FORCE_FAST_SITE = (0x47ae50, "05 00 f9 f7 b3 fb")
+# _connectParamReq_impl saves its mode argument: movs r5,r0; bl 0x4745bc. The
+# `bl` is retargeted to ble_hook_mode, which rewrites r5 to fast (0xa3) while
+# the phone has fast mode on, then tail-calls the connection getter. Stock
+# validation, the already-applied check and the deferral logic are untouched.
+BLE_MODE_BL_SITE = (0x47ae52, "f9 f7 b3 fb")
+# Once the stock code has stored the fast/slow profile pointer at 0x200765a0 it
+# calls 0x47a6a4(mode, conn) to send the request. That `bl` goes to
+# ble_hook_request, which swaps in a RAM copy of the fast entry with
+# min = max = 7.5 ms while fast mode is on, then calls the stock sender.
+BLE_REQUEST_BL_SITE = (0x47b444, "ff f7 2e f9")
 
 # Reserve the final 1 KiB of the stock primary TLSF arena for CFW-owned fixed
 # state. Stock initializes [0x202728a8,0x2029f8a8) with size 0x2d000 at
@@ -293,12 +299,38 @@ def validate_ring_battery_stock(img):
         if bytes(img[g2f(address):g2f(address) + len(expected)]) != expected:
             raise ValueError(f"ring battery stock ABI mismatch: {description} at {address:#x}")
 
+def validate_ble_link_stock(img):
+    """Pin the stock connection-parameter machinery used by ble_link.c (2.2.9.22)."""
+    for address, expected, description in (
+        (0x007ae7a4, "00000000240048000400580205000000000000000c0018000000580205000000", "slow and fast connection profiles"),
+        (0x0047ae4c, "78b585b00500f9f7b3fb", "_connectParamReq_impl prologue, movs r5,r0, bl connection getter"),
+        (0x004745bc, "dff8f40500687047", "connection getter"),
+        (0x0047b1cc, "28006c490978c0b2884205d1", "applied-mode no-op check"),
+        (0x0047b30c, "2800c0b2a32839d1504ea6483060", "fast profile pointer store"),
+        (0x0047b388, "334e35483060", "slow profile pointer store"),
+        (0x0047b43e, "21002800c0b2fff72ef9dff8", "bl 0x47a6a4 and current-mode store"),
+        (0x0047b458, "a0650720", "profile slot literal"),
+        (0x0047b460, "a4e77a00", "slow profile literal"),
+        (0x0047b5b0, "b4e77a00", "fast profile literal"),
+        (0x0047b380, "824d0020", "applied-mode literal"),
+        (0x0047ae24, "834d0020", "wanted-mode literal"),
+        (0x0047a686, "10b50400c9f729fbdff894070470dff890070168491c0160c9f72bfb10bd", "wanted-mode setter"),
+        (0x0047a6a4, "f8b588b004000e00", "request sender prologue"),
+        (0x0047a85a, "dff8fc0b", "request sender profile slot load"),
+        (0x0047c2d0, "a320fef7d8f9dff834432000dcf739fc0022a3212000dcf78cfb13bd", "stock fast request sequence (set wanted, cancel, post)"),
+        (0x0047c60c, "75b44700", "deferred request callback literal"),
+    ):
+        expected = bytes.fromhex(expected)
+        if bytes(img[g2f(address):g2f(address) + len(expected)]) != expected:
+            raise ValueError(f"BLE link stock ABI mismatch: {description} at {address:#x}")
+
 def layout(img):
     """Compile the single injected code blob (patches_main.c, which #includes every
     patch source) and append it at the tail of the main-app payload. Returns
     (append_bytes, in_place_patches, mainapp=(idx,off,old_ps)). Enforces the MRAM
     ceiling (duplicate of g2flash.check_mainapp_fits_mram)."""
     validate_ring_battery_stock(img)
+    validate_ble_link_stock(img)
     idx, comp_off, old_ps = find_mainapp(img)
 
     # This reservation is safe only if the stock image has no absolute pointer
@@ -358,6 +390,8 @@ def layout(img):
     ancs_app_addr    = base + _fn(built, "ancs_hook_app")["offset"]
     compass_decode_addr = base + _fn(built, "compass_decode_capture")["offset"]
     compass_report_addr = base + _fn(built, "compass_report_event")["offset"]
+    ble_mode_addr    = base + _fn(built, "ble_hook_mode")["offset"]
+    ble_request_addr = base + _fn(built, "ble_hook_request")["offset"]
 
     # --- assemble the appended payload bytes (old_ps .. end) ---
     pad = blob_off - old_ps                     # alignment gap before the blob
@@ -386,10 +420,6 @@ def layout(img):
     in_place = [
         (g2f(BLE_2M_SITE[0]), BLE_2M_SITE[1], "7d 20",
          "Set Local Feature: enable LE 2M bit 8"),
-        (g2f(BLE_FAST_INTERVAL_SITE[0]), BLE_FAST_INTERVAL_SITE[1], "06 00 06 00",
-         "fast connection interval min=max=7.5 ms; latency remains 0"),
-        (g2f(BLE_FORCE_FAST_SITE[0]), BLE_FORCE_FAST_SITE[1], "a3 25",
-         "_connectParamReq_impl: force requested mode to fast (0xa3); disables idle slow requests"),
         (g2f(PRIMARY_TLSF_SIZE_SITE[0]), PRIMARY_TLSF_SIZE_SITE[1],
          PRIMARY_TLSF_CFW_SIZE,
          "reserve final 1 KiB of primary TLSF arena for CFW context anchor"),
@@ -460,6 +490,13 @@ def layout(img):
         (g2f(COMPASS_REPORT_BL_SITE[0]), COMPASS_REPORT_BL_SITE[1],
          enc_bl(COMPASS_REPORT_BL_SITE[0], compass_report_addr),
          "bl compass_report_event (stock UI + heading with diagnostics over BLE)"),
+        # BLE link speed: phone-selectable fast profile, stock by default.
+        (g2f(BLE_MODE_BL_SITE[0]), BLE_MODE_BL_SITE[1],
+         enc_bl(BLE_MODE_BL_SITE[0], ble_mode_addr),
+         "bl ble_hook_mode (_connectParamReq_impl: fast mode forces 0xa3, then stock getter)"),
+        (g2f(BLE_REQUEST_BL_SITE[0]), BLE_REQUEST_BL_SITE[1],
+         enc_bl(BLE_REQUEST_BL_SITE[0], ble_request_addr),
+         "bl ble_hook_request (swap in the 7.5 ms profile while fast mode is on, then stock sender)"),
     ]
     return bytes(append), in_place, (idx, comp_off, old_ps)
 

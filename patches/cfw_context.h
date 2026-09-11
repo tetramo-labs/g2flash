@@ -158,6 +158,11 @@ typedef struct {
     uint32_t als_last_reported;             /* value carried by the last report */
     uint32_t als_last_report_tick;          /* FW_MS_TICK of the last report (0 = none yet) */
     cfw_compass_sample compass_samples[20];
+    /* --- BLE link speed (ble_link.c, sid-0x09 fields 127/128). Stock behaviour
+     * unless the phone asks for the 7.5 ms fast profile. Appended at the tail. --- */
+    uint8_t  ble_fast;                      /* 1 = fast profile requested by the phone */
+    uint8_t  ble_pad0[3];
+    uint8_t  ble_fast_profile[16];          /* RAM copy of the stock fast entry, min = max = 7.5 ms */
 } customCfwContext;
 
 #define CFW_CTX_SLOT  0x2029f4a8U    /* first word of the CFW-reserved TLSF tail */
@@ -165,7 +170,7 @@ typedef struct {
 #define CFW_ALLOC_DIAG_MAGIC 0xA110CA7EU
 
 // Marker used to validate that the CFW context pointer hasn't been clobbered.
-#define CFW_CTX_MAGIC 0xC0FFEE6BU    /* combined scene, ANCS, ALS and compass context */
+#define CFW_CTX_MAGIC 0xC0FFEE6CU    /* scene, ANCS, ALS, compass and BLE link context */
 
 #define FW_MS_TICK  (*(volatile uint32_t *)0x20076d80U)  /* firmware 1 ms OS tick (SysTick chain) */
 

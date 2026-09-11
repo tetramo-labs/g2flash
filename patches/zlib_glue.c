@@ -312,6 +312,7 @@ static int cfw_cleanup_session(void);
 static void mic_cleanup_session(void);   /* mic_control.c (same TU): mic hw + lease teardown */
 static void ancs_cleanup_session(void);  /* ancs_relay.c (same TU): relay lease + drain timer */
 static void als_cleanup_session(void);   /* als_sensor.c (same TU): passive ALS teardown */
+static void ble_cleanup_session(void);   /* ble_link.c (same TU): back to the stock link profile */
 int ring_battery_control(const uint8_t *src, uint32_t srclen); /* mode 17 */
 int als_control(const uint8_t *src, uint32_t srclen); /* als_sensor.c: mode 16 */
 
@@ -914,6 +915,7 @@ static int cfw_cleanup_session(void) {
 
     /* Give the ambient light sensor back to the stock auto-brightness machine. */
     als_cleanup_session();
+    ble_cleanup_session();
 
     int compass_was_forwarding = ctx->compass_forward != 0;
     ctx->compass_forward = 0;

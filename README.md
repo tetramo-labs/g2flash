@@ -89,8 +89,9 @@ must use the new numbers; old graphics packets are no longer accepted. See
 [the wire mapping](patches/UPSTREAM_COMPATIBILITY.md).
 
 Revision 25 drops the feature tokens: the field-100 string is just
-`GLASSLYCFW/25`, and it adopts upstream's fast BLE profile (LE 2M, 7.5 ms
-connection interval, slow mode disabled).
+`GLASSLYCFW/<n>`. Revision 26 makes upstream's fast BLE profile (7.5 ms
+connection interval, slow mode disabled) a runtime choice through settings
+field 127, defaulting to stock behaviour, and reports it in field 128.
 
 Run the complete offline suite with
 `python3 patches/host/run_vector_tests.py --out /tmp/g2-vector-tests`.
@@ -136,11 +137,15 @@ gated behind an explicit arm flag because several of the recovered stock audio
 entry points are ABI-inferred and must be validated on hardware first; see the
 contract comment in `patches/mic_control.c`.
 
-The firmware also reconfigures the bluetooth stack for 2M PHY support and
-requests a 7.5 ms connection interval with latency 0. This prevents the stock
-one-minute slow-mode timer from throttling screen transfers. Connection
-parameters still depend on the phone; it must request  2M PHY and must agree to
-the short connection interval.
+The firmware also enables LE 2M PHY support and offers a phone-selectable
+fast link: settings field 127 (`['B','L',1,op]`, op 0 = stock, 1 = fast,
+2 = query, sent to each lens) switches between the untouched stock connection
+behaviour (the default: 15-30 ms fast profile, then the one-minute slow-mode
+timer) and a 7.5 ms / latency-0 profile with slow mode suppressed, which keeps
+screen transfers from being throttled at a battery cost. Every settings read
+reports the state in field 128. Mode 11 cleanup returns the link to stock.
+Connection parameters still depend on the phone; it must request 2M PHY and
+must agree to the short connection interval. See `patches/ble_link.c`.
 
 Some other features this has (used by Faceclaw, but the exact API may not be
 fully documented):
