@@ -17,21 +17,32 @@ path op 8 and rotation op 9), record formats and ANCS `AN` version-1 bodies
 remain unchanged. Protobuf bytes tags for ANCS are now `EA 07` (field 125)
 and `F2 07` (field 126).
 
-Clients must migrate to the new numbers and check `GLASSLYCFW/24` or later with
-`shapes36 scene37 anim38`. All repository demos and host replay consumers use
-the new numbers. External clients such as Glassly must update their encoders
-and ANCS listeners too; old packet numbers are not graphics/ANCS aliases.
+Clients must migrate to the new numbers and check `GLASSLYCFW/24` or later. All
+repository demos and host replay consumers use the new numbers. External clients
+such as Glassly must update their encoders and ANCS listeners too; old packet
+numbers are not graphics/ANCS aliases.
 
 Upstream keeps mode 16 for ALS, mode 17 for ring battery, settings field 105
 for `AL` reports, and field 106 for `RB` reports. Mode 19 is no longer an ALS
 alias. Mode 10 compass controls/diagnostics and mode 11 session cleanup remain.
 
-The `GLASSLYCFW/24` capability string is 154 bytes and retains every feature
-token. With the 44-byte stock reply and full microphone status, the response
-is 226 bytes (228 including CRC), within the 232-byte BLE packet payload budget. Ring-battery status follows
-in a separate notification to avoid exceeding the known-working BLE packet size
-(see commit `8746d55`). Detect ring support by revision 24 or the `RB` report;
-the upstream `ringbat17` token remains omitted to preserve the size limit.
+# Revision 25: numeric revision only
+
+Following upstream's move from capability tokens to `Faceclaw/<n>`, field 100
+now carries just `GLASSLYCFW/25`. Feature tokens are gone; clients gate on the
+revision number (`demos/glassly-cfw.ts` shows the parse). The revision-24
+feature set is unchanged. Revision 25 also picks up upstream's fast BLE
+profile: LE 2M is enabled in the local feature set, the fast connection
+profile requests a 7.5 ms interval with latency 0, and the delayed slow-mode
+request is forced back to fast, so the stock 60-second slow-mode timer no
+longer throttles image traffic. The phone still has to request 2M PHY and
+agree to the interval.
+
+With the 44-byte stock reply and full microphone status the settings response
+is now 84 bytes. Ring-battery status still follows in a separate notification
+(the single-frame size pressure that motivated it is gone, but the phone-side
+decoder expects the separate report). Detect ring support by revision 24 or
+later, or by the `RB` report.
 
 Run `python3 patches/host/run_vector_tests.py --out /tmp/g2-vector-tests` for
 sanitized C tests, TypeScript fixtures, video replay, and ARM compilation.

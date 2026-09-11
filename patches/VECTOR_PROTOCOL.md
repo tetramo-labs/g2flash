@@ -3,7 +3,8 @@
 Revision 24 moves the graphics transport from modes 16/17/18 to **36/37/38**
 to avoid upstream sensor commands. The path and rotation operations introduced
 in revision 21 keep their record formats and opcodes (8 and 9). Check
-`GLASSLYCFW/24` or later and the `scene37` capability before sending these packets.
+`GLASSLYCFW/24` or later before sending these packets (revision 25 drops the
+feature tokens, so check the revision number only).
 Modes 37/38 remain standalone messages, not mode-8 batch children.
 
 The glasses render retained vector paths themselves. The wire input is compiled

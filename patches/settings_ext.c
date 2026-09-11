@@ -10,7 +10,16 @@
 // any timeout-based probing. The field is:
 //
 //   field 100, wire type 2 (length-delimited string):
-//     "GLASSLYCFW/<ver> <space-separated feature tokens>"
+//     "GLASSLYCFW/<n>"
+//
+// <n> is the Glassly firmware revision. It is bumped every time the firmware
+// contract changes (a new mode, field, event, or a behaviour change the phone
+// app depends on) and is NOT kept in sync with the Glassly phone app version.
+// The phone app requires a specific revision and offers to reflash whenever the
+// installed one is older. Earlier builds advertised "GLASSLYCFW/<n> <feature
+// tokens>" (and before that "EVENCFW/<n> <feature tokens>"); the tokens are
+// gone, so clients discover features by revision alone. Upstream Faceclaw
+// firmware uses the same scheme under the "Faceclaw/" prefix.
 //
 // Tag 100 is far above the stock message's fields (1..19), so stock decoders and
 // the phone bridge skip it as an unknown field -- fully backward compatible.
@@ -345,30 +354,18 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
     );
 }
 
-// Capability string "GLASSLYCFW/<ver> <space-separated feature tokens>":
-//   GLASSLYCFW/24 -> magic prefix + contract version (detect: starts-with "GLASSLYCFW/")
-//   imgz       -> zlib (DEFLATE) compressed image payloads
-//   rle        -> compact run-length encoded delta rows
-//   wakelease  -> fail-open Faceclaw ownership of idle wakes / local Even AI
-//   directfb   -> bypass LVGL and copy the packed shadow into the panel framebuffer
-//   img640     -> shadow drawing modes use the full 640x480 panel independent of the carrier
-//   fbguard    -> preserve direct frames across stock widget repaints under a fail-open lease
-//   wearnotify -> lifecycle-independent wear events + private current-state query
-//   cleanup11  -> mode 11 returns a departing custom-app session to stock state
-//   texcache12 -> mode 12 updates a lease-scoped, phone-owned 64 KiB texture cache
-//   teximg13   -> mode 13 draws/recolors a 4bpp RLE image from the texture cache
-//   texstr14   -> mode 14 draws/recolors strings through a cached glyph-offset table
-//   font15     -> mode 15 draws UTF-8 with the built-in 20 px font and kerning
-//   micctl     -> private mic-control channel (field 103 / read-back field 104)
-//   taplong11  -> source-qualified tap-then-long gesture as private event type 11
-//   shapes36   -> mode 36 rasterizes vector shape records straight into the shadow
-//   scene37    -> mode 37 retained shape scene with eased glide/tween animation
-//   anim38     -> mode 38 animation control (freeze, frame period, release, finish)
-//   Inline text, ANCS relay, compiled paths and rotation retain their record
-//   formats from revisions 19-21; only their outer transport IDs change below.
-//   Revision 24 moves local graphics to modes 36-38 and ANCS to fields 125/126.
-//   ALS and ring battery retain upstream modes 16/17 and fields 105/106.
-//   Discover them by revision; the 154-byte string keeps the reply in one BLE frame.
+// Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
+// history, for reference when bumping:
+//   25 -> first revision using the bare numeric scheme. Same feature set as the
+//         last token-based advertisement, "GLASSLYCFW/24 img640 imgz rle
+//         wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13
+//         texstr14 font15 micctl taplong11 shapes36 scene37 anim38", plus the
+//         upstream fast BLE profile (LE 2M, 7.5 ms interval, no slow mode).
+//         Ring battery (field 106, mode 17) and ALS (field 105, mode 16) come
+//         from upstream; the ring report follows a settings read as a separate
+//         notification.
+//   24 -> local graphics moved to modes 36-38 and ANCS to fields 125/126.
+//   19-23 -> inline text, ANCS relay, compiled paths and rotation.
 //
 // The string is a normal rodata literal now that build.py emits/relocates .rodata
 // (earlier this had to be spelled out byte-by-byte to avoid a rodata section).
@@ -376,7 +373,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/24 img640 imgz rle wakelease directfb fbguard wearnotify cleanup11 texcache12 teximg13 texstr14 font15 micctl taplong11 shapes36 scene37 anim38";
+        static const char caps[] = "GLASSLYCFW/25";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

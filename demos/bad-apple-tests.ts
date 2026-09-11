@@ -30,7 +30,7 @@
 //
 // Every mode plays by the clock: the frame due now goes out, and a frame the
 // link could not keep up with is skipped rather than queued, as the miniapp
-// does. Needs the glassly-cfw firmware (scene37 anim38 directfb).
+// does. Needs the glassly-cfw firmware, revision 25 or later.
 
 import {
   G2Session,
@@ -39,10 +39,9 @@ import {
   buildImageRawData,
   planImageFragments,
   querySettings,
-  queryCapabilities,
-  hasFeature,
   type ImageContainerSpec,
 } from "g2-kit/ble";
+import { describeCfw, queryGlasslyCfw, REQUIRED_REVISION } from "./glassly-cfw";
 import { startHeartbeat } from "g2-kit/ui";
 import { deflateSync } from "node:zlib";
 import { GifReader } from "omggif";
@@ -488,16 +487,15 @@ async function openLink(): Promise<Link> {
   const session = await G2Session.open();
   const settings = await querySettings(session, nextMagic());
   if (settings) console.log(`firmware: L=${settings.leftSoftwareVersion} R=${settings.rightSoftwareVersion}`);
-  let caps = await queryCapabilities(session, nextMagic());
-  if (!caps) caps = await queryCapabilities(session, nextMagic());
-  const needed = ["directfb", ...(MODES.includes("shapes") ? ["scene37", "anim38"] : [])];
-  if (!caps || !needed.every((f) => hasFeature(caps!, f))) {
-    console.log(caps ? `CFW ${caps.raw}` : "no CFW capability field");
-    console.log(`these tests need the glassly-cfw build (${needed.join(" ")})`);
+  let cfw = await queryGlasslyCfw(session, nextMagic());
+  if (!cfw) cfw = await queryGlasslyCfw(session, nextMagic());
+  if (!cfw || cfw.revision < REQUIRED_REVISION) {
+    console.log(describeCfw(cfw));
+    console.log(`these tests need the glassly-cfw build, revision ${REQUIRED_REVISION} or later`);
     await session.close();
     process.exit(1);
   }
-  console.log(`CFW detected: ${caps.raw}`);
+  console.log(`CFW detected: ${cfw.raw}`);
 
   const hb = startHeartbeat({ session, nextMagic });
   const suffix = String(Date.now() % 10_000).padStart(4, "0");

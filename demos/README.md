@@ -13,7 +13,7 @@ G2 glasses over Bluetooth and show off the [custom firmware](../) built by
 - **`shapes-demo.ts`** — draws a vector test card with mode 36, then builds a
   retained scene (mode 37) and lets the firmware animate it: eased glides and
   tweens of geometry, color and stroke width, driven by one small message per
-  transition. Needs the `glassly-cfw` build (`shapes36 scene37 anim38`).
+  transition. Needs the `glassly-cfw` build, revision 25 or later.
 - **`shapes-suite.ts`** — the glassly example-miniapp shapes test suite (every
   `render()` shape element plus the transition contract, 43 cases) run straight
   against the glasses. The phone's render pipeline and its mode-37 scene encoder

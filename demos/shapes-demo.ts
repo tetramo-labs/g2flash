@@ -10,7 +10,7 @@
 //     G2_STAGE=3 bun shapes-demo.ts     # one stage
 //     G2_PAUSE_MS=1500 G2_LOOPS=2 bun shapes-demo.ts
 //
-// Needs the glassly-cfw firmware (capability token scene37).
+// Needs the glassly-cfw firmware, revision 25 or later.
 
 import {
   G2Session,
@@ -19,10 +19,9 @@ import {
   buildImageRawData,
   planImageFragments,
   querySettings,
-  queryCapabilities,
-  hasFeature,
   type ImageContainerSpec,
 } from "g2-kit/ble";
+import { describeCfw, queryGlasslyCfw, REQUIRED_REVISION } from "./glassly-cfw";
 import { startHeartbeat } from "g2-kit/ui";
 
 const ACK_MS = 8_000;
@@ -86,15 +85,15 @@ const session = await G2Session.open();
 // can go unanswered, and it prints the firmware versions.
 const settings = await querySettings(session, nextMagic());
 if (settings) console.log(`firmware: L=${settings.leftSoftwareVersion} R=${settings.rightSoftwareVersion}`);
-let caps = await queryCapabilities(session, nextMagic());
-if (!caps) caps = await queryCapabilities(session, nextMagic());
-if (!caps || !hasFeature(caps, "scene37")) {
-  console.log(caps ? `CFW ${caps.raw}` : "no CFW capability field");
-  console.log("this demo needs the glassly-cfw build (scene37)");
+let cfw = await queryGlasslyCfw(session, nextMagic());
+if (!cfw) cfw = await queryGlasslyCfw(session, nextMagic());
+if (!cfw || cfw.revision < REQUIRED_REVISION) {
+  console.log(describeCfw(cfw));
+  console.log(`this demo needs the glassly-cfw build, revision ${REQUIRED_REVISION} or later`);
   await session.close();
   process.exit(1);
 }
-console.log(`CFW detected: ${caps.raw}`);
+console.log(`CFW detected: ${cfw.raw}`);
 
 const hb = startHeartbeat({ session, nextMagic });
 const suffix = String(Date.now() % 10_000).padStart(4, "0");

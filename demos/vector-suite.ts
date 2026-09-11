@@ -47,7 +47,8 @@ if(!args.includes("--device") || args.includes("--dry-run")) {
   process.exit(0);
 }
 
-const {G2Session,buildCreateStartUpPageContainer,buildImageContainers,buildImageRawData,planImageFragments,queryCapabilities,querySettings}=await import("g2-kit/ble");
+const {G2Session,buildCreateStartUpPageContainer,buildImageContainers,buildImageRawData,planImageFragments,querySettings}=await import("g2-kit/ble");
+const {queryGlasslyCfw,REQUIRED_REVISION}=await import("./glassly-cfw");
 const {startHeartbeat}=await import("g2-kit/ui");
 const sleep=(ms:number)=>new Promise(r=>setTimeout(r,ms));
 let magic=100,transfer=1;
@@ -72,10 +73,9 @@ const send=async(payload:Uint8Array)=>{
 let acquired=false;
 try {
   await querySettings(session,nextMagic());
-  let caps=await queryCapabilities(session,nextMagic());if(!caps)caps=await queryCapabilities(session,nextMagic());
-  const revision=Number(caps?.raw.match(/^EVENCFW\/(\d+)/)?.[1]??0);
-  if(revision<24 || !caps?.features.has("scene37"))throw new Error(`Requires EVENCFW/24 or later with scene37; got ${caps?.raw??"no capability response"}`);
-  console.log(`firmware: ${caps!.raw}`);
+  let cfw=await queryGlasslyCfw(session,nextMagic());if(!cfw)cfw=await queryGlasslyCfw(session,nextMagic());
+  if(!cfw || cfw.revision<REQUIRED_REVISION)throw new Error(`Requires GLASSLYCFW/${REQUIRED_REVISION} or later; got ${cfw?.raw??"no capability response"}`);
+  console.log(`firmware: ${cfw.raw}`);
   heartbeat=startHeartbeat({session,nextMagic});
   const create=buildCreateStartUpPageContainer({name:`s${suffix}`,items:["."],containerId:1,captureEvents:false,magic:nextMagic(),extraContainerNames:[container.name]});
   if(!await session.sendPb(0xe0,create.pb,create.magic,{ackTimeoutMs:8000}))throw new Error("CREATE did not ACK");

@@ -71,9 +71,8 @@ vector shapes and firmware-side animation on top of the texture cache:
  * Mode 38 controls animation: freeze, set the frame period (10-250 ms, default
    33), release the scene, or finish every animation and present the end state.
 
-The capability string advertises these as `shapes36 scene37 anim38`; inline text
-records are implied by contract revision 19 (the capability response must fit one
-BLE frame, so no token was added).
+All of these are implied by the firmware revision (see below); there are no
+per-feature capability tokens.
 
 Revision 21 adds retained compound SVG paths (mode-37 op 8) and duration-based
 rotation of geometric shapes and paths (op 9). Paths support nonzero/even-odd
@@ -86,8 +85,12 @@ See [the protocol and test instructions](patches/VECTOR_PROTOCOL.md).
 Revision 24 moves the local graphics packets to modes **36/37/38** and ANCS
 fields to **125/126**, leaving upstream's sensor modes 16/17 and fields 105/106
 unmodified. All record formats and operation numbers stay the same. Clients
-must use the new numbers and capability tokens; old graphics packets are no
-longer accepted. See [the wire mapping](patches/UPSTREAM_COMPATIBILITY.md).
+must use the new numbers; old graphics packets are no longer accepted. See
+[the wire mapping](patches/UPSTREAM_COMPATIBILITY.md).
+
+Revision 25 drops the feature tokens: the field-100 string is just
+`GLASSLYCFW/25`, and it adopts upstream's fast BLE profile (LE 2M, 7.5 ms
+connection interval, slow mode disabled).
 
 Run the complete offline suite with
 `python3 patches/host/run_vector_tests.py --out /tmp/g2-vector-tests`.
@@ -164,11 +167,12 @@ fully documented):
 Glasses with a custom firmware identify themselves with the version number of
 the stock firmware that the modded version is based on, with an extra field in
 the settings-response message (protobuf field 100) carrying a firmware revision
-string of the form `Faceclaw/<n>`. See `settings_send_wrapper` in
-`patches/settings_ext.c`. `<n>` goes up each time the firmware contract changes
-and is not kept in sync with Faceclaw phone-app versions; the phone app requires
-a specific revision and offers to reflash when the installed one is older. Older
-builds advertised `EVENCFW/<ver>` followed by feature tokens instead. If writing
+string of the form `GLASSLYCFW/<n>` (upstream Faceclaw builds use `Faceclaw/<n>`
+with the same scheme). See `settings_send_wrapper` in `patches/settings_ext.c`.
+`<n>` goes up each time the firmware contract changes and is not kept in sync
+with Glassly phone-app versions; the phone app requires a specific revision and
+offers to reflash when the installed one is older. Older builds advertised
+`GLASSLYCFW/<n>` or `EVENCFW/<n>` followed by feature tokens instead. If writing
 your own firmware and your own phone software to go with it, use a different
 prefix, and assume that firmware is only compatible if you recognize the exact
 string.
@@ -384,8 +388,7 @@ Thanks to kalanihelekunihi for [evenRealities-openCFW](https://github.com/kalani
 ### R1 battery reporting
 
 The stock R1 battery cache is available in settings field 106 through the exact
-read-only image-handler query `[17,0]`. Revision 24 also sends this report after
-a settings read, separately to preserve the settings reply's single-frame size.
-Detect support by revision 24 or the `RB` report; the upstream `ringbat17` token
-is omitted to retain all existing graphics tokens within the size limit.
+read-only image-handler query `[17,0]`. The firmware also sends this report
+after a settings read, as a separate notification rather than inside the
+settings reply. Detect support by revision 24 or later, or by the `RB` report.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
