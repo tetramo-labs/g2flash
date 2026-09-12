@@ -47,6 +47,8 @@ typedef struct cfw_scene_s {
     uint8_t  anim_active;   /* at least one slot has frames left */
     volatile uint8_t render_due; /* display_copy_hook must re-render before copying */
     uint8_t  period_ms;     /* animation frame period */
+    uint8_t  settle_pending; /* a tagged commit has not reported settled yet */
+    uint16_t tag;           /* phone tag echoed in the settled report (op 10) */
     cfw_vector_work *vector_work; /* lazy, serialized by the display gate */
     cfw_slot slots[CFW_SCENE_SLOTS];
     uint8_t  text[CFW_SCENE_SLOTS][CFW_SCENE_TEXT_BYTES];  /* TEXT_INLINE bytes per slot */
@@ -56,6 +58,9 @@ static int  cfw_scene_dispatch(customCfwContext *ctx, uint8_t *state, uint8_t mo
                                const uint8_t *src, uint32_t srclen,
                                int present, cfw_rectlist *rl);
 static void cfw_scene_stop(customCfwContext *ctx);
+static void cfw_scene_takeover(customCfwContext *ctx);
+static int  cfw_scene_resync_shadow(customCfwContext *ctx, uint8_t *shadow);
+static void cfw_scene_notify_settled(customCfwContext *ctx, uint16_t tag);
 static void cfw_scene_release(customCfwContext *ctx);
 static void cfw_scene_render_if_due(customCfwContext *ctx, uint8_t *fb);
 void scene_tick(void *arg);

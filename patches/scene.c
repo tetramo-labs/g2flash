@@ -29,6 +29,12 @@
  *                                                    SET_PATH (revision 21)
  *     [9][slot][angleQ8:i32][pivotX:i16][pivotY:i16][durationMs:u16][curve x4]
  *                                                    ROTATE (revision 21)
+ *     [10][0][tag:u16]                               TAG (revision 27): the next
+ *                                                    COMMIT reports settings field
+ *                                                    129 = [tagLo][tagHi] once every
+ *                                                    animation it started has ended
+ *                                                    (immediately when none did, and
+ *                                                    when a raster mode takes over)
  *   Path grammar, limits, atomic replacement and rotation semantics are in
  *   VECTOR_PROTOCOL.md. Ops 8/9 require a concrete slot. A path is filled,
  *   with p0/p1 = translation and p2 = uniform Q8 scale for GLIDE/TWEEN.
@@ -43,6 +49,13 @@
  *   1 [ms:u8]    frame period 10..250 ms (default 33)
  *   2            release the scene (slots + frame buffer)
  *   3            finish all animations and present the final frame
+ *
+ * Revision 27: modes 37/38 are accepted inside a mode-8 bundle. There a COMMIT
+ * (or sub 3) renders into the container shadow, which the bundle presents once
+ * at its end; animation still runs from the scene's own frame afterwards. Any
+ * raster mode (3/6/9/13/14/15/36) takes the panel over: it stops and freezes
+ * the scene and, when the last present came from the scene frame, first copies
+ * that frame into the shadow so deltas compose onto what is on glass.
  *
  * Threads: the EvenHub worker owns the display gate while it patches or renders
  * the scene. Animation frames are paced by a CFW osTimer; the callback takes
@@ -68,6 +81,7 @@
 #define CFW_SCENE_OP_FINISH  7u
 #define CFW_SCENE_OP_PATH    8u
 #define CFW_SCENE_OP_ROTATE  9u
+#define CFW_SCENE_OP_TAG     10u
 #define CFW_SCENE_ALL_SLOTS  255u
 
 #define CFW_TWEEN_COLOR_BIT  0x100u
@@ -158,6 +172,34 @@ static void cfw_scene_stop(customCfwContext *ctx) {
     cfw_scene *sc = cfw_scene_peek(ctx);
     if (sc) sc->anim_active = 0;
     if (ctx && ctx->scene_timer) FW_TIMER_STOP(ctx->scene_timer);
+}
+
+static void cfw_scene_settled(customCfwContext *ctx, cfw_scene *sc) {
+    if (sc == 0 || !sc->settle_pending) return;
+    sc->settle_pending = 0;
+    cfw_scene_notify_settled(ctx, sc->tag);
+}
+
+static void cfw_slot_freeze(cfw_slot *sl);
+
+/* A raster mode is about to own the panel: stop, freeze, report settled. */
+static void cfw_scene_takeover(customCfwContext *ctx) {
+    cfw_scene *sc = cfw_scene_peek(ctx);
+    if (sc == 0) return;
+    cfw_scene_stop(ctx);
+    for (uint32_t i = 0; i < sc->slot_hi && i < CFW_SCENE_SLOTS; i++) cfw_slot_freeze(&sc->slots[i]);
+    cfw_scene_settled(ctx, sc);
+}
+
+/* The last present came from the scene frame: copy it into the container shadow
+ * so a raster delta composes onto what the panel shows. 0 when nothing to copy. */
+static int cfw_scene_resync_shadow(customCfwContext *ctx, uint8_t *shadow) {
+    cfw_scene *sc = cfw_scene_peek(ctx);
+    if (sc == 0 || sc->fb == 0 || shadow == 0 || shadow == sc->fb) return 0;
+    const uint32_t *src = (const uint32_t *)(const void *)sc->fb;
+    uint32_t *dst = (uint32_t *)(void *)shadow;
+    for (uint32_t i = 0; i < IMAGE_BYTES / 4u; i++) dst[i] = src[i];
+    return 1;
 }
 
 /* Free everything. Only from contexts that own the display gate (mode 11
@@ -344,6 +386,7 @@ static uint32_t cfw_scene_record_len(const uint8_t *p, uint32_t avail) {
     case CFW_SCENE_OP_FREEZE:
     case CFW_SCENE_OP_FINISH: need = 2u; break;
     case CFW_SCENE_OP_SHOW:   need = 3u; break;
+    case CFW_SCENE_OP_TAG:    if (slot != 0) return 0; need = 4u; break;
     case CFW_SCENE_OP_MOVE:   need = 6u; break;
     case CFW_SCENE_OP_GLIDE:  need = 11u; break;
     case CFW_SCENE_OP_TWEEN: {
@@ -422,6 +465,11 @@ static void cfw_scene_apply_one(cfw_scene *sc, cfw_slot *sl, const uint8_t *p) {
 
 static void cfw_scene_apply(cfw_scene *sc, const uint8_t *p) {
     uint32_t op = p[0], slot = p[1];
+    if (op == CFW_SCENE_OP_TAG) {
+        sc->tag = (uint16_t)rd16(p + 2);
+        sc->settle_pending = 1;
+        return;
+    }
     if (op == CFW_SCENE_OP_SET) {
         cfw_slot *sl = &sc->slots[slot];
         cfw_shape s;
@@ -474,25 +522,30 @@ static __attribute__((always_inline)) inline void cfw_scene_arm(customCfwContext
     FW_TIMER_START(ctx->scene_timer, sc->period_ms);
 }
 
+/* `present` = 0 inside a mode-8 bundle: render into the container shadow that
+ * the bundle presents at its end. Reports settled when nothing is animating. */
 static int cfw_scene_present(customCfwContext *ctx, uint8_t *state, cfw_scene *sc,
-                             cfw_rectlist *rl) {
+                             int present, cfw_rectlist *rl) {
     sc->render_due = 0;
-    uint8_t *fb = cfw_scene_frame(sc);
+    uint8_t *fb = present ? cfw_scene_frame(sc) : 0;
     if (fb) {
         cfw_scene_render(sc, fb, rl);
         present_buffer(ctx, fb, rl);
-        return 0;
+        ctx->shadow_stale = 1;
+    } else {
+        /* no CFW frame: draw into the live container shadow instead (static only) */
+        uint8_t *shadow = cfw_shadow_buffer(state);
+        if (shadow == 0) return -1;
+        cfw_scene_render(sc, shadow, rl);
+        ctx->shadow_stale = 0;
+        if (present) present_shadow(state, IMAGE_W, IMAGE_H, rl);
     }
-    /* no CFW frame: draw into the live container shadow instead (static only) */
-    uint8_t *shadow = cfw_shadow_buffer(state);
-    if (shadow == 0) return -1;
-    cfw_scene_render(sc, shadow, rl);
-    present_shadow(state, IMAGE_W, IMAGE_H, rl);
+    if (!sc->anim_active) cfw_scene_settled(ctx, sc);
     return 0;
 }
 
 static int cfw_scene_patch(customCfwContext *ctx, uint8_t *state,
-                           const uint8_t *src, uint32_t srclen, cfw_rectlist *rl) {
+                           const uint8_t *src, uint32_t srclen, int present, cfw_rectlist *rl) {
     if (srclen < 2u || !cfw_fb_lease_active()) return -1;
     uint8_t flags = src[0];
     uint8_t bg = src[1] & 0x0fu;
@@ -574,7 +627,7 @@ static int cfw_scene_patch(customCfwContext *ctx, uint8_t *state,
         pos += n;
     }
     cfw_scene_arm(ctx, sc);
-    if (flags & CFW_SCENE_FLAG_COMMIT) return cfw_scene_present(ctx, state, sc, rl);
+    if (flags & CFW_SCENE_FLAG_COMMIT) return cfw_scene_present(ctx, state, sc, present, rl);
     return 0;
 fail:
     for(uint32_t i=0;i<CFW_SCENE_SLOTS;i++)if(staged[i])cfw_heap13_free(staged[i]);
@@ -582,13 +635,12 @@ fail:
 }
 
 static int cfw_scene_control(customCfwContext *ctx, uint8_t *state,
-                             const uint8_t *src, uint32_t srclen, cfw_rectlist *rl) {
+                             const uint8_t *src, uint32_t srclen, int present, cfw_rectlist *rl) {
     if (srclen < 1u) return -1;
     cfw_scene *sc = cfw_scene_peek(ctx);
     switch (src[0]) {
     case 0:
-        cfw_scene_stop(ctx);
-        if (sc) for (uint32_t i = 0; i < sc->slot_hi && i < CFW_SCENE_SLOTS; i++) cfw_slot_freeze(&sc->slots[i]);
+        cfw_scene_takeover(ctx);
         return 0;
     case 1: {
         if (srclen < 2u) return -1;
@@ -601,6 +653,7 @@ static int cfw_scene_control(customCfwContext *ctx, uint8_t *state,
         return 0;
     }
     case 2:
+        cfw_scene_settled(ctx, sc);
         cfw_scene_release(ctx);
         return 0;
     case 3:
@@ -608,7 +661,7 @@ static int cfw_scene_control(customCfwContext *ctx, uint8_t *state,
         cfw_scene_stop(ctx);
         for (uint32_t i = 0; i < sc->slot_hi && i < CFW_SCENE_SLOTS; i++)
             cfw_slot_finish(&sc->slots[i]);
-        return cfw_scene_present(ctx, state, sc, rl);
+        return cfw_scene_present(ctx, state, sc, present, rl);
     default:
         return -1;
     }
@@ -617,9 +670,9 @@ static int cfw_scene_control(customCfwContext *ctx, uint8_t *state,
 static int cfw_scene_dispatch(customCfwContext *ctx, uint8_t *state, uint8_t mode,
                               const uint8_t *src, uint32_t srclen,
                               int present, cfw_rectlist *rl) {
-    if (!present || ctx == 0) return -1;       /* not composable inside mode 8 */
-    if (mode == 37) return cfw_scene_patch(ctx, state, src, srclen, rl);
-    if (mode == 38) return cfw_scene_control(ctx, state, src, srclen, rl);
+    if (ctx == 0) return -1;
+    if (mode == 37) return cfw_scene_patch(ctx, state, src, srclen, present, rl);
+    if (mode == 38) return cfw_scene_control(ctx, state, src, srclen, present, rl);
     return -1;
 }
 
@@ -658,10 +711,14 @@ void scene_tick(void *arg) {
     rl.direct_submitted = 0;
     sc->render_due = 1;                            /* display_copy_hook rasterizes */
     present_buffer(ctx, sc->fb, &rl);
+    ctx->shadow_stale = 1;
     if (!rl.direct_submitted) {
         sc->render_due = 0;
         FW_DISPLAY_SIGNAL();
     }
     if (moving) FW_TIMER_START(ctx->scene_timer, sc->period_ms);
-    else sc->anim_active = 0;
+    else {
+        sc->anim_active = 0;
+        cfw_scene_settled(ctx, sc);
+    }
 }

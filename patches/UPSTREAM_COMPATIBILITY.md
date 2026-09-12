@@ -28,6 +28,10 @@ alias. Mode 10 compass controls/diagnostics and mode 11 session cleanup remain.
 
 # Revision 26: BLE link speed control
 
+Revision 27 adds one glasses → phone field: settings field 129, body
+`[tagLo][tagHi]`, sent by the master lens when a scene commit tagged with
+mode-37 op 10 has settled. Upstream has no equivalent; stock decoders skip it.
+
 Upstream forces its fast BLE profile in flash (7.5 ms interval, every
 connection-parameter request turned into "fast"). Revision 26 keeps the LE 2M
 feature bit static but gates the two other effects on a context flag that the

@@ -90,6 +90,10 @@ static int cfw_builtin_draw_string_buf(uint8_t *shadow, uint32_t stride, uint32_
 static void present_buffer(customCfwContext *ctx, const uint8_t *buf, cfw_rectlist *rl) {
     (void)ctx; (void)buf; g_presented++; if (rl) rl->direct_submitted = 1;
 }
+static int g_settled; static uint16_t g_settled_tag;
+static void cfw_scene_notify_settled(customCfwContext *ctx, uint16_t tag) {
+    (void)ctx; g_settled++; g_settled_tag = tag;
+}
 
 #include "shapes.c"
 #include "scene.c"
@@ -265,8 +269,8 @@ static void test_scene(const char *dir) {
     CHECK(pixel_at(sc->fb, 100, 240) == 15 && pixel_at(sc->fb, 300, 100) == 2);
     write_pgm(dir, "scene_f00", sc->fb);
 
-    /* rejected: inside mode 8, unknown op, truncated tween, SET on slot 255 */
-    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, msg, len, 0, &rl) == -1);
+    /* rejected: unknown op, truncated tween, SET on slot 255 */
+    { uint8_t bad[] = { 0, 0, 11, 0, 0, 0 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, bad, sizeof bad, 1, &rl) == -1); }
     { uint8_t bad[] = { 0, 0, 9, 0 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, bad, sizeof bad, 1, &rl) == -1); }
     { uint8_t bad[] = { 0, 0, CFW_SCENE_OP_TWEEN, 1, 0x04, 0x01, 20, 0, 0, 255, 255, 1 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, bad, sizeof bad, 1, &rl) == -1); }
     { uint8_t bad[2 + 2 + CFW_SHAPE_RECORD_BYTES] = { 0, 0, CFW_SCENE_OP_SET, 255, CFW_SHAPE_LINE, 1 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, bad, sizeof bad, 1, &rl) == -1); }
@@ -339,6 +343,79 @@ static void test_scene(const char *dir) {
     cfw_scene_release(&g_ctx);
 }
 
+/* Revision 27: tagged commits report settled once still, bundles render into
+ * the shadow without presenting, and a raster takeover stops the scene and can
+ * refresh the shadow from its frame. */
+static void test_ownership(void) {
+    uint8_t *cache = g_ctx.texture_cache;
+    bzero((uint8_t *)&g_ctx, sizeof g_ctx);
+    g_ctx.magic = CFW_CTX_MAGIC;
+    g_ctx.texture_cache = cache;
+    cfw_rectlist rl = { 0 };
+    uint8_t msg[128];
+    uint8_t *p;
+    uint32_t len;
+    g_settled = 0;
+
+    /* static commit: settled right away, and the panel now shows the scene frame */
+    p = msg; *p++ = CFW_SCENE_FLAG_COMMIT | CFW_SCENE_FLAG_CLEAR; *p++ = 0;
+    *p++ = CFW_SCENE_OP_SET; *p++ = 0;
+    { int16_t v[] = { 100, 240, 30 }; p = rec(p, CFW_SHAPE_CIRCLE_FILL, 15, 0, v, 3); }
+    *p++ = CFW_SCENE_OP_TAG; *p++ = 0; p = put16(p, 0x1234);
+    len = (uint32_t)(p - msg);
+    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, msg, len, 1, &rl) == 0);
+    cfw_scene *sc = cfw_scene_peek(&g_ctx);
+    CHECK(sc != 0 && g_settled == 1 && g_settled_tag == 0x1234 && g_ctx.shadow_stale == 1);
+    /* a tag on any other slot is rejected */
+    { uint8_t bad[] = { 0, 0, CFW_SCENE_OP_TAG, 1, 0, 0 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, bad, sizeof bad, 1, &rl) == -1); }
+
+    /* animated commit: settled only after the last frame */
+    p = msg; *p++ = CFW_SCENE_FLAG_COMMIT; *p++ = 0;
+    *p++ = CFW_SCENE_OP_GLIDE; *p++ = 0; p = put16(p, 200); p = put16(p, 0); *p++ = 4;
+    *p++ = 0; *p++ = 0; *p++ = 255; *p++ = 255;
+    *p++ = CFW_SCENE_OP_TAG; *p++ = 0; p = put16(p, 0x5678);
+    len = (uint32_t)(p - msg);
+    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, msg, len, 1, &rl) == 0);
+    CHECK(sc->anim_active == 1 && g_settled == 1);
+    for (int f = 0; f < 4; f++) {
+        g_ctx.direct_pending = 0;
+        scene_tick(&g_ctx);
+        cfw_scene_render_if_due(&g_ctx, sc->fb);
+    }
+    CHECK(sc->anim_active == 0 && sc->slots[0].p[0] == 300 && g_settled == 2 && g_settled_tag == 0x5678);
+
+    /* a raster mode takes over mid-flight: stopped, frozen, reported; the shadow can catch up */
+    msg[len - 2] = 0xbc; msg[len - 1] = 0x9a;
+    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, msg, len, 1, &rl) == 0);
+    g_ctx.direct_pending = 0;
+    scene_tick(&g_ctx);
+    cfw_scene_render_if_due(&g_ctx, sc->fb);
+    CHECK(sc->anim_active == 1 && g_settled == 2);
+    cfw_scene_takeover(&g_ctx);
+    int16_t x = sc->slots[0].p[0];
+    CHECK(sc->anim_active == 0 && sc->slots[0].frames == 0 && x > 300 && x < 500);
+    CHECK(g_settled == 3 && g_settled_tag == 0x9abc);
+    bzero(g_container_shadow, sizeof g_container_shadow);
+    CHECK(cfw_scene_resync_shadow(&g_ctx, g_container_shadow) == 1);
+    CHECK(pixel_at(g_container_shadow, x, 240) == 15 && pixel_at(g_container_shadow, 100, 240) == 0);
+
+    /* inside a bundle: rendered into the shadow, nothing presented, settled */
+    bzero(g_container_shadow, sizeof g_container_shadow);
+    int presented = g_presented, shadows = g_presented_shadow;
+    p = msg; *p++ = CFW_SCENE_FLAG_COMMIT | CFW_SCENE_FLAG_CLEAR; *p++ = 0;
+    *p++ = CFW_SCENE_OP_SET; *p++ = 0;
+    { int16_t v[] = { 300, 100, 20 }; p = rec(p, CFW_SHAPE_CIRCLE_FILL, 15, 0, v, 3); }
+    *p++ = CFW_SCENE_OP_TAG; *p++ = 0; p = put16(p, 0x42);
+    len = (uint32_t)(p - msg);
+    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, msg, len, 0, &rl) == 0);
+    CHECK(g_presented == presented && g_presented_shadow == shadows);
+    CHECK(pixel_at(g_container_shadow, 300, 100) == 15 && g_ctx.shadow_stale == 0);
+    CHECK(g_settled == 4 && g_settled_tag == 0x42);
+    { uint8_t finish[] = { 3 }; CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 38, finish, 1, 0, &rl) == 0); }
+    CHECK(g_presented == presented && g_presented_shadow == shadows);
+    cfw_scene_release(&g_ctx);
+}
+
 /* Inline-text records: variable length in mode 36, stored per slot in the scene. */
 static void test_inline_text(void) {
     /* [count][rect 20 B][inline 13+5 B] */
@@ -394,6 +471,7 @@ int main(int argc, char **argv) {
     test_easing();
     test_scene(dir);
     test_inline_text();
+    test_ownership();
     printf("%s (%d failures)\n", g_fail ? "FAILED" : "OK", g_fail);
     return g_fail ? 1 : 0;
 }

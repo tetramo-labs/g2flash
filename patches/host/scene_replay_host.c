@@ -84,6 +84,7 @@ static int cfw_builtin_draw_string_buf(uint8_t *shadow, uint32_t stride, uint32_
 static void present_buffer(customCfwContext *ctx, const uint8_t *buf, cfw_rectlist *rl) {
     (void)ctx; (void)buf; g_presented++; if (rl) rl->direct_submitted = 1;
 }
+static void cfw_scene_notify_settled(customCfwContext *ctx, uint16_t tag) { (void)ctx; (void)tag; }
 
 #include "shapes.c"
 #include "scene.c"

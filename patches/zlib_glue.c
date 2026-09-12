@@ -395,6 +395,20 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
     uint8_t mode = src[0] & 0x7f;
     if (mode == 0x42) return load_bmp_fast(state, src, srclen);       /* raw BMP */
 
+    if (mode == 3 || mode == 6 || mode == 9 || mode == 13 || mode == 14 || mode == 15 || mode == 36) {
+        /* A raster mode owns the panel from here: the scene stops, and a
+         * shadow that no longer matches the glass is refreshed from the scene
+         * frame before anything composes onto it (a keyframe rewrites it all). */
+        customCfwContext *ctx = getCustomCfwContext();
+        if (ctx) {
+            cfw_scene_takeover(ctx);
+            if (ctx->shadow_stale) {
+                if (mode != 6) cfw_scene_resync_shadow(ctx, cfw_shadow_buffer(state));
+                ctx->shadow_stale = 0;
+            }
+        }
+    }
+
     if (mode == 5) {
         /* play a UI sound on the buzzer; no display change. [5][kind][args...].
          * kinds 0-3 use firmware entry points that copy their args into fw-owned
@@ -589,7 +603,8 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
          * multi-op update (e.g. scroll = rect-copy + delta, no intermediate flash).
          * Sized no larger than an uncompressed 4bpp logical image; no nesting
          * (a sub-message may not itself be a multi-segment message). Only shadow
-         * operations (modes 3/6/9/13/14/15/16) are accepted. */
+         * operations (modes 3/6/9/13/14/15/16) and scene messages (37/38, which
+         * then render into the shadow instead of presenting) are accepted. */
         if (!present) return -1;                       /* only valid at top level */
         if (srclen < 2) return -1;
         uint32_t bmp_max = 118 + ((((w + 1) >> 1) + 3) & ~3u) * h;
@@ -604,7 +619,7 @@ static int image_dispatch(uint8_t *state, const uint8_t *src, uint32_t srclen, i
             uint8_t submode = src[pos] & 0x7fu;
             if (submode != 3 && submode != 6 && submode != 9 &&
                 submode != 13 && submode != 14 && submode != 15 &&
-                submode != 16) return -1;
+                submode != 16 && submode != 37 && submode != 38) return -1;
             if (image_dispatch(state, src + pos, seglen, 0, rl) != 0) return -1;
             pos += seglen;
         }
@@ -893,6 +908,7 @@ static int cfw_cleanup_session(void) {
     ctx->direct_failed = 0;
     cfw_texture_cache_release(ctx);
     cfw_scene_release(ctx);
+    ctx->shadow_stale = 0;
     if (ctx->scene_timer) {
         FW_TIMER_STOP(ctx->scene_timer);
         if (FW_TIMER_DELETE(ctx->scene_timer) == 0) ctx->scene_timer = 0;

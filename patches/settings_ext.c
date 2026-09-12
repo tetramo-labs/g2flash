@@ -179,6 +179,21 @@ static void faceclaw_send_wake_event(customCfwContext *ctx) {
     ((send_fn)FW_SEND)(1, 9, p, 13);
 }
 
+/* Revision 27: a tagged scene commit (mode-37 op 10) reports field 129 =
+ * [tagLo][tagHi] once the scene has settled. Tag 129/wire2 = 1034 = 8a 08.
+ * Called from the EvenHub task and the animation timer thread, like the
+ * ANCS relay's sends. Only the right/master lens notifies the phone. */
+static void cfw_scene_notify_settled(customCfwContext *ctx, uint16_t tag) {
+    if (!ctx || FW_SIDE_ID() != 1) return;
+    unsigned char *p = ctx->scene_notify_buf;
+    p[0] = 0x08; p[1] = 0x03;
+    p[2] = 0x10; p[3] = 0x00;
+    p[4] = 0x8a; p[5] = 0x08; p[6] = 0x02;
+    p[7] = (unsigned char)tag;
+    p[8] = (unsigned char)(tag >> 8);
+    ((send_fn)FW_SEND)(1, 9, p, 9);
+}
+
 /* Send the stock OnboardingDataPackage EVENT/GLS_WEAR_STATUS wire shape
  * directly. The stock helper first checks the running app id and then routes
  * through onboarding's encoder state; using the generic notify sender removes
@@ -364,6 +379,9 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   27 -> panel ownership: raster modes stop/freeze the scene and refresh the
+//         shadow from the scene frame; mode-37 op 10 TAG + settled report in
+//         field 129; modes 37/38 accepted inside mode-8 bundles.
 //   26 -> BLE link speed control: field 127 selects stock (default) or the
 //         7.5 ms fast profile at runtime, field 128 reports it on every
 //         settings read. The fast profile is no longer forced on.
@@ -384,7 +402,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/26";
+        static const char caps[] = "GLASSLYCFW/27";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

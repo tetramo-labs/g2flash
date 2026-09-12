@@ -93,6 +93,15 @@ Revision 25 drops the feature tokens: the field-100 string is just
 connection interval, slow mode disabled) a runtime choice through settings
 field 127, defaulting to stock behaviour, and reports it in field 128.
 
+Revision 27 makes panel ownership explicit. Any raster mode (3/6/9/13/14/15/36)
+stops and freezes a running scene animation, and when the last present came
+from the scene's own frame it first copies that frame into the container shadow
+so deltas compose onto what is on glass. A mode-37 patch may carry a TAG record
+(op 10, `[10][0][tag:u16]`); the next COMMIT reports settings field 129 =
+`[tagLo][tagHi]` once every animation it started has ended (immediately when
+none did, or when a raster mode takes over). Modes 37/38 are accepted inside a
+mode-8 bundle, where a COMMIT renders into the shadow the bundle presents.
+
 Run the complete offline suite with
 `python3 patches/host/run_vector_tests.py --out /tmp/g2-vector-tests`.
 It tests the firmware C under sanitizers and replays the standalone shape and

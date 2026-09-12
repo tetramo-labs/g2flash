@@ -163,6 +163,12 @@ typedef struct {
     uint8_t  ble_fast;                      /* 1 = fast profile requested by the phone */
     uint8_t  ble_pad0[3];
     uint8_t  ble_fast_profile[16];          /* RAM copy of the stock fast entry, min = max = 7.5 ms */
+    /* --- Panel ownership (revision 27). The last present came from the scene's
+     * own frame, so the container shadow no longer matches the glass; the next
+     * raster mode refreshes it from that frame before composing. --- */
+    uint8_t  shadow_stale;
+    uint8_t  scene_pad0[3];
+    uint8_t  scene_notify_buf[12];          /* stable storage for the field-129 settled notify */
 } customCfwContext;
 
 #define CFW_CTX_SLOT  0x2029f4a8U    /* first word of the CFW-reserved TLSF tail */
