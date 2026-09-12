@@ -15,12 +15,16 @@ if(args.includes("--help")) {
   bun vector-suite.ts --bad-apple --device       # clocked 10 fps playback
   bun vector-suite.ts --svg-video FILE --device  # prepared smooth SVG video
   bun vector-suite.ts --bad-apple --svg-out /tmp/bad-apple-svg
-  Options: --frames N, --gif FILE, --list, --dry-run, --help
+  Options: --frames N, --gif FILE, --idle SECONDS, --list, --dry-run, --help
+  --idle holds the connection open (heartbeat + lease renewals) for that long
+  before playback, e.g. --idle 75 to start past the stock 60 s slow-mode timer.
 Host replay checks pixel probes. Device ACKs only confirm transport;
 inspect the display against the named test and generated host images.`);
   process.exit(0);
 }
 const frameCount=Number(option("--frames")??300);
+const idleSeconds=Number(option("--idle")??0);
+if(!Number.isFinite(idleSeconds)||idleSeconds<0||idleSeconds>600)throw new Error("--idle must be 0..600 seconds");
 if(!Number.isInteger(frameCount)||frameCount<1||frameCount>10000)throw new Error("--frames must be 1..10000");
 const prepared=new URL(".cache/bad-apple/smooth/video.json",import.meta.url).pathname;
 const svgVideo=option("--svg-video") ?? (args.includes("--bad-apple") && !option("--gif") && await Bun.file(prepared).exists()?prepared:undefined);
@@ -82,6 +86,7 @@ try {
   const rebuild=buildImageContainers({containers:[container],magic:nextMagic()});
   if(!await session.sendPb(0xe0,rebuild.pb,rebuild.magic,{ackTimeoutMs:8000}))throw new Error("REBUILD did not ACK");
   await sleep(300);await lease(5);acquired=true;
+  if(idleSeconds>0){console.log(`idling ${idleSeconds}s with heartbeat and lease renewals before playback`);await sleep(idleSeconds*1000);}
   let leaseError:unknown;
   renew=setInterval(()=>void lease(5).catch(e=>{leaseError=e;}),30000);
   let sent=0,skipped=0,worst=0;const start=performance.now();
