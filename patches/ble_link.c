@@ -15,8 +15,16 @@
  *
  *   _connectParamReq_impl(mode) @0x47ae4c   mode 0xa3 = fast, 0xa4 = slow
  *     movs r5,r0 ; bl 0x4745bc (connection getter)          <- hook 1 (0x47ae52)
- *     ... validation, deferral, and "already applied" checks:
- *     0x47b1cc: if mode == applied_mode(0x20004d82) the request is skipped
+ *     ... validation and a 45 s hold-off after the last update (0x47b058,
+ *     flag 0x20077327 / timestamp 0x20076574) that reposts the deferred
+ *     request every 2 s (0x47b1c2); 0x47b1cc: if mode == applied_mode
+ *     (0x20004d82) the repost waits 10 s instead
+ *     0x47b20e: bl 0x47a95a(conn)                             <- hook 3
+ *               classifies the LIVE link: 0xa3 ("already fast") when the
+ *               connection record's interval (+0x18, 1.25 ms units) is below
+ *               25 and its latency (+0x1a) equals the stock fast profile's,
+ *               else 0xa4. A 0xa3 verdict ends the request right there:
+ *               nothing is sent, the profile slot is not touched.
  *     0x47b30c: profile = (mode == 0xa3) ? 0x7ae7b4 : 0x7ae7a4
  *     0x47b318: *(0x200765a0) = profile                       (pointer, not a copy)
  *     0x47b444: bl 0x47a6a4(mode, conn)                       <- hook 2
@@ -39,15 +47,25 @@
  *     op 1  FAST   set the flag; request fast now
  *     op 2  QUERY  no change (the reply below carries the state)
  *   Field 128 (appended to every settings READ reply):
- *     ['B','L',1, fast, side, wanted_mode, applied_mode, min16, max16, latency16]
- *     min/max/latency are the profile the last request used.
+ *     ['B','L',1, fast, side, wanted_mode, applied_mode, min16, max16, latency16,
+ *      live_interval16, live_latency16]
+ *     min/max/latency are the profile the last request used; the live pair is
+ *     the connection as currently negotiated (0 when there is no connection).
  *
  *   With the flag set, hook 1 turns every requested mode into fast (so the
- *   delayed slow request is neutralised, as upstream does) and hook 2 points
- *   the profile slot at a RAM copy of the stock fast entry with min = max =
- *   7.5 ms and latency 0 before the request is sent. With the flag clear both
- *   hooks are pass-throughs. Each lens has its own link, so the phone sends
- *   the control to both. Mode 11 cleanup returns the link to stock.
+ *   delayed slow request is neutralised, as upstream does), hook 3 only calls
+ *   the link "already fast" when it really runs at 7.5 ms / latency 0 (a phone
+ *   or Mac link that starts at 15 or 30 ms otherwise satisfies the stock test
+ *   and no request is ever sent), and hook 2 points the profile slot at a RAM
+ *   copy of the stock fast entry with min = max = 7.5 ms and latency 0 before
+ *   the request is sent. With the flag clear all three hooks are
+ *   pass-throughs. Each lens has its own link, so the phone sends the control
+ *   to both. Mode 11 cleanup returns the link to stock.
+ *
+ *   Field 128 also carries the interval and latency (+0x18/+0x1a) of the
+ *   connection record the classifier sees (the object at 0x2007656c) after the
+ *   profile, so the phone can see what the central actually granted rather
+ *   than what was asked for.
  *
  *   The LE 2M feature bit stays enabled statically (patch_compress.py): it only
  *   exposes the PHY, the phone still has to request it.
@@ -64,6 +82,10 @@
     (((void (*)(uint32_t, uint32_t, uint32_t))0x00458a03u)((fn), (arg), (ms)))
 #define BLE_REQUEST_CB          0x0047b475u
 #define BLE_SEND_REQUEST(mode, conn) (((int (*)(uint32_t, void *))0x0047a6a5u)((mode), (conn)))
+#define BLE_CLASSIFY(conn)      (((uint32_t (*)(const void *))0x0047a95bu)(conn))
+/* The connection record _connectParamReq_impl hands the classifier (0x47b208
+ * loads it from 0x2007656c); the getter at 0x4745bc returns a different object. */
+#define BLE_CONN()              (*(const uint8_t *volatile *)0x2007656cu)
 #define BLE_SIDE()              (((uint32_t (*)(void))0x0045cfddu)())
 #define BLE_PEEK()              peekCustomCfwContext()
 #define BLE_CTX()               getCustomCfwContext()
@@ -76,6 +98,8 @@
 #define BLE_OP_STOCK       0u
 #define BLE_OP_FAST        1u
 #define BLE_OP_QUERY       2u
+#define BLE_CONN_INTERVAL  0x18u   /* connection record: current interval, 1.25 ms units */
+#define BLE_CONN_LATENCY   0x1au   /* connection record: current slave latency */
 
 static void ble_write16(uint8_t *p, uint32_t v) {
     p[0] = (uint8_t)v;
@@ -91,6 +115,22 @@ __attribute__((used, noinline)) uint32_t ble_filter_mode(uint32_t mode) {
     customCfwContext *ctx = BLE_PEEK();
     if (ctx && ctx->ble_fast) return BLE_MODE_FAST;
     return mode;
+}
+
+/* Hook 3: replaces `bl 0x47a95a` at 0x47b20e. The stock classifier answers
+ * "already fast" for any link under 31.25 ms with zero latency, and the
+ * request ends there, so a link that came up at the central's default 15 or
+ * 30 ms would never be asked for 7.5 ms. While fast mode is on, only a
+ * 7.5 ms / latency-0 link counts as fast. */
+__attribute__((used, noinline)) uint32_t ble_hook_classify(const uint8_t *conn) {
+    customCfwContext *ctx = BLE_PEEK();
+    if (ctx && ctx->ble_fast) {
+        if (conn && ble_read16(conn + BLE_CONN_INTERVAL) == BLE_FAST_INTERVAL &&
+            ble_read16(conn + BLE_CONN_LATENCY) == 0)
+            return BLE_MODE_FAST;
+        return BLE_MODE_SLOW;
+    }
+    return BLE_CLASSIFY(conn);
 }
 
 /* Hook 2: replaces `bl 0x47a6a4` once the stock code has stored the profile
@@ -166,7 +206,7 @@ void ble_apply_control(const uint8_t *data, uint32_t len) {
 /* Field 128 on every settings READ reply. */
 unsigned ble_append_status(unsigned char *buf, unsigned len, unsigned capacity) {
     customCfwContext *ctx = BLE_PEEK();
-    uint8_t body[13] = {'B', 'L', BLE_PROTO_VERSION, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint8_t body[17] = {'B', 'L', BLE_PROTO_VERSION, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     body[3] = (ctx && ctx->ble_fast) ? 1u : 0u;
     body[4] = (uint8_t)BLE_SIDE();
     body[5] = BLE_WANTED_MODE;
@@ -176,6 +216,11 @@ unsigned ble_append_status(unsigned char *buf, unsigned len, unsigned capacity) 
         ble_write16(body + 7, ble_read16(profile + 4));
         ble_write16(body + 9, ble_read16(profile + 6));
         ble_write16(body + 11, ble_read16(profile + 8));
+    }
+    const uint8_t *conn = BLE_CONN();
+    if (conn) {
+        ble_write16(body + 13, ble_read16(conn + BLE_CONN_INTERVAL));
+        ble_write16(body + 15, ble_read16(conn + BLE_CONN_LATENCY));
     }
     return pb_append_bytes_field(buf, len, capacity, 128u, body, sizeof(body));
 }

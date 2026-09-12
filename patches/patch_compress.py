@@ -99,6 +99,12 @@ BLE_MODE_BL_SITE = (0x47ae52, "f9 f7 b3 fb")
 # ble_hook_request, which swaps in a RAM copy of the fast entry with
 # min = max = 7.5 ms while fast mode is on, then calls the stock sender.
 BLE_REQUEST_BL_SITE = (0x47b444, "ff f7 2e f9")
+# Before that, for a fast request, _connectParamReq_impl calls 0x47a95a(conn)
+# to classify the live link and returns without sending when it answers 0xa3,
+# which it does for any interval under 31.25 ms with zero latency (a central's
+# default 15 or 30 ms link qualifies). That `bl` goes to ble_hook_classify,
+# which while fast mode is on only accepts a 7.5 ms / latency-0 link.
+BLE_CLASSIFY_BL_SITE = (0x47b20e, "ff f7 a4 fb")
 
 # Reserve the final 1 KiB of the stock primary TLSF arena for CFW-owned fixed
 # state. Stock initializes [0x202728a8,0x2029f8a8) with size 0x2d000 at
@@ -306,6 +312,12 @@ def validate_ble_link_stock(img):
         (0x0047ae4c, "78b585b00500f9f7b3fb", "_connectParamReq_impl prologue, movs r5,r0, bl connection getter"),
         (0x004745bc, "dff8f40500687047", "connection getter"),
         (0x0047b1cc, "28006c490978c0b2884205d1", "applied-mode no-op check"),
+        (0x0047b200, "2800c0b2a32845d1dff8fc060068fff7a4fb0600", "fast-mode branch: connection load, bl link classifier"),
+        (0x0047b908, "6c650720", "classifier connection record literal"),
+        (0x0047a95a, "10b588b00400", "link classifier prologue"),
+        (0x0047aaf4, "208b192827da608bdff8b01a0989884221d1", "link classifier: interval < 25 units and latency == fast profile"),
+        (0x0047ab46, "a32020e0", "link classifier fast verdict"),
+        (0x0047ab8a, "a42008b010bd", "link classifier slow verdict"),
         (0x0047b30c, "2800c0b2a32839d1504ea6483060", "fast profile pointer store"),
         (0x0047b388, "334e35483060", "slow profile pointer store"),
         (0x0047b43e, "21002800c0b2fff72ef9dff8", "bl 0x47a6a4 and current-mode store"),
@@ -392,6 +404,7 @@ def layout(img):
     compass_report_addr = base + _fn(built, "compass_report_event")["offset"]
     ble_mode_addr    = base + _fn(built, "ble_hook_mode")["offset"]
     ble_request_addr = base + _fn(built, "ble_hook_request")["offset"]
+    ble_classify_addr = base + _fn(built, "ble_hook_classify")["offset"]
 
     # --- assemble the appended payload bytes (old_ps .. end) ---
     pad = blob_off - old_ps                     # alignment gap before the blob
@@ -497,6 +510,9 @@ def layout(img):
         (g2f(BLE_REQUEST_BL_SITE[0]), BLE_REQUEST_BL_SITE[1],
          enc_bl(BLE_REQUEST_BL_SITE[0], ble_request_addr),
          "bl ble_hook_request (swap in the 7.5 ms profile while fast mode is on, then stock sender)"),
+        (g2f(BLE_CLASSIFY_BL_SITE[0]), BLE_CLASSIFY_BL_SITE[1],
+         enc_bl(BLE_CLASSIFY_BL_SITE[0], ble_classify_addr),
+         "bl ble_hook_classify (fast mode: only a 7.5 ms / latency-0 link is 'already fast')"),
     ]
     return bytes(append), in_place, (idx, comp_off, old_ps)
 

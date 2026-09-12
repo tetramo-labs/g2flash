@@ -143,7 +143,8 @@ fast link: settings field 127 (`['B','L',1,op]`, op 0 = stock, 1 = fast,
 behaviour (the default: 15-30 ms fast profile, then the one-minute slow-mode
 timer) and a 7.5 ms / latency-0 profile with slow mode suppressed, which keeps
 screen transfers from being throttled at a battery cost. Every settings read
-reports the state in field 128. Mode 11 cleanup returns the link to stock.
+reports the state in field 128, including the interval the central actually
+granted. Mode 11 cleanup returns the link to stock.
 Connection parameters still depend on the phone; it must request 2M PHY and
 must agree to the short connection interval. See `patches/ble_link.c`.
 

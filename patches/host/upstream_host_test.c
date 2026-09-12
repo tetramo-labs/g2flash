@@ -64,6 +64,14 @@ static const uint8_t *ble_profile_slot;
 static uint8_t ble_applied, ble_wanted;
 static unsigned ble_cancels, ble_posts, ble_post_fn, ble_post_arg, ble_post_ms, ble_sends, ble_sent_mode;
 static void *ble_sent_conn;
+static unsigned ble_classifies;
+static uint8_t ble_conn[0x20];          /* live connection record: +0x18 interval, +0x1a latency */
+static const uint8_t *ble_conn_ptr;
+static uint32_t ble_stock_classify(const void *conn) {
+    assert(conn == ble_conn);
+    ble_classifies++;
+    return 0xa3;
+}
 #define BLE_PROFILE_SLOT ble_profile_slot
 #define BLE_STOCK_FAST_PROFILE ((const uint8_t *)stock_fast_profile)
 #define BLE_APPLIED_MODE ble_applied
@@ -73,6 +81,8 @@ static void *ble_sent_conn;
 #define BLE_DEFER_POST(fn, arg, ms) ((void)(ble_posts++, ble_post_fn = (fn), ble_post_arg = (arg), ble_post_ms = (ms)))
 #define BLE_REQUEST_CB 0x0047b475u
 #define BLE_SEND_REQUEST(mode, conn) (ble_sends++, ble_sent_mode = (mode), ble_sent_conn = (conn), 0)
+#define BLE_CLASSIFY(conn) ble_stock_classify(conn)
+#define BLE_CONN() ble_conn_ptr
 #define BLE_SIDE() ((uint32_t)side)
 #define BLE_PEEK() peekCustomCfwContext()
 #define BLE_CTX() peekCustomCfwContext()
@@ -146,7 +156,7 @@ static void settings(void) {
     assert(settings_send_wrapper(1,9,buf,44) == 0 && sends == 2);
     const uint8_t *caps = field(sent[0],sent_len[0],100,&n);
     assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/26",13) == 0);
-    assert(sent_len[0] == 44 + 16 + 24 + 16); /* revision string, microphone and BLE status */
+    assert(sent_len[0] == 44 + 16 + 24 + 20); /* revision string, microphone and BLE status */
     assert(sent_len[0] + 2 <= 232); /* payload plus CRC stays in one BLE frame */
     assert(field(sent[0],sent_len[0],104,&n) && n == 21);
     assert(!field(sent[0],sent_len[0],106,&n));
@@ -191,7 +201,7 @@ static const uint8_t *ble_status(void) {
     sends = 0;
     assert(settings_send_wrapper(1,9,buf,44) == 0);
     const uint8_t *st = field(sent[0], sent_len[0], 128, &n);
-    assert(st && n == 13 && st[0] == 'B' && st[1] == 'L' && st[2] == 1);
+    assert(st && n == 17 && st[0] == 'B' && st[1] == 'L' && st[2] == 1);
     return st;
 }
 static void ble_link(void) {
@@ -203,15 +213,24 @@ static void ble_link(void) {
     const uint8_t unknown_op[] = {0xfa, 0x07, 4, 'B', 'L', 1, 9};
     ctx.ble_fast = 0; side = 1;
     ble_profile_slot = stock_fast_profile; ble_applied = 0xa3; ble_wanted = 0xa3;
-    ble_cancels = ble_posts = ble_sends = 0;
+    ble_cancels = ble_posts = ble_sends = ble_classifies = 0;
+    memset(ble_conn, 0, sizeof(ble_conn));
+    ble_conn[0x18] = 12; ble_conn[0x1a] = 0;    /* a 15 ms / latency-0 link, the Mac's default */
+    ble_conn_ptr = ble_conn;
 
     /* Default: every hook is a pass-through and the reply says stock. */
     assert(ble_filter_mode(0xa4) == 0xa4 && ble_filter_mode(0xa3) == 0xa3);
+    assert(ble_hook_classify(ble_conn) == 0xa3 && ble_classifies == 1);
     assert(ble_hook_request(0xa3, (void *)0x1234) == 0 && ble_sends == 1);
     assert(ble_sent_mode == 0xa3 && ble_sent_conn == (void *)0x1234 && ble_profile_slot == stock_fast_profile);
     const uint8_t *st = ble_status();
     assert(st[3] == 0 && st[4] == 1 && st[5] == 0xa3 && st[6] == 0xa3);
     assert(st[7] == 0x0c && st[8] == 0 && st[9] == 0x18 && st[10] == 0 && st[11] == 0 && st[12] == 0);
+    assert(st[13] == 12 && st[14] == 0 && st[15] == 0 && st[16] == 0); /* live link */
+    ble_conn_ptr = 0;
+    st = ble_status();
+    assert(st[13] == 0 && st[14] == 0 && st[15] == 0 && st[16] == 0); /* no connection: zeros */
+    ble_conn_ptr = ble_conn;
     faceclaw_scan_settings_control(bad, sizeof(bad));
     faceclaw_scan_settings_control(old_version, sizeof(old_version));
     faceclaw_scan_settings_control(unknown_op, sizeof(unknown_op));
@@ -226,6 +245,15 @@ static void ble_link(void) {
     faceclaw_scan_settings_control(fast, sizeof(fast));
     assert(ble_posts == 1); /* repeated request is a no-op */
     assert(ble_filter_mode(0xa4) == 0xa3 && ble_filter_mode(0xa3) == 0xa3 && ble_filter_mode(0) == 0xa3);
+    /* The stock classifier would call a 15 ms link "already fast" and send
+     * nothing; in fast mode only a 7.5 ms / latency-0 link is fast. */
+    assert(ble_hook_classify(ble_conn) == 0xa4 && ble_classifies == 1);
+    ble_conn[0x18] = 6;
+    assert(ble_hook_classify(ble_conn) == 0xa3);
+    ble_conn[0x1a] = 1;
+    assert(ble_hook_classify(ble_conn) == 0xa4);
+    ble_conn[0x1a] = 0;
+    assert(ble_hook_classify(0) == 0xa4 && ble_classifies == 1);
     ble_sends = 0;
     assert(ble_hook_request(0xa3, 0) == 0 && ble_sends == 1 && ble_sent_mode == 0xa3);
     assert(ble_profile_slot == ctx.ble_fast_profile);
@@ -237,6 +265,8 @@ static void ble_link(void) {
     ble_profile_slot = ctx.ble_fast_profile; ble_applied = 0xa3;
     st = ble_status();
     assert(st[3] == 1 && st[7] == 6 && st[8] == 0 && st[9] == 6 && st[10] == 0 && st[11] == 0 && st[12] == 0);
+    assert(st[13] == 6 && st[14] == 0 && st[15] == 0 && st[16] == 0);
+    ble_conn[0x18] = 12;
 
     /* STOCK: restore the stock pointer, re-request what the stock machine wants. */
     ble_wanted = 0xa4;
@@ -260,6 +290,7 @@ static void ble_link(void) {
     /* Without a context the hooks stay stock and the reply still parses. */
     have_ctx = 0;
     assert(ble_filter_mode(0xa4) == 0xa4);
+    assert(ble_hook_classify(ble_conn) == 0xa3 && ble_classifies == 2);
     ble_profile_slot = stock_fast_profile;
     assert(ble_hook_request(0xa3, 0) == 0 && ble_profile_slot == stock_fast_profile);
     ble_cleanup_session();

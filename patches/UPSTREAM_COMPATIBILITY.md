@@ -34,13 +34,19 @@ feature bit static but gates the two other effects on a context flag that the
 phone sets through sid-0x09 field 127, body `['B','L',1,op]` with op 0 = stock,
 1 = fast, 2 = query. The default is stock behaviour. Each lens has its own link,
 so send the control to both. Every settings READ reply carries field 128:
-`['B','L',1, fast, side, wantedMode, appliedMode, min16, max16, latency16]`
-(interval units 1.25 ms; modes 0xa3 fast, 0xa4 slow, 0 = update pending).
-Switching queues a connection-parameter request immediately through the stock
-state machine; mode 11 cleanup switches back to stock. The two forced in-place
-edits became `bl` retargets at `0x47ae52` and `0x47b444`; see
-`patches/ble_link.c` for the recovered stock mechanism. The settings reply is
-now 100 bytes. Hardware-unverified.
+`['B','L',1, fast, side, wantedMode, appliedMode, min16, max16, latency16,
+liveInterval16, liveLatency16]` (interval units 1.25 ms; modes 0xa3 fast, 0xa4
+slow, 0 = update pending; the live pair is the connection as the central
+granted it). Switching queues a connection-parameter request immediately
+through the stock state machine; mode 11 cleanup switches back to stock. The
+two forced in-place edits became `bl` retargets at `0x47ae52` and `0x47b444`,
+and a third at `0x47b20e` gates the stock "already fast" test: stock skips the
+request for any link under 31.25 ms with zero latency, which a phone's or Mac's
+default 15-30 ms link satisfies, so without it the 7.5 ms profile was never
+requested (confirmed on hardware: the flag set, the request queued, the link
+unchanged). See `patches/ble_link.c` for the recovered stock mechanism. The
+settings reply is now 104 bytes. The hooks are hardware-unverified beyond that
+observation.
 
 # Revision 25: numeric revision only
 
