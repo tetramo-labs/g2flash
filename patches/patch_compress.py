@@ -43,12 +43,25 @@ remembering if this is ever rebased again:
     addresses still exist in the new image as unrelated variables. They were re-derived
     through the instruction that loads them (firmware/map_ram.py).
 
+REBASED 2.2.9.22 -> 2.2.10.10 (2026-09-15), and the injected code carries the
+SybilSight/Faceclaw four-microphone + display-pipeline work from that line. Every
+`FW_*` in the `.c`/`.h` sources, every site tuple/dict and the `DELTA`, ring-battery
+and TLSF-tail tables below were re-derived against the 2.2.10.10 disassembly the same
+way (instruction-window match + `bl`-target decode for code, load-instruction trace for
+RAM). The main-app component start moved by 53 bytes (a smaller bootloader), so `DELTA`
+went 0x379BFE -> 0x379C33. The full reviewed old->new address map is preserved in
+`patches/REBASE-2.2.10.10.md` and the machine-checkable
+`patches/rebase-2.2.10.10-address-profile.json`; `./build_cfw.sh` confirms clang
+regenerates the committed `cfw_patches.json` exactly, and the no-clang apply reproduces
+the pinned output hash. This CFW reports the stock version (2.2.10.10) plus `Faceclaw/3`,
+per the versioning note in settings_ext.c.
+
 PLACEMENT MODEL — APPEND, don't overwrite. The injected code blobs
 (zlib glue, settings wrapper, gesture_fwd) are APPENDED to
 the tail of the main-app component (ota/s200_firmware_ota.bin) rather than being
 squeezed into a reclaimed dead function. The bootloader XIP-programs the whole
 main-app payload to 0x00438000, so a byte at payload offset K lands at MRAM
-0x438000 + K - 0x20; appended blobs therefore load into MRAM immediately after the
+0x00438000 + K - 0x20; appended blobs therefore load into MRAM immediately after the
 current app image (~0x007bea64 on 2.2.9.22), with hundreds of KB of headroom before the
 OTA flag at 0x007fe000. This removes the old ~2 KB dead-region ceiling.
 
@@ -65,9 +78,10 @@ independent (see build.py) and needs no load address at build time, so it compil
 in a single pass. A hard MRAM-ceiling check (duplicating g2flash.py's
 check_mainapp_fits_mram) refuses an oversized image.
 """
+import struct
 import sys, os, struct, zlib, json, subprocess
 
-DELTA = 0x379BFE  # file_off = ghidra_addr - DELTA  (OTA mainApp component, 2.2.9.22)
+DELTA = 0x379C33  # file_off = ghidra_addr - DELTA  (OTA mainApp component, 2.2.10.10)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def g2f(addr):
@@ -76,7 +90,7 @@ def g2f(addr):
 # ---- main-app MRAM placement (mirrors g2flash.py check_mainapp_fits_mram) ----
 MAINAPP       = "ota/s200_firmware_ota.bin"
 APP_LOAD_ADDR = 0x00438000   # bootloader XIP-programs the main app here
-APP_PREAMBLE  = 0x20         # it programs payload[0x20:], so payload[k] -> 0x438000 + k - 0x20
+APP_PREAMBLE  = 0x20         # it programs payload[0x20:], so payload[k] -> 0x00438000 + k - 0x20
 OTA_FLAG_ADDR = 0x007FE000   # OTA magic word (last 8 KB of MRAM)
 MRAM_END      = 0x00800000
 APP_MAX_END   = 0x007F0000   # conservative ceiling: leave the top ~56 KB for NV + flag
@@ -88,31 +102,31 @@ BLOB_ALIGN    = 4            # 4-byte-align each appended blob (Thumb literal po
 # stock profile is the default. These are Apollo host changes, not EM9305 ROM
 # edits. Startup Set Local Feature (vendor opcode 0xfff2): byte 1 bit 0 is LE
 # 2M; that bit stays enabled statically because it only exposes the PHY.
-BLE_2M_SITE = (0x4c6b30, "7c 20 50 70")  # movs r0,#0x7c; strb r0,[r2,#1]
-# _connectParamReq_impl saves its mode argument: movs r5,r0; bl 0x4745bc. The
+BLE_2M_SITE = (0x4c8c5c, "7c 20 50 70")  # movs r0,#0x7c; strb r0,[r2,#1]
+# _connectParamReq_impl saves its mode argument: movs r5,r0; bl 0x475814. The
 # `bl` is retargeted to ble_hook_mode, which rewrites r5 to fast (0xa3) while
 # the phone has fast mode on, then tail-calls the connection getter. Stock
 # validation, the already-applied check and the deferral logic are untouched.
-BLE_MODE_BL_SITE = (0x47ae52, "f9 f7 b3 fb")
-# Once the stock code has stored the fast/slow profile pointer at 0x200765a0 it
-# calls 0x47a6a4(mode, conn) to send the request. That `bl` goes to
+BLE_MODE_BL_SITE = (0x47c0ee, "f9 f7 91 fb")
+# Once the stock code has stored the fast/slow profile pointer at 0x200765ec it
+# calls 0x47b940(mode, conn) to send the request. That `bl` goes to
 # ble_hook_request, which swaps in a RAM copy of the fast entry with
 # min = max = 7.5 ms while fast mode is on, then calls the stock sender.
-BLE_REQUEST_BL_SITE = (0x47b444, "ff f7 2e f9")
-# Before that, for a fast request, _connectParamReq_impl calls 0x47a95a(conn)
+BLE_REQUEST_BL_SITE = (0x47c6e0, "ff f7 2e f9")
+# Before that, for a fast request, _connectParamReq_impl calls 0x47bbf6(conn)
 # to classify the live link and returns without sending when it answers 0xa3,
 # which it does for any interval under 31.25 ms with zero latency (a central's
 # default 15 or 30 ms link qualifies). That `bl` goes to ble_hook_classify,
 # which while fast mode is on only accepts a 7.5 ms / latency-0 link.
-BLE_CLASSIFY_BL_SITE = (0x47b20e, "ff f7 a4 fb")
+BLE_CLASSIFY_BL_SITE = (0x47c4aa, "ff f7 a4 fb")
 
 # Reserve the final 1 KiB of the stock primary TLSF arena for CFW-owned fixed
 # state. Stock initializes [0x202728a8,0x2029f8a8) with size 0x2d000 at
-# 0x0048c350. 0x2cc00 is the closest smaller value encodable by the existing
+# 0x0048d680. 0x2cc00 is the closest smaller value encodable by the existing
 # four-byte Thumb modified-immediate instruction, leaving
 # [0x2029f4a8,0x2029f8a8) outside the allocator. The next stock object starts at
 # exactly 0x2029f8a8. CFW_CTX_SLOT in cfw_context.h uses the first reserved word.
-PRIMARY_TLSF_SIZE_SITE = (0x48c350, "5f f4 34 32")  # movs.w r2,#0x2d000
+PRIMARY_TLSF_SIZE_SITE = (0x48d680, "5ff43432")  # movs.w r2,#0x2d000
 PRIMARY_TLSF_CFW_SIZE  = "5f f4 33 32"              # movs.w r2,#0x2cc00
 PRIMARY_TLSF_ARENA     = 0x202728a8
 PRIMARY_TLSF_STOCK_LEN = 0x2d000
@@ -126,13 +140,26 @@ CFW_RESERVED_END       = PRIMARY_TLSF_ARENA + PRIMARY_TLSF_STOCK_LEN
 # mostly `ldr/str ..., [rN, r9, lsl #2]` or `[rN,#0x29]`. Keep the conservative
 # every-alignment scan, but exempt only these exact decoded instruction bytes/sites.
 TAIL_REF_FALSE_POSITIVES = {
-    0x5200bc: "81 f8 29 20", 0x5201e4: "81 f8 29 20", 0x52037a: "81 f8 29 20",
-    0x547cc2: "94 f8 29 20", 0x547d0e: "94 f8 29 20", 0x562b44: "40 f6 29 20",
-    0x580c98: "80 f8 29 20", 0x58199a: "90 f8 29 20", 0x5c2f04: "56 f8 29 20",
-    0x5dd848: "50 f8 29 20", 0x60ccda: "58 f8 29 20", 0x60ccfc: "56 f8 29 20",
-    0x60cd04: "56 f8 29 20", 0x60cd42: "56 f8 29 20", 0x60cd68: "52 f8 29 20",
-    0x60cd82: "52 f8 29 20", 0x60cd8a: "56 f8 29 20", 0x60cda4: "57 f8 29 20",
-    0x60cdb2: "52 f8 29 20", 0x612e1c: "51 f8 29 20", 0x612e22: "41 f8 29 20",
+    0x522960: "81f82920",
+    0x522a88: "81f82920",
+    0x522c1e: "81f82920",
+    0x54a56a: "94f82920",
+    0x54a5b6: "94f82920",
+    0x58389c: "80f82920",
+    0x58459e: "90f82920",
+    0x5c5b2c: "56f82920",
+    0x5e0538: "50f82920",
+    0x60f9ca: "58f82920",
+    0x60f9ec: "56f82920",
+    0x60f9f4: "56f82920",
+    0x60fa32: "56f82920",
+    0x60fa58: "52f82920",
+    0x60fa72: "52f82920",
+    0x60fa7a: "56f82920",
+    0x60fa94: "57f82920",
+    0x60faa2: "52f82920",
+    0x615b0c: "51f82920",
+    0x615b12: "41f82920",
 }
 
 def mram_addr(payload_off):
@@ -156,14 +183,14 @@ def align_up(x, a):
 # snapshot FIFO, but sends every nonzero CompressMode through the decompressed `r1,r2`
 # buffer and exact stock loader. The ABI here is unchanged
 # (r0=obj, r1=data, r2=len; obj+0xc = compressed data, obj+0x20 = compressed len).
-LOADBMP_BL_SITE        = (0x4a4402, "49 f0 da ff")
+LOADBMP_BL_SITE = (0x4a5736, "4bf08afa")
 # 2.2.9.22 funnels single- and multi-fragment image completion through one shared helper
 # (FUN_004ec088). Redirect its `bl FUN_0045cfdc` lens-identity check to snapshot_side;
 # r4 is the reconstruction state and r6 the container id at this site. The wrapper copies
 # the fresh message into a per-state FIFO, then tail-calls the real lens-side function so
 # the RIGHT gate still works. This + image_deferred consuming the FIFO fixes the live-
 # recon-buffer producer/consumer race for both completion paths with one patch.
-SNAPSHOT_BL_SITE       = (0x4ec0ee, "70 f7 75 ff")
+SNAPSHOT_BL_SITE = (0x4ee982, "6ef7ebfc")
 # On the RIGHT lens, 2.2.9.22 normally returns from the shared completion helper
 # after successfully queueing the deferred image event.  The ACK context lives in
 # one unguarded state slot (+0x48..+0x54), so a second pipelined completion can
@@ -171,64 +198,71 @@ SNAPSHOT_BL_SITE       = (0x4ec0ee, "70 f7 75 ff")
 # the success branch to the helper's existing immediate-response block instead:
 # it clears +0x48 and ACKs the current magic after the event has been accepted.
 # The later deferred callback then sees no pending ACK and cannot duplicate it.
-IMAGE_ACK_SUCCESS_SITE = (0x4ec10e, "30 d0")  # beq 0x4ec172 (defer ACK)
-IMAGE_ACK_IMMEDIATE    = "1c d0"              # beq 0x4ec14a (send ACK now)
-SETTINGS_BL_SITE       = (0x4a90e4, "d4 f7 90 fb")  # bl FUN_0047d808 (aa21 send) -> wrapper
+IMAGE_ACK_SUCCESS_SITE = (0x4ee9a2, "30d0")  # beq 0x004eea06 (defer ACK)
+IMAGE_ACK_IMMEDIATE    = "1c d0"              # beq 0x004ee9de (send ACK now)
+SETTINGS_BL_SITE = (0x4aa418, "d4f744fb")  # bl FUN_0047d808 (aa21 send) -> wrapper
 # nanopb decode in pb_service_setting's inbound parser. The wrapper scans raw
 # unknown field 101 before the stock decoder discards it, then tail-calls decode.
-SETTINGS_DECODE_BL_SITE = (0x4a87e4, "f5 f7 10 f9") # bl FUN_0049da08 -> settings_decode_wrapper
-# The two REQUEST_DISPLAY_START_UP(1) sites reached by the local and mirrored
-# idle double-tap paths. Both must defer or the peer lens can still flash.
-DISPLAY_START_BL_SITES = {
-    0x45f146: "0b f0 2a f9",
-    0x45f206: "0b f0 ca f8",
-}
+SETTINGS_DECODE_BL_SITE = (0x4a9b18, "f5f710f9") # bl FUN_0049da08 -> settings_decode_wrapper
+# The two REQUEST_DISPLAY_START_UP(1) sites in the display thread's idle touch
+# policy: sub-event 1 (double tap) and sub-event 6 (IMU head-up). Both must defer
+# or the peer lens can still flash; each reports its own field-102 event code.
+DISPLAY_START_BL_SITES = {0x45f4c6: ("0bf05cfa", "faceclaw_display_start"), 0x45f586: ("0bf0fcf9", "faceclaw_display_start_headup")}
+# The stock idle gate call in that same touch branch. The dispatcher frees the
+# message when the gate fails -- which it does while an EvenHub page is on
+# screen, so a soft-sleeping phone never hears about a head-up. Wrap the gate
+# call: the stock result is passed through unchanged and a head-up is also
+# forwarded as EvenHub sys event 12 under the Faceclaw framebuffer lease.
+HEADUP_GATE_BL_SITE = (0x45f386, "10f0c8f9")  # bl FUN_0046f136 -> headup_gate
+# Idle-input forwarding: in the display thread's touch branch, the mode check that
+# follows the idle gate (FUN_0046f136 == 1). r4 = the input record. The wrapper
+# reports tap / long-press / release as field-102 events while Faceclaw holds the
+# wake lease and returns the stock mode result unchanged (settings_ext.c).
+IDLE_INPUT_GATE_SITE = (0x45f39a, "fff765fb") # bl FUN_0045e6e8 -> faceclaw_idle_input_gate
 # 2.2.9.22 changed Menu to tap-then-long-press. Plain subtype 3 posts UI event 8;
-# subtype 0xe posts release event 0x4a; the new subtype 0x11 starts at 0x444a40.
+# subtype 0xe posts release event 0x4a; the new subtype 0x11 starts at 0x00444ac0.
 # r6 holds the raw input record at all three sites. The first two sites wrap the
 # stock UI post. The third replaces its initial no-argument state getter; its shim
 # either reproduces that call or exits the dispatcher after forwarding event 11.
-GESTURE_PRESS_SITE      = (0x444a3a, "1d f0 57 fc") # bl FUN_004622ec -> gesture_press
-GESTURE_SHORT_LONG_SITE = (0x444a40, "24 f0 23 f9") # bl FUN_00468c8a -> gesture_short_long
-GESTURE_RELEASE_SITE    = (0x444d36, "1d f0 d9 fa") # bl FUN_004622ec -> gesture_release
+GESTURE_PRESS_SITE = (0x444ab8, "1df0d8fd") # bl FUN_004622ec -> gesture_press
+GESTURE_SHORT_LONG_SITE = (0x444ac0, "24f0a3fa") # bl FUN_00468c8a -> gesture_short_long
+GESTURE_RELEASE_SITE = (0x444f46, "1df091fb") # bl FUN_004622ec -> gesture_release
 # Wakeword ("Hey Even") capture. The old patch unconditionally changed the
 # op==START branch in even_ai_display_ctrl, which also broke the official Even
 # app. Replace the first four bytes with a B.W trampoline: the injected entry
 # reproduces the overwritten push/mov and suppresses START only under Faceclaw's
-# volatile lease; with no lease it resumes at 0x4f515a byte-for-byte stock.
-EVENAI_ENTRY_SITE      = (0x4f5156, "7f b5 06 00")
+# volatile lease; with no lease it resumes at 0x004f79fe byte-for-byte stock.
+EVENAI_ENTRY_SITE = (0x4f79fa, "7fb50600")
 # The display task copies the composed 576x288 A4 buffer into the physical
 # 640x480 framebuffer at two switch cases. Redirect both calls through
 # display_copy_hook: ordinary refreshes pass through, while a pending Faceclaw
 # shadow replaces the stock compositor copy immediately before panel refresh.
-DISPLAY_COPY_BL_SITES = {
-    0x4798f2: "f6 f7 ed ff",   # queue message type 3 -> bl FUN_004708d0
-    0x479a2e: "f6 f7 4f ff",   # queue message type 6 -> bl FUN_004708d0
-}
+DISPLAY_COPY_BL_SITES = {0x47ab86: "f6f795f9", 0x47acc2: "f6f7f7f8"}
 # The stock wear handler calls its onboarding-only transmitter in both branches.
 # Redirect those calls to our lifecycle-independent sender instead.
-WEAR_NOTIFY_BL_SITES = {
-    0x4ac3ea: "d9 f7 58 ff",  # ON_HEAD:  bl 0x48629e
-    0x4ac44e: "d9 f7 26 ff",  # OFF_HEAD: bl 0x48629e
-}
-# ANCS relay. The stock ANCC profile object (profile_ancc.c, 0x4d3e5e..0x4d50e0)
+WEAR_NOTIFY_BL_SITES = {0x4ad71e: "d9f756ff", 0x4ad782: "d9f724ff"}
+# ANCS relay. The stock ANCC profile object (profile_ancc.c, 0x4d651a..0x4d7820)
 # calls its own helpers with direct `bl`s; each is retargeted to a wrapper that
 # records the event for the phone and tail-calls the stock callee, so the stock
 # notification pipeline (whitelist, on-glass popup, lens sync) is untouched.
 # r0 is the 8-byte Notification Source record at the first two sites and the
 # active_notif_t (anccCb+8) at the attribute site; the app-attribute parser
 # takes no arguments and reads anccCb directly.
-ANCS_SOURCE_BL_SITE = (0x4d438c, "ff f7 89 fe")  # _anccNtfValueUpdate: bl anccActionListPush
-ANCS_REMOVE_BL_SITE = (0x4d4384, "ff f7 82 ff")  # _anccNtfValueUpdate: bl _anccNotiRemoveCback
-ANCS_ATTR_BL_SITE   = (0x4d4c7c, "ff f7 8d fc")  # _anccAttrHandler: bl _ancsAnccAttrCback
+ANCS_SOURCE_BL_SITE = (0x4d6ac4, "ff f7 4b fe")  # _anccNtfValueUpdate: bl anccActionListPush
+ANCS_REMOVE_BL_SITE = (0x4d6abc, "ff f7 44 ff")  # _anccNtfValueUpdate: bl _anccNotiRemoveCback
+ANCS_ATTR_BL_SITE   = (0x4d73c4, "ff f7 85 fc")  # _anccAttrHandler: bl _ancsAnccAttrCback
 ANCS_APP_BL_SITES = {
-    0x4d4bf4: "ff f7 aa fd",   # _anccAttrHandler, first fragment: bl _anccParseAppAttributes
-    0x4d4daa: "ff f7 cf fc",   # _anccAttrHandler, continuation:  bl _anccParseAppAttributes
+    0x4d733c: "ff f7 a2 fd",   # _anccAttrHandler, first fragment: bl _anccParseAppAttributes
+    0x4d74f2: "ff f7 c7 fc",   # _anccAttrHandler, continuation:  bl _anccParseAppAttributes
 }
 # Capture the selected GAF source before the parser clears it, then attach the
 # matching record diagnostics at the sensor-hub heading report call.
-COMPASS_DECODE_BL_SITE = (0x4b6922, "65 f0 af fd")  # bl GAF decode, before output is cleared
-COMPASS_REPORT_BL_SITE = (0x4b632e, "ff f7 59 fc")  # bl DRV_IMUSendUIEvent(9,heading)
+COMPASS_DECODE_BL_SITE = (0x4b8806, "66f08ffa")  # bl GAF decode, before output is cleared
+COMPASS_REPORT_BL_SITE = (0x4b8212, "fff759fc")  # bl DRV_IMUSendUIEvent(9,heading)
+# 2.2.10.51: common-data dispatch table entry {0x010C, AUDM handler, 0}: the handler pointer
+# (Thumb) is repointed at mic_peer_sync_hook, which passes everything through to stock except
+# peer audio-sync frames arriving at an armed, power-cycled RIGHT temple.
+AUDM_PEER_SYNC_TABLE_SITE = (0x6c12a4, "f7b15600")
 
 def enc_bl(pc, target):
     """Encode a Thumb-2 BL (T1) from instruction address `pc` to `target`."""
@@ -292,45 +326,45 @@ def find_mainapp(img):
     raise SystemExit("main-app component (ota/s200_firmware_ota.bin) not found")
 
 def validate_ring_battery_stock(img):
-    """Pin the read-only stock ABI used by ring_battery.c (2.2.9.22 only)."""
+    """Pin the read-only stock ABI used by ring_battery.c (2.2.10.10 only)."""
     for address, expected, description in (
-        (0x00512d84, "0200d2b2652a00db6420384a1070c9b2002901d0012000e0002050707047334890f90000c0b27047304840787047", "cache setter and accessors"),
-        (0x00512e70, "a6720720", "cache address literal"),
-        (0x0047efa8, "80b534f01ff8002808d0fff77eff002801d0012000e00020c0b207e0fff77bff002801d0012000e00020c0b202bd", "dashboard connection predicate"),
-        (0x0047eeb2, "1a480078c0f30010c0b2704717480078c0f34010c0b27047", "connection-bit getters"),
-        (0x0047ef1c, "06740720", "connection-bit address literal"),
-        (0x004a9be2, "80b569f0ddf802bd", "dashboard battery getter"),
+        (0x00515634, "0200d2b2652a00db6420384a1070c9b2002901d0012000e0002050707047334890f90000c0b27047304840787047", "cache setter and accessors"),
+        (0x00515720, "14730720", "cache address literal"),
+        (0x00480260, "80b534f01ffe002808d0fff77eff002801d0012000e00020c0b207e0fff77bff002801d0012000e00020c0b202bd", "dashboard connection predicate"),
+        (0x0048016a, "1a480078c0f30010c0b2704717480078c0f34010c0b27047", "connection-bit getters"),
+        (0x004801d4, "89740720", "connection-bit address literal"),
+        (0x004aaf16, "80b56af09bfb02bd", "dashboard battery getter"),
     ):
         expected = bytes.fromhex(expected)
         if bytes(img[g2f(address):g2f(address) + len(expected)]) != expected:
             raise ValueError(f"ring battery stock ABI mismatch: {description} at {address:#x}")
 
 def validate_ble_link_stock(img):
-    """Pin the stock connection-parameter machinery used by ble_link.c (2.2.9.22)."""
+    """Pin the stock connection-parameter machinery used by ble_link.c (2.2.10.10)."""
     for address, expected, description in (
-        (0x007ae7a4, "00000000240048000400580205000000000000000c0018000000580205000000", "slow and fast connection profiles"),
-        (0x0047ae4c, "78b585b00500f9f7b3fb", "_connectParamReq_impl prologue, movs r5,r0, bl connection getter"),
-        (0x004745bc, "dff8f40500687047", "connection getter"),
-        (0x0047b1cc, "28006c490978c0b2884205d1", "applied-mode no-op check"),
-        (0x0047b200, "2800c0b2a32845d1dff8fc060068fff7a4fb0600", "fast-mode branch: connection load, bl link classifier"),
-        (0x0047b908, "6c650720", "classifier connection record literal"),
-        (0x0047a95a, "10b588b00400", "link classifier prologue"),
-        (0x0047aaf4, "208b192827da608bdff8b01a0989884221d1", "link classifier: interval < 25 units and latency == fast profile"),
-        (0x0047ab46, "a32020e0", "link classifier fast verdict"),
-        (0x0047ab8a, "a42008b010bd", "link classifier slow verdict"),
-        (0x0047b30c, "2800c0b2a32839d1504ea6483060", "fast profile pointer store"),
-        (0x0047b388, "334e35483060", "slow profile pointer store"),
-        (0x0047b43e, "21002800c0b2fff72ef9dff8", "bl 0x47a6a4 and current-mode store"),
-        (0x0047b458, "a0650720", "profile slot literal"),
-        (0x0047b460, "a4e77a00", "slow profile literal"),
-        (0x0047b5b0, "b4e77a00", "fast profile literal"),
-        (0x0047b380, "824d0020", "applied-mode literal"),
-        (0x0047ae24, "834d0020", "wanted-mode literal"),
-        (0x0047a686, "10b50400c9f729fbdff894070470dff890070168491c0160c9f72bfb10bd", "wanted-mode setter"),
-        (0x0047a6a4, "f8b588b004000e00", "request sender prologue"),
-        (0x0047a85a, "dff8fc0b", "request sender profile slot load"),
-        (0x0047c2d0, "a320fef7d8f9dff834432000dcf739fc0022a3212000dcf78cfb13bd", "stock fast request sequence (set wanted, cancel, post)"),
-        (0x0047c60c, "75b44700", "deferred request callback literal"),
+        (0x007b285c, "00000000240048000400580205000000000000000c0018000000580205000000", "slow and fast connection profiles"),
+        (0x0047c0e8, "78b585b00500f9f791fb", "_connectParamReq_impl prologue, movs r5,r0, bl connection getter"),
+        (0x00475814, "dff82c0600687047", "connection getter"),
+        (0x0047c468, "28006c490978c0b2884205d1", "applied-mode no-op check"),
+        (0x0047c49c, "2800c0b2a32845d1dff8fc060068fff7a4fb0600", "fast-mode branch: connection load, bl link classifier"),
+        (0x0047cba4, "b8650720", "classifier connection record literal"),
+        (0x0047bbf6, "10b588b00400", "link classifier prologue"),
+        (0x0047bd90, "208b192827da608bdff8b01a0989884221d1", "link classifier: interval < 25 units and latency == fast profile"),
+        (0x0047bde2, "a32020e0", "link classifier fast verdict"),
+        (0x0047be26, "a42008b010bd", "link classifier slow verdict"),
+        (0x0047c5a8, "2800c0b2a32839d1504ea6483060", "fast profile pointer store"),
+        (0x0047c624, "334e35483060", "slow profile pointer store"),
+        (0x0047c6da, "21002800c0b2fff72ef9dff8", "bl 0x47b940 and current-mode store"),
+        (0x0047c6f4, "ec650720", "profile slot literal"),
+        (0x0047c6fc, "5c287b00", "slow profile literal"),
+        (0x0047c84c, "6c287b00", "fast profile literal"),
+        (0x0047c61c, "824d0020", "applied-mode literal"),
+        (0x0047c0c0, "834d0020", "wanted-mode literal"),
+        (0x0047b922, "10b50400c8f7dbf9dff894070470dff890070168491c0160c8f7ddf910bd", "wanted-mode setter"),
+        (0x0047b940, "f8b588b004000e00", "request sender prologue"),
+        (0x0047baf6, "dff8fc0b", "request sender profile slot load"),
+        (0x0047d56c, "a320fef7d8f9dff834432000dbf7abfc0022a3212000dbf7fefb13bd", "stock fast request sequence (set wanted, cancel, post)"),
+        (0x0047d8a8, "11c74700", "deferred request callback literal"),
     ):
         expected = bytes.fromhex(expected)
         if bytes(img[g2f(address):g2f(address) + len(expected)]) != expected:
@@ -389,7 +423,10 @@ def layout(img):
     deferred_addr  = base + _fn(built, "image_deferred")["offset"]
     settings_addr  = base + _fn(built, "settings_send_wrapper")["offset"]
     settings_decode_addr = base + _fn(built, "settings_decode_wrapper")["offset"]
-    display_start_addr = base + _fn(built, "faceclaw_display_start")["offset"]
+    display_start_addrs = {name: base + _fn(built, name)["offset"]
+                           for _, name in DISPLAY_START_BL_SITES.values()}
+    headup_gate_addr = base + _fn(built, "headup_gate")["offset"]
+    idle_gate_addr = base + _fn(built, "faceclaw_idle_input_gate")["offset"]
     evenai_entry_addr = base + _fn(built, "faceclaw_evenai_display_entry")["offset"]
     press_addr     = base + _fn(built, "gesture_press")["offset"]
     short_long_addr = base + _fn(built, "gesture_short_long")["offset"]
@@ -405,6 +442,7 @@ def layout(img):
     ble_mode_addr    = base + _fn(built, "ble_hook_mode")["offset"]
     ble_request_addr = base + _fn(built, "ble_hook_request")["offset"]
     ble_classify_addr = base + _fn(built, "ble_hook_classify")["offset"]
+    peer_sync_addr = base + _fn(built, "mic_peer_sync_hook")["offset"]
 
     # --- assemble the appended payload bytes (old_ps .. end) ---
     pad = blob_off - old_ps                     # alignment gap before the blob
@@ -440,14 +478,17 @@ def layout(img):
         # this cap in 2.2.9.22 (its clamp strings are byte-identical and the limit is
         # still parameterized), so the lift is still needed. These three sites are
         # byte-for-byte the same instructions as on 2.2.4.34, just relocated.
-        (g2f(0x4eddd2), "bd f8 2c 10", "40 f2 41 20", "container width  <= 576"),
-        (g2f(0x4ede9a), "bd f8 2e 00", "40 f2 21 11", "container height movw #0x121"),
-        (g2f(0x4ede9e), "91 28",       "88 42",       "container height cmp r0,r1"),
+        (g2f(0x004f0666), "bd f8 2c 10", "40 f2 41 20", "container width  <= 576"),
+        (g2f(0x004f072e), "bd f8 2e 00", "40 f2 21 11", "container height movw #0x121"),
+        (g2f(0x004f0732), "91 28",       "88 42",       "container height cmp r0,r1"),
         # Snapshot/restore (fixes the shared-recon-buffer producer/consumer race): at the
         # both-lens completion, redirect `bl FUN_0045cfdc` -> snapshot_side (copies the
         # fresh message into a FIFO in the recon-buffer tail, then returns the lens id);
         # the deferred consumer `bl FUN_004ee3ba` -> image_deferred (pops the FIFO and
         # runs the worker on the snapshot, ignoring the possibly-overwritten live buffer).
+        (g2f(AUDM_PEER_SYNC_TABLE_SITE[0]), AUDM_PEER_SYNC_TABLE_SITE[1],
+         struct.pack("<I", peer_sync_addr | 1).hex(),
+         f"common-data 0x010C handler -> mic_peer_sync_hook @ {AUDM_PEER_SYNC_TABLE_SITE[0]:#x}"),
         (g2f(SNAPSHOT_BL_SITE[0]), SNAPSHOT_BL_SITE[1],
          enc_bl(SNAPSHOT_BL_SITE[0], snapshot_addr),
          f"bl snapshot_side @ {SNAPSHOT_BL_SITE[0]:#x} (shared image-complete helper)"),
@@ -462,9 +503,15 @@ def layout(img):
         (g2f(SETTINGS_DECODE_BL_SITE[0]), SETTINGS_DECODE_BL_SITE[1],
          enc_bl(SETTINGS_DECODE_BL_SITE[0], settings_decode_addr),
          "bl settings_decode_wrapper (Faceclaw lease field 101)"),
-        *[(g2f(site), orig, enc_bl(site, display_start_addr),
-           f"bl faceclaw_display_start @ {site:#x} (fail-open double-tap takeover)")
-          for site, orig in DISPLAY_START_BL_SITES.items()],
+        *[(g2f(site), orig, enc_bl(site, display_start_addrs[name]),
+           f"bl {name} @ {site:#x} (fail-open wake takeover)")
+          for site, (orig, name) in DISPLAY_START_BL_SITES.items()],
+        (g2f(HEADUP_GATE_BL_SITE[0]), HEADUP_GATE_BL_SITE[1],
+         enc_bl(HEADUP_GATE_BL_SITE[0], headup_gate_addr),
+         "bl headup_gate (head-up sensor event -> EvenHub sys event 12 under lease)"),
+        (g2f(IDLE_INPUT_GATE_SITE[0]), IDLE_INPUT_GATE_SITE[1],
+         enc_bl(IDLE_INPUT_GATE_SITE[0], idle_gate_addr),
+         "bl faceclaw_idle_input_gate (idle tap/long/release -> field-102 events 2/3/4)"),
         # Source-qualified long-press, tap-then-long-press, and release forwarding.
         (g2f(GESTURE_PRESS_SITE[0]), GESTURE_PRESS_SITE[1],
          enc_bl(GESTURE_PRESS_SITE[0], press_addr),

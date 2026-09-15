@@ -16,14 +16,14 @@
  * decides for itself what to show.
  *
  * STOCK SEAMS (2.2.9.22, platform/ble/profiles/ancc/profile_ancc.c; object
- * 0x4d3e5e..0x4d50e0; control block anccCb @ 0x20068c18). Four direct `bl`
+ * 0x4d651a..0x4d7820; control block anccCb @ 0x20068c18). Four direct `bl`
  * sites inside that object are retargeted (patch_compress.py). Each wrapper
  * records the event and tail-calls the stock callee, so stock behaviour,
  * including the whitelist and the on-glass popup, is unchanged:
- *   0x4d438c  _anccNtfValueUpdate -> anccActionListPush(ancc_notif_t *)    ADDED / MODIFIED
- *   0x4d4384  _anccNtfValueUpdate -> _anccNotiRemoveCback(ancc_notif_t *)  REMOVED
- *   0x4d4c7c  _anccAttrHandler    -> _ancsAnccAttrCback(active_notif_t *)  one attribute
- *   0x4d4bf4, 0x4d4daa  _anccAttrHandler -> _anccParseAppAttributes()      app display name
+ *   0x4d6ac4  _anccNtfValueUpdate -> anccActionListPush(ancc_notif_t *)    ADDED / MODIFIED
+ *   0x4d6abc  _anccNtfValueUpdate -> _anccNotiRemoveCback(ancc_notif_t *)  REMOVED
+ *   0x4d73c4  _anccAttrHandler    -> _ancsAnccAttrCback(active_notif_t *)  one attribute
+ *   0x4d733c, 0x4d74f2  _anccAttrHandler -> _anccParseAppAttributes()      app display name
  * ancc_notif_t is the 8-byte Notification Source record
  *   [event_id][event_flags][category_id][category_count][uid LE32].
  * active_notif_t (anccCb+8) as this build lays it out:
@@ -123,11 +123,11 @@ typedef void (*ancs_perform_fn)(uint16_t *hdl_list, uint32_t uid, uint32_t actio
 /* Firmware seams, overridable so patches/host/ancs_relay_host_test.c can run
  * the ring, chunking and lease logic on the host. */
 #ifndef ANCS_HOST_TEST
-#define FW_ANCC_LIST_PUSH ((ancs_push_fn)0x004d40a3u)     /* anccActionListPush */
-#define FW_ANCC_REMOVE_CB ((ancs_notif_fn)0x004d428du)    /* _anccNotiRemoveCback */
-#define FW_ANCC_ATTR_CB   ((ancs_attr_fn)0x004d459bu)     /* _ancsAnccAttrCback */
-#define FW_ANCC_PARSE_APP ((ancs_parse_fn)0x004d474du)    /* _anccParseAppAttributes */
-#define FW_ANCC_PERFORM   ((ancs_perform_fn)0x004d3fb1u)  /* AncsPerformNotiAction(hdlList, uid, action) */
+#define FW_ANCC_LIST_PUSH ((ancs_push_fn)0x004d675fu)     /* anccActionListPush */
+#define FW_ANCC_REMOVE_CB ((ancs_notif_fn)0x004d6949u)    /* _anccNotiRemoveCback */
+#define FW_ANCC_ATTR_CB   ((ancs_attr_fn)0x004d6cd3u)     /* _ancsAnccAttrCback */
+#define FW_ANCC_PARSE_APP ((ancs_parse_fn)0x004d6e85u)    /* _anccParseAppAttributes */
+#define FW_ANCC_PERFORM   ((ancs_perform_fn)0x004d666du)  /* AncsPerformNotiAction(hdlList, uid, action) */
 #define ANCS_CB           ((volatile uint8_t *)0x20068c18u)
 #define ANCS_SEND(buf, len)   ((send_fn)FW_SEND)(1, 9, (buf), (len))
 #define ANCS_NOW()            FW_MS_TICK

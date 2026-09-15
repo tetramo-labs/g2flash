@@ -502,8 +502,9 @@ static int cfw_scene_any_animating(const cfw_scene *sc) {
 /* Make sure the frame timer exists and is armed. EvenHub task only (creates
  * the osTimer lazily; it is deleted by mode 11 cleanup). Animation needs the
  * CFW-owned frame: without it the slots keep their end values instead. */
-/* Keep the PC-relative scene_tick address near its caller: this clang's
- * Thumb MOVW/MOVT assembler rejects large negative local-symbol addends. */
+/* scene_tick's address goes through CFW_FN_ADDR: this clang's Thumb MOVW/MOVT
+ * assembler rejects PC-relative addends beyond 64 KB, and the blob is now larger
+ * than that. */
 static __attribute__((always_inline)) inline void cfw_scene_arm(customCfwContext *ctx, cfw_scene *sc) {
     if (!cfw_scene_any_animating(sc)) { sc->anim_active = 0; return; }
     if (cfw_scene_frame(sc) == 0) {
@@ -513,7 +514,7 @@ static __attribute__((always_inline)) inline void cfw_scene_arm(customCfwContext
         return;
     }
     if (ctx->scene_timer == 0)
-        ctx->scene_timer = FW_TIMER_NEW((void *)&scene_tick, 0, ctx, 0);
+        ctx->scene_timer = FW_TIMER_NEW(CFW_FN_ADDR(scene_tick), 0, ctx, 0);
     if (ctx->scene_timer == 0) {
         for(uint32_t i=0;i<sc->slot_hi;i++)cfw_slot_finish(&sc->slots[i]);
         sc->anim_active = 0; return;
