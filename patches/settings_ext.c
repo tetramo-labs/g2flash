@@ -470,6 +470,9 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   29 -> dirty-rect list folds overflow into a bounding box instead of
+//         dropping it, so multi-line text updates refresh every line under
+//         the revision-28 dirty-row panel refresh.
 //   28 -> merged jimrandomh/g2flash PR #4 (kalanihelekunihi 2.2.10-CFW): stock
 //         base 2.2.10.10, four-microphone relay, dirty-row partial panel
 //         refresh, session-persistent inflate stream, LE Data Length request,
@@ -499,7 +502,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/28";
+        static const char caps[] = "GLASSLYCFW/29";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);
