@@ -106,12 +106,26 @@ static int cfw_diag(int has_fid, uint16_t fid) {
 }
 
 /* Append (l,t,w,h) to the per-frame updated-rect list, if there's room. */
+/* The list feeds the dirty-row union in present_buffer, so nothing may be
+ * dropped: text adds one rect per glyph and a paragraph has far more than
+ * CFW_RECT_MAX of them. Once the list is full, fold further rects into the
+ * last entry as a bounding box; the row union stays exact. */
 static void rl_add(cfw_rectlist *rl, uint32_t l, uint32_t t, uint32_t w, uint32_t h) {
-    if (rl && rl->n < CFW_RECT_MAX) {
+    if (!rl) return;
+    if (rl->n < CFW_RECT_MAX) {
         rl->r[rl->n].l = (uint16_t)l; rl->r[rl->n].t = (uint16_t)t;
         rl->r[rl->n].w = (uint16_t)w; rl->r[rl->n].h = (uint16_t)h;
         rl->n++;
+        return;
     }
+    cfw_rect *last = &rl->r[CFW_RECT_MAX - 1];
+    uint32_t l0 = last->l < l ? last->l : l;
+    uint32_t t0 = last->t < t ? last->t : t;
+    uint32_t r1 = (uint32_t)last->l + last->w, r2 = l + w;
+    uint32_t b1 = (uint32_t)last->t + last->h, b2 = t + h;
+    uint32_t r0 = r1 > r2 ? r1 : r2, b0 = b1 > b2 ? b1 : b2;
+    last->l = (uint16_t)l0; last->t = (uint16_t)t0;
+    last->w = (uint16_t)(r0 - l0); last->h = (uint16_t)(b0 - t0);
 }
 
 static void append_free_kib(char *out, uint32_t free_bytes, uint32_t maxlen) {
