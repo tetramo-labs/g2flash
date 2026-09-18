@@ -279,8 +279,7 @@ typedef struct {
     uint32_t image_mutex;                   /* stock mutex handle; created lazily */
     uint8_t *framebuffer_shadow;            /* owned 640x480 packed 4bpp (heap 13); released by mode 11 */
     cfw_message_stream message_streams[2];  /* index = BLE ingress lens bit - 1 */
-    uint8_t  texture_cache_heap13;          /* texture cache lives in heap 13 (EvenHub heap was full) */
-    uint8_t  transport_pad0[3];
+    uint8_t  transport_pad0[4];
 } customCfwContext;
 
 #define CFW_CTX_SLOT  0x2029f4a8U    /* first word of the CFW-reserved TLSF tail */

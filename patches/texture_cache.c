@@ -212,17 +212,15 @@ static void cfw_texture_add_rect(cfw_rectlist *rl, int32_t x, int32_t y,
 }
 
 /* Clear the published pointer before freeing so repeated release/cleanup is
- * harmless. The cache prefers the stock EvenHub TLSF heap (upstream's choice,
- * keeping heap 13 for the shadow, scene frame and LVGL) and falls back to heap
- * 13 when that heap is holding a stock 576x288 image container; the flag
- * records which allocator owns it. Both allocators serialize internally. */
+ * harmless. The cache lives on the stock EvenHub TLSF heap (upstream's choice,
+ * keeping heap 13 for the shadow, scene frame and LVGL); with no image
+ * container on the page that heap has room. The stock allocator serializes
+ * access to its heap. */
 static void cfw_texture_cache_release(customCfwContext *ctx) {
     if (ctx && ctx->texture_cache) {
         uint8_t *cache = ctx->texture_cache;
         ctx->texture_cache = 0;
-        if (ctx->texture_cache_heap13) cfw_heap13_free(cache);
-        else FW_FREE(cache);
-        ctx->texture_cache_heap13 = 0;
+        FW_FREE(cache);
     }
 }
 
@@ -251,16 +249,10 @@ static int cfw_texture_cache_update(const uint8_t *src, uint32_t len) {
     customCfwContext *ctx = getCustomCfwContext();
     if (ctx == 0) return -1;
     if (ctx->texture_cache == 0) {
-        uint8_t heap13 = 0;
         uint8_t *cache = (uint8_t *)cfw_malloc(CFW_TEXTURE_CACHE_SIZE);
-        if (cache == 0) {
-            cache = (uint8_t *)cfw_heap13_malloc(CFW_TEXTURE_CACHE_SIZE);
-            heap13 = 1;
-        }
         if (cache == 0) return -1;
         bzero(cache, CFW_TEXTURE_CACHE_SIZE);
         ctx->texture_cache = cache;
-        ctx->texture_cache_heap13 = heap13;
     }
 
     pos = 0;

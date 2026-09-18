@@ -70,8 +70,7 @@ writes directly to the framebuffer without going through EvenHub's
 screen-update functions, stock containers do not contribute visible content
 while the direct framebuffer lease is held. A lease-scoped 256 KiB texture cache lets the phone upload RLE
 icons and glyphs once, then draw cached images and strings with small update
-messages. The cache is allocated on the EvenHub heap (falling back to heap 13)
-and zeroed on its first write, and released when the Faceclaw framebuffer lease
+messages. The cache is allocated on the EvenHub heap and zeroed on its first write, and released when the Faceclaw framebuffer lease
 ends. Modes 18/19/20 (upstream `Faceclaw/13`) take 32-bit cache offsets,
 including glyph-table entries, for the full 256 KiB; the 16-bit modes 12/13/14
 were retired in revision 31. Upload lengths remain 16-bit. Cached draw commands carry an options
