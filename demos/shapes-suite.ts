@@ -27,17 +27,10 @@
 //     G2_DRY_RUN=1 bun shapes-suite.ts       # host pipeline only, no glasses
 //     G2_HOLD_SCALE=0.5 G2_OUT=results.json bun shapes-suite.ts
 //
-// Needs the glassly-cfw firmware, revision 26 or later.
+// Needs the glassly-cfw firmware, revision 31 or later (SID-0xf0 transport).
 
-import {
-  G2Session,
-  buildCreateStartUpPageContainer,
-  buildImageContainers,
-  buildImageRawData,
-  planImageFragments,
-  querySettings,
-  type ImageContainerSpec,
-} from "g2-kit/ble";
+import { G2Session, buildCreateStartUpPageContainer, querySettings } from "g2-kit/ble";
+import { CfwTransport } from "./cfw-transport";
 import { describeCfw, queryGlasslyCfw, REQUIRED_REVISION } from "./glassly-cfw";
 import { startHeartbeat } from "g2-kit/ui";
 
@@ -1682,12 +1675,8 @@ async function openLink(): Promise<Link> {
 
   const hb = startHeartbeat({ session, nextMagic });
   const suffix = String(Date.now() % 10_000).padStart(4, "0");
-  let sid = 1;
-  const create = buildCreateStartUpPageContainer({ name: `b${suffix}`, items: ["."], containerId: 1, captureEvents: false, magic: nextMagic(), extraContainerNames: [`c${suffix}`] });
+  const create = buildCreateStartUpPageContainer({ name: `b${suffix}`, items: ["."], containerId: 1, captureEvents: false, magic: nextMagic() });
   if (!(await session.sendPb(0xe0, create.pb, create.magic, { ackTimeoutMs: ACK_MS }))) throw new Error("CREATE did not ack");
-  const container: ImageContainerSpec = { name: `c${suffix}`, containerId: 2, x: 0, y: 0, width: 576, height: 288 };
-  const rebuild = buildImageContainers({ containers: [container], magic: nextMagic() });
-  if (!(await session.sendPb(0xe0, rebuild.pb, rebuild.magic, { ackTimeoutMs: ACK_MS }))) throw new Error("REBUILD did not ack");
   await sleep(300);
 
   const lease = async (op: number) => {
@@ -1697,16 +1686,10 @@ async function openLink(): Promise<Link> {
   await lease(5); // FB_ACQUIRE (90 s, fail-open)
   const renew = setInterval(() => void lease(5), 30_000);
 
+  // GLASSLYCFW/31: custom payloads ride the SID-0xf0 message transport (no image container).
+  const transport = new CfwTransport(session, ACK_MS);
   const send = async (payload: Uint8Array) => {
-    for (const frag of planImageFragments(payload, 4000)) {
-      const raw = buildImageRawData({
-        containerId: container.containerId, containerName: container.name, mapSessionId: sid,
-        mapTotalSize: payload.length, mapFragmentIndex: frag.index, mapRawData: frag.data,
-        magic: nextMagic(), compressMode: 0,
-      });
-      if (!(await session.sendPb(0xe0, raw.pb, raw.magic, { ackTimeoutMs: ACK_MS }))) throw new Error(`image message (mode ${payload[0]}) did not ack`);
-    }
-    sid++;
+    if (!(await transport.send(payload))) throw new Error(`message (mode ${payload[0]}) was not acked by both lenses`);
   };
   await send(WARM_UP);
   await sleep(150);
@@ -1716,6 +1699,7 @@ async function openLink(): Promise<Link> {
     send,
     async close() {
       clearInterval(renew);
+      transport.close();
       try { await send(Uint8Array.from([38, 2])); } catch {} // release the retained scene
       await lease(6).catch(() => {}); // FB_RELEASE
       hb.stop();

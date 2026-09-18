@@ -51,28 +51,25 @@ if(!args.includes("--device") || args.includes("--dry-run")) {
   process.exit(0);
 }
 
-const {G2Session,buildCreateStartUpPageContainer,buildImageContainers,buildImageRawData,planImageFragments,querySettings}=await import("g2-kit/ble");
+const {G2Session,buildCreateStartUpPageContainer,querySettings}=await import("g2-kit/ble");
+const {CfwTransport}=await import("./cfw-transport");
 const {queryGlasslyCfw,REQUIRED_REVISION}=await import("./glassly-cfw");
 const {startHeartbeat}=await import("g2-kit/ui");
 const sleep=(ms:number)=>new Promise(r=>setTimeout(r,ms));
-let magic=100,transfer=1;
+let magic=100;
 const nextMagic=()=>magic=magic>=255?100:magic+1;
 const session=await G2Session.open();
 let heartbeat:ReturnType<typeof startHeartbeat>|undefined,renew:ReturnType<typeof setInterval>|undefined;
 const suffix=String(Date.now()%10000).padStart(4,"0");
-const container={name:`v${suffix}`,containerId:2,x:0,y:0,width:576,height:288};
 const lease=async(op:5|6)=>{
   const m=nextMagic();
   const pb=framebufferLease(op,m);
   if(!await session.sendPb(9,pb,m,{ackTimeoutMs:8000}))throw new Error("Framebuffer lease did not ACK");
 };
+// GLASSLYCFW/31: custom payloads ride the SID-0xf0 message transport (no image container).
+const transport=new CfwTransport(session);
 const send=async(payload:Uint8Array)=>{
-  for(const frag of planImageFragments(payload,4000)) {
-    const raw=buildImageRawData({containerId:2,containerName:container.name,mapSessionId:transfer,mapTotalSize:payload.length,
-      mapFragmentIndex:frag.index,mapRawData:frag.data,magic:nextMagic(),compressMode:0});
-    if(!await session.sendPb(0xe0,raw.pb,raw.magic,{ackTimeoutMs:8000}))throw new Error("Image payload did not ACK");
-  }
-  transfer++;
+  if(!await transport.send(payload))throw new Error(`message (mode ${payload[0]}) was not acked by both lenses`);
 };
 let acquired=false;
 try {
@@ -81,10 +78,8 @@ try {
   if(!cfw || cfw.revision<REQUIRED_REVISION)throw new Error(`Requires GLASSLYCFW/${REQUIRED_REVISION} or later; got ${cfw?.raw??"no capability response"}`);
   console.log(`firmware: ${cfw.raw}`);
   heartbeat=startHeartbeat({session,nextMagic});
-  const create=buildCreateStartUpPageContainer({name:`s${suffix}`,items:["."],containerId:1,captureEvents:false,magic:nextMagic(),extraContainerNames:[container.name]});
+  const create=buildCreateStartUpPageContainer({name:`s${suffix}`,items:["."],containerId:1,captureEvents:false,magic:nextMagic()});
   if(!await session.sendPb(0xe0,create.pb,create.magic,{ackTimeoutMs:8000}))throw new Error("CREATE did not ACK");
-  const rebuild=buildImageContainers({containers:[container],magic:nextMagic()});
-  if(!await session.sendPb(0xe0,rebuild.pb,rebuild.magic,{ackTimeoutMs:8000}))throw new Error("REBUILD did not ACK");
   await sleep(300);await lease(5);acquired=true;
   if(idleSeconds>0){console.log(`idling ${idleSeconds}s with heartbeat and lease renewals before playback`);await sleep(idleSeconds*1000);}
   let leaseError:unknown;
@@ -106,7 +101,7 @@ try {
 } finally {
   if(renew)clearInterval(renew);
   if(acquired){await send(Uint8Array.from([38,2])).catch(()=>{});await lease(6).catch(()=>{});}
-  heartbeat?.stop();await session.close();
+  heartbeat?.stop();transport.close();await session.close();
 }
 // Noble's macOS adapter keeps native handles alive after the lenses disconnect.
 // All display cleanup above is awaited before exiting, as in the other demos.

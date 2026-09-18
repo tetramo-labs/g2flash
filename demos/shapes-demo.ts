@@ -10,17 +10,10 @@
 //     G2_STAGE=3 bun shapes-demo.ts     # one stage
 //     G2_PAUSE_MS=1500 G2_LOOPS=2 bun shapes-demo.ts
 //
-// Needs the glassly-cfw firmware, revision 26 or later.
+// Needs the glassly-cfw firmware, revision 31 or later (SID-0xf0 transport).
 
-import {
-  G2Session,
-  buildCreateStartUpPageContainer,
-  buildImageContainers,
-  buildImageRawData,
-  planImageFragments,
-  querySettings,
-  type ImageContainerSpec,
-} from "g2-kit/ble";
+import { G2Session, buildCreateStartUpPageContainer, querySettings } from "g2-kit/ble";
+import { CfwTransport } from "./cfw-transport";
 import { describeCfw, queryGlasslyCfw, REQUIRED_REVISION } from "./glassly-cfw";
 import { startHeartbeat } from "g2-kit/ui";
 
@@ -97,19 +90,11 @@ console.log(`CFW detected: ${cfw.raw}`);
 
 const hb = startHeartbeat({ session, nextMagic });
 const suffix = String(Date.now() % 10_000).padStart(4, "0");
-let sid = 1;
 
-async function sendImage(payload: Uint8Array, container: ImageContainerSpec): Promise<void> {
-  for (const frag of planImageFragments(payload, 4000)) {
-    const raw = buildImageRawData({
-      containerId: container.containerId, containerName: container.name, mapSessionId: sid,
-      mapTotalSize: payload.length, mapFragmentIndex: frag.index, mapRawData: frag.data,
-      magic: nextMagic(), compressMode: 0,
-    });
-    if (!(await session.sendPb(0xe0, raw.pb, raw.magic, { ackTimeoutMs: ACK_MS })))
-      throw new Error(`image message (mode ${payload[0]}) did not ack`);
-  }
-  sid++;
+// GLASSLYCFW/31: custom payloads ride the SID-0xf0 message transport (no image container).
+const transport = new CfwTransport(session, ACK_MS);
+async function sendImage(payload: Uint8Array): Promise<void> {
+  if (!(await transport.send(payload))) throw new Error(`message (mode ${payload[0]}) was not acked by both lenses`);
 }
 
 async function lease(op: number): Promise<void> {
@@ -120,14 +105,11 @@ async function lease(op: number): Promise<void> {
 let renew: ReturnType<typeof setInterval> | undefined;
 try {
   const create = buildCreateStartUpPageContainer({
-    name: `b${suffix}`, items: ["."], containerId: 1, captureEvents: false, magic: nextMagic(), extraContainerNames: [`c${suffix}`],
+    name: `b${suffix}`, items: ["."], containerId: 1, captureEvents: false, magic: nextMagic(),
   });
   if (!(await session.sendPb(0xe0, create.pb, create.magic, { ackTimeoutMs: ACK_MS }))) throw new Error("CREATE did not ack");
-  const container: ImageContainerSpec = { name: `c${suffix}`, containerId: 2, x: 0, y: 0, width: 576, height: 288 };
-  const rebuild = buildImageContainers({ containers: [container], magic: nextMagic() });
-  if (!(await session.sendPb(0xe0, rebuild.pb, rebuild.magic, { ackTimeoutMs: ACK_MS }))) throw new Error("REBUILD did not ack");
   await sleep(300);
-  const send = (p: Uint8Array) => sendImage(p, container);
+  const send = (p: Uint8Array) => sendImage(p);
 
   await lease(5);                                  // FB_ACQUIRE (90 s, fail-open)
   renew = setInterval(() => void lease(5), 30_000);

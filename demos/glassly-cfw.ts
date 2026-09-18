@@ -85,7 +85,7 @@ export async function queryGlasslyCfw(session: G2SessionLike, magic: number): Pr
 }
 
 /** Revision that introduced the bare numeric string; every demo here needs it. */
-export const REQUIRED_REVISION = 26;
+export const REQUIRED_REVISION = 31;
 
 export function describeCfw(cfw: GlasslyCfw | null): string {
   return cfw ? `CFW ${cfw.raw}` : "no CFW capability field";
