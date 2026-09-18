@@ -11,7 +11,7 @@
  * RLE uses the same tokens as modes 3/6, but covers exactly width*height
  * pixels (there is no packed-row pad nibble). Since an image has no encoded
  * byte length, a valid stream ends at the first token that completes that
- * pixel count. The scanner never reads past the 256 KiB cache. */
+ * pixel count. The scanner never reads past the cache. */
 typedef struct {
     const uint8_t *rle;
     uint32_t rle_len;
@@ -212,21 +212,20 @@ static void cfw_texture_add_rect(cfw_rectlist *rl, int32_t x, int32_t y,
 }
 
 /* Clear the published pointer before freeing so repeated release/cleanup is
- * harmless. The cache lives on the stock EvenHub TLSF heap (upstream's choice,
- * keeping heap 13 for the shadow, scene frame and LVGL); with no image
- * container on the page that heap has room. The stock allocator serializes
- * access to its heap. */
+ * harmless. The cache lives on heap 13 (see CFW_TEXTURE_CACHE_SIZE), never on
+ * the EvenHub heap that stock page objects need. The heap coordinator
+ * serializes against other heap-13 users. */
 static void cfw_texture_cache_release(customCfwContext *ctx) {
     if (ctx && ctx->texture_cache) {
         uint8_t *cache = ctx->texture_cache;
         ctx->texture_cache = 0;
-        FW_FREE(cache);
+        cfw_heap13_free(cache);
     }
 }
 
 /* Mode 18 payload: a list of [offset:u32][length:u16][data...]. Validate the complete list before
- * allocating or writing, then lazily allocate and zero the 256 KiB phone-owned
- * region on the first nonempty write. */
+ * allocating or writing, then lazily allocate and zero the phone-owned
+ * region (CFW_TEXTURE_CACHE_SIZE, heap 13) on the first nonempty write. */
 static int cfw_texture_cache_update(const uint8_t *src, uint32_t len) {
     if (src == 0) return -1;
     const uint32_t hdr = 6u;
@@ -249,7 +248,7 @@ static int cfw_texture_cache_update(const uint8_t *src, uint32_t len) {
     customCfwContext *ctx = getCustomCfwContext();
     if (ctx == 0) return -1;
     if (ctx->texture_cache == 0) {
-        uint8_t *cache = (uint8_t *)cfw_malloc(CFW_TEXTURE_CACHE_SIZE);
+        uint8_t *cache = (uint8_t *)cfw_heap13_malloc(CFW_TEXTURE_CACHE_SIZE);
         if (cache == 0) return -1;
         bzero(cache, CFW_TEXTURE_CACHE_SIZE);
         ctx->texture_cache = cache;

@@ -1,7 +1,12 @@
 #pragma once
 #include <stdint.h>
 
-#define CFW_TEXTURE_CACHE_SIZE (256u * 1024u)
+/* 64 KiB on heap 13, the footprint revision 29 ran with. Upstream's 256 KiB
+ * lives on the EvenHub heap, but that heap also carries the stock page objects
+ * and a lease that lapses without a caller never frees the block; scene
+ * records address the cache with uint16 offsets, so 64 KiB is all a client
+ * can use. The wire stays uint32 (modes 18/19/20). */
+#define CFW_TEXTURE_CACHE_SIZE (64u * 1024u)
 
 static void cfw_texture_cache_release(customCfwContext *ctx);
 static int cfw_texture_cache_update(const uint8_t *src, uint32_t len);

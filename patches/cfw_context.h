@@ -102,7 +102,7 @@ typedef struct {
     uint8_t direct_failed;
     uint8_t direct_active;                    /* physical framebuffer currently owns the image */
     uint32_t direct_lease_deadline;            /* fail-open repaint-guard deadline */
-    /* Phone-owned texture data (256 KiB), allocated lazily on the first mode-18
+    /* Phone-owned texture data (64 KiB, heap 13), allocated lazily on the first mode-18
      * write and released with the Faceclaw framebuffer lease. Protocol references
      * into this block are uint32 offsets (modes 18/19/20). */
     uint8_t *texture_cache;

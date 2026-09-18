@@ -100,7 +100,7 @@ int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum) 
  *   17          -> [17][0] query cached R1 battery (no display change).
  *                              Master replies on sid-0x09 field 106; see ring_battery.c.
  *   18          -> [18][offset32][length16][data]... update the lazily allocated,
- *                              zero-initialized 256 KiB phone-owned texture cache.
+ *                              zero-initialized 64 KiB phone-owned texture cache.
  *                              Every entry is validated before any bytes are written.
  *   19          -> [19][offset32][x16][y16][options8] draw a cached image. At offset:
  *                              [width8][height8][4bpp RLE], decoded directly into
