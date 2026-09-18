@@ -470,6 +470,12 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   31 -> the stock EvenHub image path is no longer patched (snapshot FIFO,
+//         deferred consumer, immediate ACK and the 576x288 lift are gone, as
+//         upstream Faceclaw/8): custom commands arrive ONLY over the SID-0xf0
+//         transport, modes 3/6 carry plain RLE, and the uint16 texture modes
+//         12/13/14 are retired in favour of 18/19/20. Shape records draw cached
+//         text with a mode-20 (uint32 table) font.
 //   30 -> merged jimrandomh/g2flash main (Faceclaw/4..14, 2026-09-18): private
 //         SID-0xf0 message transport (length-prefixed streams across packet
 //         boundaries, transport-level zlib with a persistent inflater per
@@ -516,7 +522,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/30";
+        static const char caps[] = "GLASSLYCFW/31";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

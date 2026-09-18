@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Build a CFW image for g2_2.2.9.22 with:
-  (1) the 576x288 image-container size lift (the same 3 edits that
-      the earlier standalone image-container patch used),
-  (2) the zlib image glue (multi-mode load_image_z, incl. keepalive kick + buzzer),
-      entered at image_deferred,
+  (1) custom image/control dispatch (RLE shadow updates, keepalive kick,
+      buzzer, texture cache, vector shapes and retained scenes), entered ONLY
+      from the private SID-0xf0 transport (13) -- the stock EvenHub image path
+      is unmodified since revision 31,
+  (2) [retired in revision 31: the stock image-message hooks],
   (3) a CFW capability-advertisement field (protobuf field 100) plus a private,
       fail-open Faceclaw wake-ownership lease on sid=0x09,
   (4) conditional idle-double-tap dashboard deferral and conditional stock
@@ -190,30 +191,8 @@ def align_up(x, a):
 # are the stock encodings read straight out of the image, so apply_patches' old-byte
 # check is a third, independent guard.
 #
-# bl FUN_004ee3ba (set_image_data) in evenhub_ui_reflash_event_handler -> image_deferred.
-# NOTE: this same function is where Even's own RLE/LZ4 decompression runs
-# inserted, immediately BEFORE this call. That is why the site moved by a different delta
-# than the rest of the function. image_deferred dispatches CompressMode=0 through the CFW
-# snapshot FIFO, but sends every nonzero CompressMode through the decompressed `r1,r2`
-# buffer and exact stock loader. The ABI here is unchanged
-# (r0=obj, r1=data, r2=len; obj+0xc = compressed data, obj+0x20 = compressed len).
-LOADBMP_BL_SITE = (0x4a5736, "4bf08afa")
-# 2.2.9.22 funnels single- and multi-fragment image completion through one shared helper
-# (FUN_004ec088). Redirect its `bl FUN_0045cfdc` lens-identity check to snapshot_side;
-# r4 is the reconstruction state and r6 the container id at this site. The wrapper copies
-# the fresh message into a per-state FIFO, then tail-calls the real lens-side function so
-# the RIGHT gate still works. This + image_deferred consuming the FIFO fixes the live-
-# recon-buffer producer/consumer race for both completion paths with one patch.
-SNAPSHOT_BL_SITE = (0x4ee982, "6ef7ebfc")
-# On the RIGHT lens, 2.2.9.22 normally returns from the shared completion helper
-# after successfully queueing the deferred image event.  The ACK context lives in
-# one unguarded state slot (+0x48..+0x54), so a second pipelined completion can
-# overwrite the first magic before the deferred consumer sends its ACK.  Retarget
-# the success branch to the helper's existing immediate-response block instead:
-# it clears +0x48 and ACKs the current magic after the event has been accepted.
-# The later deferred callback then sees no pending ACK and cannot duplicate it.
-IMAGE_ACK_SUCCESS_SITE = (0x4ee9a2, "30d0")  # beq 0x004eea06 (defer ACK)
-IMAGE_ACK_IMMEDIATE    = "1c d0"              # beq 0x004ee9de (send ACK now)
+# (Revision 31 retired LOADBMP_BL_SITE, SNAPSHOT_BL_SITE and IMAGE_ACK_SUCCESS_SITE:
+# the stock image path is no longer patched; see message_transport.c.)
 SETTINGS_BL_SITE = (0x4aa418, "d4f744fb")  # bl FUN_0047d808 (aa21 send) -> wrapper
 # nanopb decode in pb_service_setting's inbound parser. The wrapper scans raw
 # unknown field 101 before the stock decoder discards it, then tail-calls decode.
@@ -500,8 +479,6 @@ def layout(img):
     # injected entry points, resolved from the single blob's function table. These are all
     # `bl` targets, so they stay even -- a bl keeps the core in Thumb state and needs no
     # Thumb bit (unlike a fn-ptr consumed by blx, which the C code forms via `&fn`).
-    snapshot_addr  = base + _fn(built, "snapshot_side")["offset"]
-    deferred_addr  = base + _fn(built, "image_deferred")["offset"]
     settings_addr  = base + _fn(built, "settings_send_wrapper")["offset"]
     settings_decode_addr = base + _fn(built, "settings_decode_wrapper")["offset"]
     display_start_addrs = {name: base + _fn(built, name)["offset"]
@@ -566,29 +543,9 @@ def layout(img):
         (g2f(PRIMARY_TLSF_SIZE_SITE[0]), PRIMARY_TLSF_SIZE_SITE[1],
          PRIMARY_TLSF_CFW_SIZE,
          "reserve final 1 KiB of primary TLSF arena for CFW context anchor"),
-        # 576x288 image-container size lift, in common_image_create. Even did NOT raise
-        # this cap in 2.2.9.22 (its clamp strings are byte-identical and the limit is
-        # still parameterized), so the lift is still needed. These three sites are
-        # byte-for-byte the same instructions as on 2.2.4.34, just relocated.
-        (g2f(0x004f0666), "bd f8 2c 10", "40 f2 41 20", "container width  <= 576"),
-        (g2f(0x004f072e), "bd f8 2e 00", "40 f2 21 11", "container height movw #0x121"),
-        (g2f(0x004f0732), "91 28",       "88 42",       "container height cmp r0,r1"),
-        # Snapshot/restore (fixes the shared-recon-buffer producer/consumer race): at the
-        # both-lens completion, redirect `bl FUN_0045cfdc` -> snapshot_side (copies the
-        # fresh message into a FIFO in the recon-buffer tail, then returns the lens id);
-        # the deferred consumer `bl FUN_004ee3ba` -> image_deferred (pops the FIFO and
-        # runs the worker on the snapshot, ignoring the possibly-overwritten live buffer).
         (g2f(AUDM_PEER_SYNC_TABLE_SITE[0]), AUDM_PEER_SYNC_TABLE_SITE[1],
          struct.pack("<I", peer_sync_addr | 1).hex(),
          f"common-data 0x010C handler -> mic_peer_sync_hook @ {AUDM_PEER_SYNC_TABLE_SITE[0]:#x}"),
-        (g2f(SNAPSHOT_BL_SITE[0]), SNAPSHOT_BL_SITE[1],
-         enc_bl(SNAPSHOT_BL_SITE[0], snapshot_addr),
-         f"bl snapshot_side @ {SNAPSHOT_BL_SITE[0]:#x} (shared image-complete helper)"),
-        (g2f(IMAGE_ACK_SUCCESS_SITE[0]), IMAGE_ACK_SUCCESS_SITE[1],
-         IMAGE_ACK_IMMEDIATE,
-         "image-complete success -> immediate ACK (pipelining-safe)"),
-        (g2f(LOADBMP_BL_SITE[0]), LOADBMP_BL_SITE[1], enc_bl(LOADBMP_BL_SITE[0], deferred_addr),
-         "bl image_deferred (deferred consumer -> FIFO restore + worker, both lenses)"),
         # redirect the settings responder send -> settings_send_wrapper (caps field 100)
         (g2f(SETTINGS_BL_SITE[0]), SETTINGS_BL_SITE[1], enc_bl(SETTINGS_BL_SITE[0], settings_addr),
          "bl settings_send_wrapper (append caps field 100)"),

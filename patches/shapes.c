@@ -443,49 +443,35 @@ static int cfw_shape_valid(const cfw_shape *s) {
     return 1;
 }
 
-/* IMAGE/TEXT slots reuse the mode 13/14/15 renderers by re-encoding their
- * payloads on the stack; the text bytes live in the phone-owned texture cache. */
+/* IMAGE/TEXT slots reuse the mode 19/20/15 renderers; cached bytes and the
+ * cached font live in the phone-owned texture cache (record offsets are uint16,
+ * the font's glyph table is the uint32 mode-20 format). */
 static void cfw_shape_draw_texture(const cfw_raster *r, const cfw_shape *s, cfw_rectlist *rl) {
     customCfwContext *ctx = peekCustomCfwContext();
     if (ctx == 0 || ctx->texture_cache == 0) return;
-    uint8_t buf[8 + CFW_SHAPE_TEXT_MAX];
-    uint32_t x = (uint16_t)s->p[0], y = (uint16_t)s->p[1];
+    int32_t x = (int16_t)(uint16_t)s->p[0], y = (int16_t)(uint16_t)s->p[1];
     if (s->type == CFW_SHAPE_IMAGE) {
-        uint32_t off = (uint16_t)s->p[2];
-        buf[0] = (uint8_t)off; buf[1] = (uint8_t)(off >> 8);
-        buf[2] = (uint8_t)x;   buf[3] = (uint8_t)(x >> 8);
-        buf[4] = (uint8_t)y;   buf[5] = (uint8_t)(y >> 8);
-        buf[6] = s->color;
-        cfw_texture_draw_image(r->buf, r->stride, (uint32_t)r->w, (uint32_t)r->h, buf, 7, rl);
+        cfw_texture_draw_image_at(r->buf, r->stride, (uint32_t)r->w, (uint32_t)r->h,
+                                  (uint16_t)s->p[2], x, y, s->color, rl);
         return;
     }
     uint32_t off = (uint16_t)s->p[2], len = (uint16_t)s->p[3];
     if (len > CFW_SHAPE_TEXT_MAX || off + len > CFW_TEXTURE_CACHE_SIZE) return;
-    uint32_t hdr;
     if (s->type == CFW_SHAPE_TEXT) {
-        buf[0] = (uint8_t)x; buf[1] = (uint8_t)(x >> 8);
-        buf[2] = (uint8_t)y; buf[3] = (uint8_t)(y >> 8);
+        uint8_t buf[6 + CFW_SHAPE_TEXT_MAX];
+        buf[0] = (uint8_t)x; buf[1] = (uint8_t)((uint32_t)x >> 8);
+        buf[2] = (uint8_t)y; buf[3] = (uint8_t)((uint32_t)y >> 8);
         buf[4] = s->color;
         buf[5] = (uint8_t)len;
-        hdr = 6;
-    } else {
-        uint32_t font = (uint16_t)s->p[4];
-        buf[0] = (uint8_t)font; buf[1] = (uint8_t)(font >> 8);
-        buf[2] = (uint8_t)x;    buf[3] = (uint8_t)(x >> 8);
-        buf[4] = (uint8_t)y;    buf[5] = (uint8_t)(y >> 8);
-        buf[6] = s->color;
-        buf[7] = (uint8_t)len;
-        hdr = 8;
-    }
-    for (uint32_t i = 0; i < len; i++) buf[hdr + i] = ctx->texture_cache[off + i];
-    if (s->type == CFW_SHAPE_TEXT) {
+        for (uint32_t i = 0; i < len; i++) buf[6 + i] = ctx->texture_cache[off + i];
         uint32_t tokens[CFW_SHAPE_TEXT_MAX];
         cfw_builtin_draw_string_buf(r->buf, r->stride, (uint32_t)r->w, (uint32_t)r->h,
-                                    buf, hdr + len, rl, tokens, CFW_SHAPE_TEXT_MAX);
-    } else {
-        cfw_texture_draw_string(r->buf, r->stride, (uint32_t)r->w, (uint32_t)r->h,
-                                buf, hdr + len, rl);
+                                    buf, 6 + len, rl, tokens, CFW_SHAPE_TEXT_MAX);
+        return;
     }
+    cfw_texture_draw_string_at(r->buf, r->stride, (uint32_t)r->w, (uint32_t)r->h,
+                               (uint16_t)s->p[4], x, y, s->color,
+                               ctx->texture_cache + off, len, rl);
 }
 
 /* Built-in font string from the record itself, clipped to its box when w/h > 0. */

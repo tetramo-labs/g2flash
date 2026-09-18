@@ -9386,6 +9386,7 @@
  },
  "capabilityMarker": "Faceclaw/3",
  "mergeNotes": [
-  "2026-09-18: merged jimrandomh/g2flash main (Faceclaw/4..14, 2.2.9.22). New transport/compass sites and callees located with the masked instruction-window matcher (BL/B.W/MOVW/MOVT/LDR-literal immediates masked) against both stock images; see patch_compress.py validate_message_transport_stock / validate_compass_calibration_stock. zlib entry points and the '1.1.4' literal reuse the existing 2.2.10.10 mapping (0x5d6167->0x5d8e57, 0x5d6235->0x5d8f25, 0x5d612b->0x5d8e1b, 0x7b75f8->0x7bb6f8). sourceSha256 is not updated by this merge."
+  "2026-09-18: merged jimrandomh/g2flash main (Faceclaw/4..14, 2.2.9.22). New transport/compass sites and callees located with the masked instruction-window matcher (BL/B.W/MOVW/MOVT/LDR-literal immediates masked) against both stock images; see patch_compress.py validate_message_transport_stock / validate_compass_calibration_stock. zlib entry points and the '1.1.4' literal reuse the existing 2.2.10.10 mapping (0x5d6167->0x5d8e57, 0x5d6235->0x5d8f25, 0x5d612b->0x5d8e1b, 0x7b75f8->0x7bb6f8). sourceSha256 is not updated by this merge.",
+  "2026-09-18 revision 31: LOADBMP_BL_SITE, SNAPSHOT_BL_SITE, IMAGE_ACK_SUCCESS_SITE and the 576x288 container lift are no longer applied (stock image path untouched); their hook entries are kept for history."
  ]
 }

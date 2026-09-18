@@ -525,9 +525,8 @@ static __attribute__((always_inline)) inline void cfw_scene_arm(customCfwContext
 
 /* `present` = 0 inside a mode-8 bundle: render into the owned shadow that
  * the bundle presents at its end. Reports settled when nothing is animating. */
-static int cfw_scene_present(customCfwContext *ctx, uint8_t *state, cfw_scene *sc,
+static int cfw_scene_present(customCfwContext *ctx, cfw_scene *sc,
                              int present, cfw_rectlist *rl) {
-    (void)state;                       /* the shadow is owned now (image_buffers.c) */
     sc->render_due = 0;
     uint8_t *fb = present ? cfw_scene_frame(sc) : 0;
     if (fb) {
@@ -546,7 +545,7 @@ static int cfw_scene_present(customCfwContext *ctx, uint8_t *state, cfw_scene *s
     return 0;
 }
 
-static int cfw_scene_patch(customCfwContext *ctx, uint8_t *state,
+static int cfw_scene_patch(customCfwContext *ctx,
                            const uint8_t *src, uint32_t srclen, int present, cfw_rectlist *rl) {
     if (srclen < 2u || !cfw_fb_lease_active()) return -1;
     uint8_t flags = src[0];
@@ -629,14 +628,14 @@ static int cfw_scene_patch(customCfwContext *ctx, uint8_t *state,
         pos += n;
     }
     cfw_scene_arm(ctx, sc);
-    if (flags & CFW_SCENE_FLAG_COMMIT) return cfw_scene_present(ctx, state, sc, present, rl);
+    if (flags & CFW_SCENE_FLAG_COMMIT) return cfw_scene_present(ctx, sc, present, rl);
     return 0;
 fail:
     for(uint32_t i=0;i<CFW_SCENE_SLOTS;i++)if(staged[i])cfw_heap13_free(staged[i]);
     return -1;
 }
 
-static int cfw_scene_control(customCfwContext *ctx, uint8_t *state,
+static int cfw_scene_control(customCfwContext *ctx,
                              const uint8_t *src, uint32_t srclen, int present, cfw_rectlist *rl) {
     if (srclen < 1u) return -1;
     cfw_scene *sc = cfw_scene_peek(ctx);
@@ -663,18 +662,18 @@ static int cfw_scene_control(customCfwContext *ctx, uint8_t *state,
         cfw_scene_stop(ctx);
         for (uint32_t i = 0; i < sc->slot_hi && i < CFW_SCENE_SLOTS; i++)
             cfw_slot_finish(&sc->slots[i]);
-        return cfw_scene_present(ctx, state, sc, present, rl);
+        return cfw_scene_present(ctx, sc, present, rl);
     default:
         return -1;
     }
 }
 
-static int cfw_scene_dispatch(customCfwContext *ctx, uint8_t *state, uint8_t mode,
+static int cfw_scene_dispatch(customCfwContext *ctx, uint8_t mode,
                               const uint8_t *src, uint32_t srclen,
                               int present, cfw_rectlist *rl) {
     if (ctx == 0) return -1;
-    if (mode == 37) return cfw_scene_patch(ctx, state, src, srclen, present, rl);
-    if (mode == 38) return cfw_scene_control(ctx, state, src, srclen, present, rl);
+    if (mode == 37) return cfw_scene_patch(ctx, src, srclen, present, rl);
+    if (mode == 38) return cfw_scene_control(ctx, src, srclen, present, rl);
     return -1;
 }
 

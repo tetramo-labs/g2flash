@@ -36,29 +36,23 @@ missing any.
 
 ## Modifications
 
-Custom messages reach the glasses over two ingress paths that feed one
-dispatcher (serialized on a stock mutex) and one owned 640x480 packed-4bpp
-shadow:
-
- * **Stock EvenHub image messages** (the original path, kept so existing phone
-   apps keep working): create a layout with a single 576x288 image container
-   and send mode-prefixed payloads as image updates; modes 3/6 carry
-   `zlib(rle)`. The snapshot FIFO, deferred consumer, immediate ACK and the
-   576x288 size lift stay patched in.
- * **Private SID `0xf0` message streams** (merged from upstream `Faceclaw/4`
-   through `Faceclaw/14`): a stream of five-byte-header records
-   (`[flags][len:u16][crc16]` + body) is reconstructed across arbitrary packet
-   boundaries before any TPL reassembly, on each lens the options byte selects
-   (the other lens receives it over the frame bridge, in arrival order), and a
-   processing ACK or NACK returns through the BLE ingress lens with a
-   three-entry history so a lost reply never re-executes a command. Compression
-   is done at the transport level (a persistent inflater per ingress lens,
-   reset with `RESET_CONTEXT`), the decoded CRC-16 is checked, messages can be
-   up to 65,535 bytes and need no EvenHub layout at all; modes 3/6 then carry
-   plain RLE. `python3 send_message_probe.py --dry-run` shows the packet
-   splitting; run it with your usual connection URL to exercise the path (the
-   default payload is a mode-7 no-op and the debug overlay shows the last
-   received size and CRC).
+Custom messages reach the glasses over **private SID `0xf0` message streams**
+(merged from upstream `Faceclaw/4` through `Faceclaw/14`); since revision 31
+the stock EvenHub image path is no longer patched at all, so no image
+container is needed and no mode-prefixed payload is accepted there. A stream
+of five-byte-header records (`[flags][len:u16][crc16]` + body) is
+reconstructed across arbitrary packet boundaries before any TPL reassembly,
+on each lens the options byte selects (the other lens receives it over the
+frame bridge, in arrival order), and a processing ACK or NACK returns through
+the BLE ingress lens with a three-entry history so a lost reply never
+re-executes a command. Compression is done at the transport level (a
+persistent inflater per ingress lens, reset with `RESET_CONTEXT`), the decoded
+CRC-16 is checked, messages can be up to 65,535 bytes and need no EvenHub
+layout; modes 3/6 carry plain RLE. All commands dispatch through one owned
+640x480 packed-4bpp shadow under one mutex. `python3 send_message_probe.py
+--dry-run` shows the packet splitting; run it with your usual connection URL
+to exercise the path (the default payload is a mode-7 no-op and the debug
+overlay shows the last received size and CRC).
 
 Mode 11 cleanup releases the shadow, the texture cache and the scene once
 pending display refreshes have finished.
@@ -76,19 +70,18 @@ writes directly to the framebuffer without going through EvenHub's
 screen-update functions, stock containers do not contribute visible content
 while the direct framebuffer lease is held. A lease-scoped 256 KiB texture cache lets the phone upload RLE
 icons and glyphs once, then draw cached images and strings with small update
-messages. The cache is allocated on the EvenHub heap (falling back to heap 13
-while a stock image container occupies that heap) and zeroed on its first write,
-and released when the Faceclaw framebuffer lease ends. Modes 18/19/20 (upstream
-`Faceclaw/13`) take 32-bit cache offsets, including glyph-table entries, for the
-full 256 KiB; modes 12/13/14 with 16-bit offsets stay accepted and reach its
-first 64 KiB. Upload lengths remain 16-bit. Cached draw commands carry an options
+messages. The cache is allocated on the EvenHub heap (falling back to heap 13)
+and zeroed on its first write, and released when the Faceclaw framebuffer lease
+ends. Modes 18/19/20 (upstream `Faceclaw/13`) take 32-bit cache offsets,
+including glyph-table entries, for the full 256 KiB; the 16-bit modes 12/13/14
+were retired in revision 31. Upload lengths remain 16-bit. Cached draw commands carry an options
 byte whose low nibble selects the top output color; bit 4 makes source color 0
 transparent, and bit 5 reverses the proportional 16-entry color ramp.
 Image-handler mode 15 draws a length-prefixed UTF-8 string with the glasses'
 built-in 20 px font chain and its default pair kerning. Its payload after the
 mode byte is `[x:u16][y:u16][options:u8][strlen:u8][UTF-8 bytes]`; options match
 the cached draw commands, and inline bytes 1–31 adjust x by -10 through 20 just
-as they do in cached-font mode 14.
+as they do in cached-font mode 20.
 
 The Glassly build of this firmware (branch `glassly-cfw`, base 2.2.9.22) adds
 vector shapes and firmware-side animation on top of the texture cache:
@@ -100,9 +93,9 @@ vector shapes and firmware-side animation on top of the texture cache:
    triangles, quads, quadratic and cubic beziers, arcs and pie sectors, plus
    cached images and text (built-in 20 px font with the string carried inline in
    the record and clipped to its box, or read from the texture cache, or a cached
-   mode-14 font). Coordinates are signed pixels and
+   mode-20 font). Coordinates are signed pixels and
    everything clips to the 640x480 panel. Mode 36 composes inside a mode-8 batch
-   like modes 13-15. See `patches/shapes.h` for the type table.
+   like modes 15/19/20. See `patches/shapes.h` for the type table.
  * Mode 37 keeps a retained scene of up to 128 shape slots (slot order is paint
    order) that the glasses re-render themselves: `[37][flags][bg][ops...]` with
    ops to set, delete, show/hide or move a slot, GLIDE it by a delta over N
@@ -139,6 +132,13 @@ Revision 25 drops the feature tokens: the field-100 string is just
 connection interval, slow mode disabled) a runtime choice through settings
 field 127, defaulting to stock behaviour, and reports it in field 128.
 
+Revision 31 removes the stock image-message hooks (snapshot FIFO, deferred
+consumer, immediate ACK, 576x288 lift, per-message zlib and the BMP loader)
+and the 16-bit texture modes 12/13/14: custom commands arrive only over the
+SID `0xf0` transport, and shape records draw cached text with a mode-20 font.
+Clients on the old path get no response (the stock firmware image handler
+runs); there is no migration.
+
 Revision 30 merges upstream jimrandomh/g2flash main (`Faceclaw/4` through
 `Faceclaw/14`, ported from its 2.2.9.22 base to 2.2.10.10): the SID `0xf0`
 transport, transport-level compression with range ACKs, modes 18/19/20 over a
@@ -146,7 +146,7 @@ transport, transport-level compression with range ACKs, modes 18/19/20 over a
 statistics on the debug overlay and an owned panel shadow. Unlike upstream,
 the stock image path is not stripped; both paths stay live.
 
-Revision 27 makes panel ownership explicit. Any raster mode (3/6/9/13/14/15/36)
+Revision 27 makes panel ownership explicit. Any raster mode (3/6/9/15/19/20/36)
 stops and freezes a running scene animation, and when the last present came
 from the scene's own frame it first copies that frame into the container shadow
 so deltas compose onto what is on glass. A mode-37 patch may carry a TAG record
@@ -259,7 +259,7 @@ fully documented):
    wake, and forward the head-up while an EvenHub page is on screen, so the
    phone can route it to that lightweight display too
 
-The SID `0xf0` transport described above needs `GLASSLYCFW/30` on both lenses;
+The SID `0xf0` transport described above needs `GLASSLYCFW/31` on both lenses;
 `send_message_probe.py` documents the packet format, lens selection and ACK
 verification in its docstring and `--help`.
 

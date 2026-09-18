@@ -91,3 +91,10 @@ after the match, and both compass digest regions are byte-identical.
 | vendor mag-bias setter (digest, 190 B) | `0x51bdc6` | `0x51e66a` | same sha256 |
 | IMU FIFO bias/accuracy block (digest, 116 B) | `0x4b6936` | `0x4b881a` | same sha256 |
 | zlib init/inflate/end, "1.1.4" | `0x5d6167`/`0x5d6235`/`0x5d612b`/`0x7b75f8` | `0x5d8e57`/`0x5d8f25`/`0x5d8e1b`/`0x7bb6f8` | existing mapping |
+
+### Revision 31
+
+`LOADBMP_BL_SITE` (0x4a5736), `SNAPSHOT_BL_SITE` (0x4ee982),
+`IMAGE_ACK_SUCCESS_SITE` (0x4ee9a2) and the three container size-lift edits
+(0x4f0666/0x4f072e/0x4f0732) are retired: those stock bytes are left as-is and
+custom commands enter only through the SID-0xf0 sites above.

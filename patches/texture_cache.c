@@ -226,18 +226,17 @@ static void cfw_texture_cache_release(customCfwContext *ctx) {
     }
 }
 
-/* Mode 12 payload: a list of [offset:u16][length:u16][data...] entries; mode 18
- * carries [offset:u32][length:u16][data...]. Validate the complete list before
+/* Mode 18 payload: a list of [offset:u32][length:u16][data...]. Validate the complete list before
  * allocating or writing, then lazily allocate and zero the 256 KiB phone-owned
  * region on the first nonempty write. */
-static int cfw_texture_cache_update(const uint8_t *src, uint32_t len, int wide) {
+static int cfw_texture_cache_update(const uint8_t *src, uint32_t len) {
     if (src == 0) return -1;
-    uint32_t hdr = wide ? 6u : 4u;
+    const uint32_t hdr = 6u;
     uint32_t pos = 0;
     int has_data = 0;
     while (pos < len) {
         if (len - pos < hdr) return -1;
-        uint32_t offset = wide ? rd32(src + pos) : rd16(src + pos);
+        uint32_t offset = rd32(src + pos);
         uint32_t entry_len = rd16(src + pos + hdr - 2u);
         pos += hdr;
         if (entry_len > len - pos || offset > CFW_TEXTURE_CACHE_SIZE ||
@@ -266,7 +265,7 @@ static int cfw_texture_cache_update(const uint8_t *src, uint32_t len, int wide) 
 
     pos = 0;
     while (pos < len) {
-        uint32_t offset = wide ? rd32(src + pos) : rd16(src + pos);
+        uint32_t offset = rd32(src + pos);
         uint32_t entry_len = rd16(src + pos + hdr - 2u);
         pos += hdr;
         memcpy(ctx->texture_cache + offset, src + pos, entry_len);
@@ -275,8 +274,7 @@ static int cfw_texture_cache_update(const uint8_t *src, uint32_t len, int wide) 
     return 0;
 }
 
-/* Mode 13 payload: [offset:u16][x:u16][y:u16][options:u8];
- * mode 19 payload: [offset:u32][x:u16][y:u16][options:u8]. */
+/* Mode 19 payload: [offset:u32][x:u16][y:u16][options:u8]. */
 static int cfw_texture_draw_image_at(uint8_t *shadow, uint32_t stride,
                                      uint32_t panel_w, uint32_t panel_h,
                                      uint32_t offset, int32_t x, int32_t y,
@@ -297,35 +295,22 @@ static int cfw_texture_draw_image(uint8_t *shadow, uint32_t stride,
                                   uint32_t panel_w, uint32_t panel_h,
                                   const uint8_t *src, uint32_t len,
                                   cfw_rectlist *rl) {
-    if (src == 0 || len != 7u) return -1;
-    return cfw_texture_draw_image_at(shadow, stride, panel_w, panel_h, rd16(src),
-                                     (int32_t)(int16_t)rd16(src + 2),
-                                     (int32_t)(int16_t)rd16(src + 4), src[6], rl);
-}
-
-static int cfw_texture_draw_image_wide(uint8_t *shadow, uint32_t stride,
-                                       uint32_t panel_w, uint32_t panel_h,
-                                       const uint8_t *src, uint32_t len,
-                                       cfw_rectlist *rl) {
     if (src == 0 || len != 9u) return -1;
     return cfw_texture_draw_image_at(shadow, stride, panel_w, panel_h, rd32(src),
                                      (int32_t)(int16_t)rd16(src + 4),
                                      (int32_t)(int16_t)rd16(src + 6), src[8], rl);
 }
 
-/* Mode 14 payload: [font-offset:u16][x:u16][y:u16][options:u8][strlen:u8][string].
- * The font starts with 96 little-endian uint16 image offsets for characters
- * 32..127. Mode 20 is [font-offset:u32][x:u16][y:u16][options:u8][strlen:u8][string]
- * over a table of 96 uint32 offsets. Bytes 1..31 adjust x by -10..20; byte 0 and
- * bytes >127 are invalid. */
+/* Mode 20 payload: [font-offset:u32][x:u16][y:u16][options:u8][strlen:u8][string].
+ * The font starts with 96 little-endian uint32 image offsets for characters
+ * 32..127. Bytes 1..31 adjust x by -10..20; byte 0 and bytes >127 are invalid. */
 static int cfw_texture_draw_string_at(uint8_t *shadow, uint32_t stride,
                                       uint32_t panel_w, uint32_t panel_h,
                                       uint32_t font_offset, int32_t x, int32_t y,
                                       uint8_t options, const uint8_t *string,
-                                      uint32_t string_len, int wide, cfw_rectlist *rl) {
+                                      uint32_t string_len, cfw_rectlist *rl) {
     if (shadow == 0 || string == 0 || !cfw_fb_lease_active()) return -1;
-    uint32_t entry = wide ? 4u : 2u;
-    if (font_offset > CFW_TEXTURE_CACHE_SIZE - 96u * entry) return -1;
+    if (font_offset > CFW_TEXTURE_CACHE_SIZE - 96u * 4u) return -1;
 
     customCfwContext *ctx = getCustomCfwContext();
     if (ctx == 0 || ctx->texture_cache == 0) return -1;
@@ -343,7 +328,7 @@ static int cfw_texture_draw_string_at(uint8_t *shadow, uint32_t stride,
             continue;
         }
         if (ch < 32u || ch > 127u) return -1;
-        uint32_t image_offset = wide ? rd32(table + (ch - 32u) * 4u) : rd16(table + (ch - 32u) * 2u);
+        uint32_t image_offset = rd32(table + (ch - 32u) * 4u);
         cfw_cached_image image;
         if (!cfw_texture_image_at(ctx, image_offset, &image)) return -1;
         scan_x += (int32_t)image.width;
@@ -356,7 +341,7 @@ static int cfw_texture_draw_string_at(uint8_t *shadow, uint32_t stride,
             x += (int32_t)ch - 11;
             continue;
         }
-        uint32_t image_offset = wide ? rd32(table + (ch - 32u) * 4u) : rd16(table + (ch - 32u) * 2u);
+        uint32_t image_offset = rd32(table + (ch - 32u) * 4u);
         cfw_cached_image image;
         /* Already validated above; cache contents cannot change in this handler. */
         if (!cfw_texture_image_at(ctx, image_offset, &image)) return -1;
@@ -372,22 +357,11 @@ static int cfw_texture_draw_string(uint8_t *shadow, uint32_t stride,
                                    uint32_t panel_w, uint32_t panel_h,
                                    const uint8_t *src, uint32_t len,
                                    cfw_rectlist *rl) {
-    if (src == 0 || len < 8u || len != 8u + src[7]) return -1;
-    return cfw_texture_draw_string_at(shadow, stride, panel_w, panel_h, rd16(src),
-                                      (int32_t)(int16_t)rd16(src + 2),
-                                      (int32_t)(int16_t)rd16(src + 4), src[6],
-                                      src + 8, src[7], 0, rl);
-}
-
-static int cfw_texture_draw_string_wide(uint8_t *shadow, uint32_t stride,
-                                        uint32_t panel_w, uint32_t panel_h,
-                                        const uint8_t *src, uint32_t len,
-                                        cfw_rectlist *rl) {
     if (src == 0 || len < 10u || len != 10u + src[9]) return -1;
     return cfw_texture_draw_string_at(shadow, stride, panel_w, panel_h, rd32(src),
                                       (int32_t)(int16_t)rd16(src + 4),
                                       (int32_t)(int16_t)rd16(src + 6), src[8],
-                                      src + 10, src[9], 1, rl);
+                                      src + 10, src[9], rl);
 }
 
 /* Decode one strict UTF-8 scalar. Control bytes 1..31 are deliberately handled
@@ -482,7 +456,7 @@ static int cfw_builtin_glyph(const uint8_t *font, uint32_t letter,
 
 /* Mode 15 payload: [x:u16][y:u16][options:u8][strlen:u8][UTF-8 string].
  * It draws through the stock background 20 px font chain. Bytes 1..31 retain
- * modes 14/20's inline x adjustments (-10..20); all other text is strict UTF-8.
+ * mode 20's inline x adjustments (-10..20); all other text is strict UTF-8.
  * Supplying the next real glyph to LVGL applies the built-in default kerning. */
 static int cfw_builtin_draw_string_buf(uint8_t *shadow, uint32_t stride,
                                        uint32_t panel_w, uint32_t panel_h,

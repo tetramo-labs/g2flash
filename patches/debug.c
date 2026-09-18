@@ -79,30 +79,30 @@ static uint32_t cfw_time_end(const uint32_t *t) {
 
 /* Diagnostic: record whether the frames the worker processes arrive in order /
  * skipped / DUPLICATED (mode-3 frame ids). Sticky flags shown by cfw_draw_flags;
- * with the snapshot-FIFO fix these should stay clear. `has_fid`=0 for a mode-6
+ * these flags describe the private sender's frame IDs. `has_fid`=0 for a mode-6
  * keyframe (no id; it rebaselines the next delta so keyframe gaps aren't "skips").
- * Returns 1 if this fid is a DUPLICATE of a recently-seen one (caller skips). */
-static int cfw_diag(int has_fid, uint16_t fid) {
+ * Duplicate IDs are diagnostic only; every accepted message is executed (the
+ * transport already rejects repeated packets and a phone restart may reuse ids). */
+static void cfw_diag(int has_fid, uint16_t fid) {
     customCfwContext *ctx = getCustomCfwContext();
-    if (ctx == 0) return 0;
+    if (ctx == 0) return;
     ctx->diag_seen = 1;
-    if (!has_fid) { ctx->fid_resync = 1; return 0; }  /* keyframe rebaselines next delta */
+    if (!has_fid) { ctx->fid_resync = 1; return; }  /* keyframe rebaselines next delta */
 
-    /* duplicate: this fid is still in the recent ring -> flag and tell caller to skip */
+    /* duplicate: this fid is still in the recent ring -> flag */
     for (uint32_t i = 0; i < CFW_FID_RING; i++)
-        if (ctx->recent_fids[i] == fid) { ctx->f_dup = 1; return 1; }
+        if (ctx->recent_fids[i] == fid) { ctx->f_dup = 1; return; }
 
     if (!ctx->fid_resync) {
         uint16_t d = (uint16_t)(fid - ctx->last_fid);
-        if (d >= 0x8000u) ctx->f_reorder = 1;   /* went backward (and not a recent dup) */
-        else if (d > 1) ctx->f_skip = 1;         /* forward gap */
+        if (d == 0 || d > 0x8000) ctx->f_reorder = 1;      /* went backward (or same) */
+        else if (d > 1) ctx->f_skip = 1;                    /* gap */
     }
     ctx->fid_resync = 0;
     ctx->last_fid = fid;
     if (fid > ctx->high_fid) ctx->high_fid = fid;
     ctx->recent_fids[ctx->recent_pos] = fid;
     ctx->recent_pos = (uint8_t)((ctx->recent_pos + 1) % CFW_FID_RING);
-    return 0;
 }
 
 /* Append (l,t,w,h) to the per-frame updated-rect list, if there's room. */
@@ -142,7 +142,7 @@ static void append_heap_kib(char *out, cfw_heap_stats stats, uint32_t maxlen) {
 }
 
 /* Terminus 6x12 diagnostic overlay at the top-left of the packed framebuffer.
- * First line: sticky REORDER/SKIP/DUP/SNAPOF/ALLOC flags and previous
+ * First line: sticky REORDER/SKIP/DUP/ALLOC flags and previous
  * worker/present durations in microseconds. Second: last received SID-0xf0
  * message size and CRC. Third: total free / maximum malloc request for each
  * heap, in whole KiB (LVGL = heap 13 @ 0x201350a8, EvenHub = 0x202020a8,
@@ -160,7 +160,6 @@ static void cfw_draw_flags(uint8_t *disp, uint32_t w, uint32_t h) {
     ADD_FLAG(ctx->f_reorder, "REORDER ");
     ADD_FLAG(ctx->f_skip,    "SKIP ");
     ADD_FLAG(ctx->f_dup,     "DUP ");
-    ADD_FLAG(ctx->f_snap_of, "SNAPOF ");
     ADD_FLAG(cfw_alloc_diag() & 1u, "ALLOC ");
     #undef ADD_FLAG
     if (num_flags == 0) strlcat(line, "OK ", sizeof(line));

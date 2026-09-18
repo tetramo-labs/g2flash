@@ -21,9 +21,9 @@
  *  11  BEZIER3       x0 y0 c0x c0y c1x c1y x1 y1      cubic, stroked
  *  12  ARC           cx cy r a0 a1                    stroked arc, degrees, 0 = +x, clockwise
  *  13  PIE           cx cy r a0 a1                    filled sector
- *  14  IMAGE         x y texoff                       cached RLE image (mode 13 semantics)
+ *  14  IMAGE         x y texoff                       cached RLE image (mode 19 semantics)
  *  15  TEXT          x y texoff len                   UTF-8 bytes at texoff, built-in 20 px font
- *  16  TEXT_CACHED   x y texoff len fontoff           bytes at texoff drawn with a mode-14 font
+ *  16  TEXT_CACHED   x y texoff len fontoff           bytes at texoff drawn with a mode-20 font
  *  17  TEXT_INLINE   x y w h len [bytes]              built-in font, string carried in the record;
  *                                                    w/h > 0 clip to the box. The one variable-
  *                                                    length record: 13 header bytes + len.

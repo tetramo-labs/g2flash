@@ -27,9 +27,9 @@
 
 /* Persistent CFW-owned state, independent of EvenHub image containers. The
  * full-panel 640x480 packed-4bpp shadow is an owned heap-13 allocation
- * (image_buffers.c) shared by both ingress paths: the stock EvenHub image
- * message (snapshot FIFO + deferred consumer) and the private SID-0xf0
- * transport (message_transport.c). A mode-6 keyframe seeds it. The bookkeeping
+ * (image_buffers.c) fed only by the private SID-0xf0 transport
+ * (message_transport.c); the stock EvenHub image path is untouched since
+ * revision 31. A mode-6 keyframe seeds it. The bookkeeping
  * is anchored by a pointer in 1 KiB of SRAM explicitly
  * removed from the top of the stock primary TLSF arena by patch_compress.py. The
  * stock arena is [0x202728a8,0x2029f8a8); the patched size is 0x2cc00, reserving
@@ -41,20 +41,8 @@
  * `magic` guards against warm-reset garbage; the slot ptr is range-checked before
  * dereference. */
 
-#define CFW_FID_RING  16     /* recent mode-3 frame ids kept for duplicate detection */
-#define CFW_SNAP_RING 12     /* in-flight compressed-message snapshots (per producer race depth) */
-#define CFW_SNAP_BUSY_SEQ 0xffffffffU /* range is reserved by the deferred worker */
+#define CFW_FID_RING  16     /* recent mode-3 frame ids kept for diagnostics */
 #define CFW_SEQ_MAX   48     /* max steps in a buzzer tone sequence (mode-5 kind 4) */
-
-/* One snapshotted compressed image message. Taken at reconstruction-complete (both
- * lenses), consumed FIFO in the deferred handler. Keyed by the owning image-state
- * pointer so multiple containers (e.g. faceclaw's 4 tiles) don't cross-feed. */
-typedef struct {
-    uint8_t *state;      /* owning image-state (key); 0 = empty slot */
-    uint8_t *buf;        /* copy packed into this state's reconstruction-buffer tail */
-    uint32_t len;
-    volatile uint32_t seq; /* push order, or CFW_SNAP_BUSY_SEQ while being consumed */
-} cfw_snap;
 
 /* Sidecar for a stock IMU ring record; written/read on the sensor-hub task. */
 typedef struct {
@@ -71,14 +59,6 @@ typedef union {
 
 typedef struct {
     uint32_t magic;      /* CFW_CTX_MAGIC when valid */
-    /* --- snapshot FIFO: fixes the producer/consumer race on the shared recon buffer.
-     * snapshot_side() copies each completed message here (both lenses); image_deferred
-     * drains this lens's pending snapshots and runs the worker on each, ignoring the
-     * live (possibly-overwritten) recon buffer B. (The 4bpp shadow of the last frame,
-     * needed by mode-3 deltas, reuses each container's display buffer A — see
-     * cfw_shadow_buffer — so it's per-container and costs no extra RAM.) */
-    cfw_snap snaps[CFW_SNAP_RING];
-    uint32_t snap_seq;   /* next push sequence number */
     /* --- diagnostics, overlaid as a text line (verify the fix; should stay clear). Mode
      * 7 clears the flags / toggles the overlay visibility (diag_hide). --- */
     uint16_t last_fid;   /* last frame id seen (mode-3 messages) */
@@ -92,7 +72,6 @@ typedef struct {
     uint8_t  f_reorder;  /* FLAG: ever saw a frame id go backward */
     uint8_t  f_skip;     /* FLAG: ever saw a frame id gap (skipped) */
     uint8_t  f_dup;      /* FLAG: ever saw a duplicate frame id (in the recent ring) */
-    uint8_t  f_snap_of;  /* FLAG: snapshot ring overflowed (dropped an in-flight frame) */
     uint16_t recent_fids[CFW_FID_RING]; /* ring of the last N mode-3 frame ids seen */
     uint8_t  recent_pos; /* next write index into recent_fids */
     /* --- buzzer tone sequencer (mode-5 kind 4). Plays a list of (freq,duty,ms)
@@ -123,9 +102,9 @@ typedef struct {
     uint8_t direct_failed;
     uint8_t direct_active;                    /* physical framebuffer currently owns the image */
     uint32_t direct_lease_deadline;            /* fail-open repaint-guard deadline */
-    /* Phone-owned texture data (256 KiB), allocated lazily on the first mode-12/18
-     * write and released with the Faceclaw framebuffer lease. Modes 12/13/14 use
-     * uint16 offsets (first 64 KiB); modes 18/19/20 use uint32 offsets. */
+    /* Phone-owned texture data (256 KiB), allocated lazily on the first mode-18
+     * write and released with the Faceclaw framebuffer lease. Protocol references
+     * into this block are uint32 offsets (modes 18/19/20). */
     uint8_t *texture_cache;
     /* --- Microphone control + multi-channel routing (SybilSight "glasses ->
      * microphones"). See the contract comment in mic_control.c; the stock-entry
@@ -269,20 +248,16 @@ typedef struct {
     uint32_t mic_layout_rev20;              /* 2.2.10.66: layout bump (fresh context) */
     uint32_t mic_layout_rev21;              /* 2.2.10.67: layout bump (fresh context) */
     uint32_t mic_layout_rev22;              /* 2.2.10.68: layout bump (fresh context) */
-    /* 2.2.10.69: display-path efficiency. One zlib inflate stream lives for the whole session
-     * (inflateInit2 once, inflateReset per frame) instead of a 34-40 KB window alloc/free per
-     * frame through the stock heap; the display gate is taken directly on the stock semaphore
-     * so ownership is known from the take's return value, never inferred. */
-    uint8_t *zstrm;                         /* zlib 1.1.4 z_stream (0x38 bytes) in heap 13 */
-    uint8_t  zstrm_ready;                   /* 1 once inflateInit2 succeeded on zstrm */
+    /* 2.2.10.69: the display gate is taken directly on the stock semaphore so ownership is
+     * known from the take's return value, never inferred. (The per-message zlib stream that
+     * lived here went with the stock image path in revision 31; the transport inflates.) */
     uint8_t  gate_held;                     /* diagnostic: worker currently owns the display gate */
-    uint16_t zstrm_fail;                    /* inflateInit2/inflateReset failures (sticky count) */
+    uint8_t  gate_pad0[3];
     uint32_t gate_timeouts;                 /* display-gate takes that timed out (frame dropped) */
     uint32_t mic_dle_requests;              /* HciLeSetDataLen requests issued on the phone link */
     uint32_t mic_layout_rev23;              /* 2.2.10.69: layout bump (fresh context) */
     uint32_t mic_layout_rev24;              /* 2.2.10.70: layout bump (fresh context) */
     uint32_t mic_layout_rev25;              /* 2.2.10.71: layout bump (fresh context) */
-    uint8_t *rle_chunk;                     /* 2.2.10.72: RLE_CHUNK-byte inflate output chunk (heap 13) */
     uint16_t relay_notify_skipped;          /* 2.2.10.72: relay notifies withheld for queue back-pressure */
     uint16_t relay_notify_pad;
     uint32_t mic_layout_rev26;              /* 2.2.10.72: layout bump (fresh context) */
@@ -313,7 +288,7 @@ typedef struct {
 #define CFW_ALLOC_DIAG_MAGIC 0xA110CA7EU
 
 // Marker used to validate that the CFW context pointer hasn't been clobbered.
-#define CFW_CTX_MAGIC 0xC0FFEE6DU    /* revision 30: SID-0xf0 transport streams appended */
+#define CFW_CTX_MAGIC 0xC0FFEE6EU    /* revision 31: legacy snapshot FIFO / zlib fields removed */
 
 #define FW_MS_TICK  (*(volatile uint32_t *)0x20076de0U)  /* firmware 1 ms OS tick (SysTick chain) */
 

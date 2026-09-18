@@ -69,13 +69,11 @@ static void stub_box(uint8_t *shadow, uint32_t stride, uint32_t w, uint32_t h, i
             if (xx & 1) *p = (*p & 0xf0) | c; else *p = (*p & 0x0f) | (c << 4);
         }
 }
-static int cfw_texture_draw_image(uint8_t *shadow, uint32_t stride, uint32_t w, uint32_t h, const uint8_t *src, uint32_t len, cfw_rectlist *rl) {
-    (void)rl; if (len != 7) return -1;
-    stub_box(shadow, stride, w, h, (int16_t)rd16(src + 2), (int16_t)rd16(src + 4), 24, 24, src[6] & 15); return 0;
+static int cfw_texture_draw_image_at(uint8_t *shadow, uint32_t stride, uint32_t w, uint32_t h, uint32_t offset, int32_t x, int32_t y, uint8_t options, cfw_rectlist *rl) {
+    (void)rl; (void)offset; stub_box(shadow, stride, w, h, x, y, 24, 24, options & 15); return 0;
 }
-static int cfw_texture_draw_string(uint8_t *shadow, uint32_t stride, uint32_t w, uint32_t h, const uint8_t *src, uint32_t len, cfw_rectlist *rl) {
-    (void)rl; uint32_t n = src[7]; if (len != 8 + n) return -1;
-    stub_box(shadow, stride, w, h, (int16_t)rd16(src + 2), (int16_t)rd16(src + 4), 8 * n, 12, src[6] & 15); return 0;
+static int cfw_texture_draw_string_at(uint8_t *shadow, uint32_t stride, uint32_t w, uint32_t h, uint32_t font_offset, int32_t x, int32_t y, uint8_t options, const uint8_t *string, uint32_t string_len, cfw_rectlist *rl) {
+    (void)rl; (void)font_offset; (void)string; stub_box(shadow, stride, w, h, x, y, 8 * (int32_t)string_len, 12, options & 15); return 0;
 }
 static int cfw_builtin_draw_string_buf(uint8_t *shadow, uint32_t stride, uint32_t w, uint32_t h, const uint8_t *src, uint32_t len, cfw_rectlist *rl, uint32_t *tokens, uint32_t max_tokens) {
     (void)rl; (void)tokens; uint32_t n = src[5]; if (len != 6 + n || n > max_tokens) return -1;
@@ -224,7 +222,7 @@ int main(int argc, char **argv) {
             cfw_rectlist rl;
             rl.n = 0;
             rl.direct_submitted = 0;
-            int r = cfw_scene_dispatch(&g_ctx, g_container_shadow, msg[0], msg + 1, len - 1, 1, &rl);
+            int r = cfw_scene_dispatch(&g_ctx, msg[0], msg + 1, len - 1, 1, &rl);
             if (r != 0) {
                 g_rejected++;
                 printf("  REJECTED %s message %d (mode %u, %u bytes):", g_label, g_msgs, msg[0], len);

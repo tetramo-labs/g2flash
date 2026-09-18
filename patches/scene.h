@@ -54,7 +54,7 @@ typedef struct cfw_scene_s {
     uint8_t  text[CFW_SCENE_SLOTS][CFW_SCENE_TEXT_BYTES];  /* TEXT_INLINE bytes per slot */
 } cfw_scene;
 
-static int  cfw_scene_dispatch(customCfwContext *ctx, uint8_t *state, uint8_t mode,
+static int  cfw_scene_dispatch(customCfwContext *ctx, uint8_t mode,
                                const uint8_t *src, uint32_t srclen,
                                int present, cfw_rectlist *rl);
 static void cfw_scene_stop(customCfwContext *ctx);

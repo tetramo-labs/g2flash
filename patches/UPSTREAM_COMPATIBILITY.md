@@ -85,3 +85,12 @@ accepted, and the stock EvenHub image path is still patched, so clients on
 either transport keep working. On the SID-`0xf0` path modes 3/6 carry plain
 RLE (the transport inflates); on the stock image path they still carry
 `zlib(rle)`.
+
+## Revision 31: SID-`0xf0` only
+
+The stock EvenHub image path is no longer patched, so mode-prefixed payloads
+sent as image-container updates are handled by the stock loader (and rejected
+as non-BMP). Modes 12/13/14 are retired; TEXT_CACHED shape records now need a
+mode-20 font (96 uint32 glyph offsets). Everything else (modes 3/6/8/9/10/11/
+15/16/17/18/19/20/36/37/38, fields 105/106/125-129) is unchanged on the wire,
+with modes 3/6 carrying plain RLE because the transport inflates.
