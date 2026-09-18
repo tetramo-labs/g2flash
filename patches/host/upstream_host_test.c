@@ -110,12 +110,13 @@ static int compass_side(void) { return side; }
 static void routing(void) {
     uint8_t p[64] = {0};
     assert(!is_shadow_message(0, 2) && !is_shadow_message(p, 0));
-    /* Upstream sensor modes never become graphics, regardless of length. */
-    for (unsigned mode = 16; mode <= 19; mode++) {
+    /* Upstream sensor/cache modes (16 ALS, 17 ring, 18 texture upload) never
+     * become graphics, regardless of length; 19/20 draw and are gated. */
+    for (unsigned mode = 16; mode <= 18; mode++) {
         p[0] = mode;
         for (unsigned len = 1; len <= sizeof(p); len++) assert(!is_shadow_message(p, len));
     }
-    const uint8_t modes[] = {3,6,8,9,11,13,14,15,36,37,38};
+    const uint8_t modes[] = {3,6,8,9,11,13,14,15,19,20,36,37,38};
     for (unsigned i = 0; i < sizeof(modes); i++) {
         p[0] = modes[i]; assert(is_shadow_message(p, 3));
         p[0] |= 0x80; assert(is_shadow_message(p, 3));
@@ -155,7 +156,7 @@ static void settings(void) {
     sends = 0;
     assert(settings_send_wrapper(1,9,buf,44) == 0 && sends == 2);
     const uint8_t *caps = field(sent[0],sent_len[0],100,&n);
-    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/29",13) == 0);
+    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/30",13) == 0);
     assert(sent_len[0] == 44 + 16 + 24 + 20); /* revision string, microphone and BLE status */
     assert(sent_len[0] + 2 <= 232); /* payload plus CRC stays in one BLE frame */
     assert(field(sent[0],sent_len[0],104,&n) && n == 21);

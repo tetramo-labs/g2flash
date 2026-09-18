@@ -49,9 +49,10 @@ static void *cfw_heap13_malloc(uint32_t size) {
     if (g_alloc_fail_after>0)g_alloc_fail_after--;
     void *p=malloc(size);if(p)g_alloc_live++;return p;
 }
-static uint8_t *cfw_shadow_buffer(uint8_t *state) { return state ? g_container_shadow : 0; }
-static void present_shadow(uint8_t *state, uint32_t w, uint32_t h, cfw_rectlist *rl) {
-    (void)state; (void)w; (void)h; g_presented_shadow++; if (rl) rl->direct_submitted = 1;
+static int g_shadow_missing;   /* simulate a failed owned-shadow allocation */
+static uint8_t *cfw_shadow_buffer(void) { return g_shadow_missing ? 0 : g_container_shadow; }
+static void present_shadow(uint32_t w, uint32_t h, cfw_rectlist *rl) {
+    (void)w; (void)h; g_presented_shadow++; if (rl) rl->direct_submitted = 1;
 }
 static void cfw_heap13_free(void *p) { if(p)g_alloc_live--;free(p); }
 static int  stub_timer_start(uint32_t h, uint32_t ms) { (void)h; (void)ms; g_timer_started++; return 0; }
@@ -338,7 +339,9 @@ static void test_scene(const char *dir) {
     CHECK(sc && sc->fb == 0 && sc->anim_active == 0 && g_timer_started == started);
     CHECK(sc->slots[0].p[0] == 300 && sc->slots[0].frames == 0);
     CHECK(g_presented_shadow == 1 && pixel_at(g_container_shadow, 300, 100) == 15);
-    CHECK(cfw_scene_dispatch(&g_ctx, 0, 37, fb, sizeof fb, 1, &rl) == -1);   /* no shadow either */
+    g_shadow_missing = 1;
+    CHECK(cfw_scene_dispatch(&g_ctx, g_container_shadow, 37, fb, sizeof fb, 1, &rl) == -1);   /* no shadow either */
+    g_shadow_missing = 0;
     g_fail_frame_alloc = 0;
     cfw_scene_release(&g_ctx);
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "message_transport.h"
 
 /* PC-relative address of one of this blob's own functions. clang -fropi emits
  * movw/movt of (fn - pc), and this Apple clang's assembler rejects that pair once
@@ -24,12 +25,12 @@
 #define CFW_FN_ADDR(fn) ((void *)&(fn))
 #endif
 
-/* Persistent CFW-owned state that must survive image-container teardown/rebuild.
- * The image container (its display buffer A @ state+0x8 and recon buffer B @
- * state+0xc) is freed and reallocated on rebuild. The packed shadow lives in A
- * only for the lifetime of the current streaming layout and must be seeded by a
- * mode-6 keyframe after every rebuild. The bookkeeping that does
- * need to survive rebuilds is anchored by a pointer in 1 KiB of SRAM explicitly
+/* Persistent CFW-owned state, independent of EvenHub image containers. The
+ * full-panel 640x480 packed-4bpp shadow is an owned heap-13 allocation
+ * (image_buffers.c) shared by both ingress paths: the stock EvenHub image
+ * message (snapshot FIFO + deferred consumer) and the private SID-0xf0
+ * transport (message_transport.c). A mode-6 keyframe seeds it. The bookkeeping
+ * is anchored by a pointer in 1 KiB of SRAM explicitly
  * removed from the top of the stock primary TLSF arena by patch_compress.py. The
  * stock arena is [0x202728a8,0x2029f8a8); the patched size is 0x2cc00, reserving
  * [0x2029f4a8,0x2029f8a8) for CFW. Its first word holds the context pointer and
@@ -60,6 +61,13 @@ typedef struct {
     uint32_t timestamp;
     uint8_t accuracy, anomalies, source, flags;
 } cfw_compass_sample;
+
+/* One aligned word publishes a consistent size/CRC pair across the BLE and
+ * display tasks. The firmware target is little-endian. */
+typedef union {
+    struct { uint16_t size, checksum; } fields;
+    uint32_t snapshot;
+} cfw_message_probe;
 
 typedef struct {
     uint32_t magic;      /* CFW_CTX_MAGIC when valid */
@@ -115,9 +123,9 @@ typedef struct {
     uint8_t direct_failed;
     uint8_t direct_active;                    /* physical framebuffer currently owns the image */
     uint32_t direct_lease_deadline;            /* fail-open repaint-guard deadline */
-    /* Phone-owned texture data, allocated lazily on the first mode-12 write and
-     * released with the Faceclaw framebuffer lease. Protocol references into
-     * this block are uint16 offsets. */
+    /* Phone-owned texture data (256 KiB), allocated lazily on the first mode-12/18
+     * write and released with the Faceclaw framebuffer lease. Modes 12/13/14 use
+     * uint16 offsets (first 64 KiB); modes 18/19/20 use uint32 offsets. */
     uint8_t *texture_cache;
     /* --- Microphone control + multi-channel routing (SybilSight "glasses ->
      * microphones"). See the contract comment in mic_control.c; the stock-entry
@@ -289,6 +297,15 @@ typedef struct {
     uint8_t  shadow_stale;
     uint8_t  scene_pad0[3];
     uint8_t  scene_notify_buf[12];          /* stable storage for the field-129 settled notify */
+    /* --- Private SID-0xf0 message transport (revision 30, message_transport.c).
+     * One ordered stream per BLE ingress lens; the image mutex serializes the
+     * dispatcher across the BLE, bridge and EvenHub deferred tasks. --- */
+    volatile cfw_message_probe message_probe; /* latest valid SID-f0 payload (debug overlay) */
+    uint32_t image_mutex;                   /* stock mutex handle; created lazily */
+    uint8_t *framebuffer_shadow;            /* owned 640x480 packed 4bpp (heap 13); released by mode 11 */
+    cfw_message_stream message_streams[2];  /* index = BLE ingress lens bit - 1 */
+    uint8_t  texture_cache_heap13;          /* texture cache lives in heap 13 (EvenHub heap was full) */
+    uint8_t  transport_pad0[3];
 } customCfwContext;
 
 #define CFW_CTX_SLOT  0x2029f4a8U    /* first word of the CFW-reserved TLSF tail */
@@ -296,7 +313,7 @@ typedef struct {
 #define CFW_ALLOC_DIAG_MAGIC 0xA110CA7EU
 
 // Marker used to validate that the CFW context pointer hasn't been clobbered.
-#define CFW_CTX_MAGIC 0xC0FFEE6CU    /* scene, ANCS, ALS, compass and BLE link context */
+#define CFW_CTX_MAGIC 0xC0FFEE6DU    /* revision 30: SID-0xf0 transport streams appended */
 
 #define FW_MS_TICK  (*(volatile uint32_t *)0x20076de0U)  /* firmware 1 ms OS tick (SysTick chain) */
 

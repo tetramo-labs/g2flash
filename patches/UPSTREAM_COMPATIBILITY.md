@@ -74,3 +74,14 @@ Run `python3 patches/host/run_vector_tests.py --out /tmp/g2-vector-tests` for
 sanitized C tests, TypeScript fixtures, video replay, and ARM compilation.
 `./build_cfw.sh --skip-venv` checks patch reproducibility and the image hash.
 Physical sensors and BLE still require device validation.
+
+## Revision 30: upstream merge (Faceclaw/4 → Faceclaw/14)
+
+Upstream now uses modes **18/19/20** for the 256 KiB texture cache (uint32
+offsets) and private SID **`0xf0`** for its message transport; both are taken
+as-is, so the local numbers above (36/37/38, fields 125–129) remain free of
+collisions. Unlike upstream, modes 12/13/14 (uint16 offsets) are still
+accepted, and the stock EvenHub image path is still patched, so clients on
+either transport keep working. On the SID-`0xf0` path modes 3/6 carry plain
+RLE (the transport inflates); on the stock image path they still carry
+`zlib(rle)`.

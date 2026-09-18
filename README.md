@@ -36,11 +36,34 @@ missing any.
 
 ## Modifications
 
-This firmware reworks how images and screen updates work in EvenHub. The
-intended usage is that you create a layout with a single 576x288 image
-container, which is used as a message target (but the EvenHub layout system is
-otherwise entirely ignored). Image updates sent to this container are
-interpreted as custom messages of new types. Image traffic is compressed with
+Custom messages reach the glasses over two ingress paths that feed one
+dispatcher (serialized on a stock mutex) and one owned 640x480 packed-4bpp
+shadow:
+
+ * **Stock EvenHub image messages** (the original path, kept so existing phone
+   apps keep working): create a layout with a single 576x288 image container
+   and send mode-prefixed payloads as image updates; modes 3/6 carry
+   `zlib(rle)`. The snapshot FIFO, deferred consumer, immediate ACK and the
+   576x288 size lift stay patched in.
+ * **Private SID `0xf0` message streams** (merged from upstream `Faceclaw/4`
+   through `Faceclaw/14`): a stream of five-byte-header records
+   (`[flags][len:u16][crc16]` + body) is reconstructed across arbitrary packet
+   boundaries before any TPL reassembly, on each lens the options byte selects
+   (the other lens receives it over the frame bridge, in arrival order), and a
+   processing ACK or NACK returns through the BLE ingress lens with a
+   three-entry history so a lost reply never re-executes a command. Compression
+   is done at the transport level (a persistent inflater per ingress lens,
+   reset with `RESET_CONTEXT`), the decoded CRC-16 is checked, messages can be
+   up to 65,535 bytes and need no EvenHub layout at all; modes 3/6 then carry
+   plain RLE. `python3 send_message_probe.py --dry-run` shows the packet
+   splitting; run it with your usual connection URL to exercise the path (the
+   default payload is a mode-7 no-op and the debug overlay shows the last
+   received size and CRC).
+
+Mode 11 cleanup releases the shadow, the texture cache and the scene once
+pending display refreshes have finished.
+
+Image traffic is compressed with
 zlib+RLE. Screen contents can be up to 640x480 (larger than the screen area
 supported by the stock firmware), you can update dirty rects rather than
 updating the whole screen at once, and you can send messages which perform
@@ -50,11 +73,15 @@ the whole 640x480 panel each frame, and the zlib inflate stream and its 32 KiB
 window are kept alive for the whole session (reset per frame) instead of being
 allocated and freed on every update. Because this mode
 writes directly to the framebuffer without going through EvenHub's
-screen-update functions, you cannot mix this mode with EvenHub list or text or
-list containers. A lease-scoped 64 KiB texture cache lets the phone upload RLE
+screen-update functions, stock containers do not contribute visible content
+while the direct framebuffer lease is held. A lease-scoped 256 KiB texture cache lets the phone upload RLE
 icons and glyphs once, then draw cached images and strings with small update
-messages. The cache is allocated and zeroed on its first write and released
-when the Faceclaw framebuffer lease ends. Cached draw commands carry an options
+messages. The cache is allocated on the EvenHub heap (falling back to heap 13
+while a stock image container occupies that heap) and zeroed on its first write,
+and released when the Faceclaw framebuffer lease ends. Modes 18/19/20 (upstream
+`Faceclaw/13`) take 32-bit cache offsets, including glyph-table entries, for the
+full 256 KiB; modes 12/13/14 with 16-bit offsets stay accepted and reach its
+first 64 KiB. Upload lengths remain 16-bit. Cached draw commands carry an options
 byte whose low nibble selects the top output color; bit 4 makes source color 0
 transparent, and bit 5 reverses the proportional 16-entry color ramp.
 Image-handler mode 15 draws a length-prefixed UTF-8 string with the glasses'
@@ -111,6 +138,13 @@ Revision 25 drops the feature tokens: the field-100 string is just
 `GLASSLYCFW/<n>`. Revision 26 makes upstream's fast BLE profile (7.5 ms
 connection interval, slow mode disabled) a runtime choice through settings
 field 127, defaulting to stock behaviour, and reports it in field 128.
+
+Revision 30 merges upstream jimrandomh/g2flash main (`Faceclaw/4` through
+`Faceclaw/14`, ported from its 2.2.9.22 base to 2.2.10.10): the SID `0xf0`
+transport, transport-level compression with range ACKs, modes 18/19/20 over a
+256 KiB texture cache, compass calibration preservation, free/max heap
+statistics on the debug overlay and an owned panel shadow. Unlike upstream,
+the stock image path is not stripped; both paths stay live.
 
 Revision 27 makes panel ownership explicit. Any raster mode (3/6/9/13/14/15/36)
 stops and freezes a running scene animation, and when the last present came
@@ -201,7 +235,11 @@ fully documented):
    while the framebuffer lease is held, suppress its incompatible stock Menu path
  * Play sound effects with the piezo buzzer
  * Receive on-head detection wear/unwear events, to trigger a lock-screen
- * Use the magnetometer as a compass
+ * Use the magnetometer as a compass. Since revision 30 (upstream `Faceclaw/14`)
+   the current magnetic calibration accuracy is preserved across IMU
+   reconfiguration while the Faceclaw framebuffer lease is valid, including
+   compass stop/start cycles, instead of being reset to zero by the stock
+   sensor-parameter setter.
  * Read the ambient light sensor (a TI OPT3001 on the master temple) and,
    optionally, run it in a "passive" mode where the firmware polls the sensor
    for the phone but the stock auto-brightness adjuster never steps the panel,
@@ -220,6 +258,10 @@ fully documented):
  * Report the head-up (IMU head-tilt) wake distinctly from the double-tap
    wake, and forward the head-up while an EvenHub page is on screen, so the
    phone can route it to that lightweight display too
+
+The SID `0xf0` transport described above needs `GLASSLYCFW/30` on both lenses;
+`send_message_probe.py` documents the packet format, lens selection and ACK
+verification in its docstring and `--help`.
 
 Glasses with a custom firmware identify themselves with the version number of
 the stock firmware that the modded version is based on, with an extra field in

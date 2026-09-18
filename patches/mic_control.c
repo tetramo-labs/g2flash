@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "memory.h"
 #include "cfw_context.h"
 #include "malloc.h"
 #include "protobuf.h"
@@ -1051,7 +1052,7 @@ static void mic_session_start(customCfwContext *ctx) {
             if (ctx->mic_codec_ready_tick && (int32_t)(ctx->mic_codec_ready_tick - now) > 0) {
                 uint32_t wait = ctx->mic_codec_ready_tick - now;
                 if (ctx->mic_settle_timer == 0)
-                    ctx->mic_settle_timer = FW_TIMER_NEW((void *)&mic_settle_tick, 0, ctx, 0);
+                    ctx->mic_settle_timer = FW_TIMER_NEW(CFW_FN_ADDR(mic_settle_tick), 0, ctx, 0);
                 if (ctx->mic_settle_timer) {
                     ctx->mic_settle_stage = 1u;
                     FW_TIMER_STOP(ctx->mic_settle_timer);
@@ -1074,7 +1075,7 @@ static void mic_session_start(customCfwContext *ctx) {
     /* The front-end init above registered the stock callback in slot 0 and
      * started capture; take the slot over (same owner id) so the dispatcher
      * hands every buffer to the tap instead. */
-    FW_PCM_REGISTER(MIC_STOCK_OWNER_ID, MIC_PCM_SLOT, (void *)&mic_pcm_tap);
+    FW_PCM_REGISTER(MIC_STOCK_OWNER_ID, MIC_PCM_SLOT, CFW_FN_ADDR(mic_pcm_tap));
     ctx->mic_hw_armed = 1;
 }
 
@@ -1100,7 +1101,7 @@ static void mic_complete_bringup(customCfwContext *ctx) {
     FW_CODEC_CTRL(1u);                              /* I2S output on + init (no-op if already on) */
     *CODEC_ON_FLAG = 0u;                            /* suppress the 2 s codec-audio-check reboot loop */
     ctx->mic_codec_ready_tick = 0u;                 /* calibrated: later arms tap immediately */
-    FW_PCM_REGISTER(MIC_STOCK_OWNER_ID, MIC_PCM_SLOT, (void *)&mic_pcm_tap);
+    FW_PCM_REGISTER(MIC_STOCK_OWNER_ID, MIC_PCM_SLOT, CFW_FN_ADDR(mic_pcm_tap));
 }
 
 /* Settle-timer callback (RTOS timer thread): the power-cycled codec has had its quiet window.
@@ -1154,7 +1155,7 @@ void mic_settle_tick(void *arg) {
             ctx->mic_codec_ready_tick = 0u;
             ctx->mic_flags |= MIC_FLAG_WE_POWERED;
             *CODEC_ON_FLAG = 0u;
-            FW_PCM_REGISTER(MIC_STOCK_OWNER_ID, MIC_PCM_SLOT, (void *)&mic_pcm_tap);
+            FW_PCM_REGISTER(MIC_STOCK_OWNER_ID, MIC_PCM_SLOT, CFW_FN_ADDR(mic_pcm_tap));
             return;
         }
     }
@@ -1165,7 +1166,7 @@ void mic_settle_tick(void *arg) {
         ctx->mic_flags |= MIC_FLAG_WE_POWERED;
         FW_CODEC_CTRL(1u);
         *CODEC_ON_FLAG = 0u;
-        FW_PCM_REGISTER(MIC_STOCK_OWNER_ID, MIC_PCM_SLOT, (void *)&mic_pcm_tap);
+        FW_PCM_REGISTER(MIC_STOCK_OWNER_ID, MIC_PCM_SLOT, CFW_FN_ADDR(mic_pcm_tap));
         return;
     }
     /* LEFT (stage 1) falls straight to mic_complete_bringup: its codec was re-initialised by the
@@ -1238,7 +1239,7 @@ static void mic_lease_renew(customCfwContext *ctx) {
     ctx->mic_lease_deadline = FW_MS_TICK + MIC_LEASE_MS;
     if (!ctx->mic_hw_armed) return;
     if (ctx->mic_watchdog_timer == 0)
-        ctx->mic_watchdog_timer = FW_TIMER_NEW((void *)&mic_watchdog_tick, 0, ctx, 0);
+        ctx->mic_watchdog_timer = FW_TIMER_NEW(CFW_FN_ADDR(mic_watchdog_tick), 0, ctx, 0);
     if (ctx->mic_watchdog_timer) {
         FW_TIMER_STOP(ctx->mic_watchdog_timer);
         FW_TIMER_START(ctx->mic_watchdog_timer, MIC_LEASE_MS);

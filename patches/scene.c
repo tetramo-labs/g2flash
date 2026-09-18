@@ -523,10 +523,11 @@ static __attribute__((always_inline)) inline void cfw_scene_arm(customCfwContext
     FW_TIMER_START(ctx->scene_timer, sc->period_ms);
 }
 
-/* `present` = 0 inside a mode-8 bundle: render into the container shadow that
+/* `present` = 0 inside a mode-8 bundle: render into the owned shadow that
  * the bundle presents at its end. Reports settled when nothing is animating. */
 static int cfw_scene_present(customCfwContext *ctx, uint8_t *state, cfw_scene *sc,
                              int present, cfw_rectlist *rl) {
+    (void)state;                       /* the shadow is owned now (image_buffers.c) */
     sc->render_due = 0;
     uint8_t *fb = present ? cfw_scene_frame(sc) : 0;
     if (fb) {
@@ -534,12 +535,12 @@ static int cfw_scene_present(customCfwContext *ctx, uint8_t *state, cfw_scene *s
         present_buffer(ctx, fb, rl);
         ctx->shadow_stale = 1;
     } else {
-        /* no CFW frame: draw into the live container shadow instead (static only) */
-        uint8_t *shadow = cfw_shadow_buffer(state);
+        /* no CFW frame: draw into the owned panel shadow instead (static only) */
+        uint8_t *shadow = cfw_shadow_buffer();
         if (shadow == 0) return -1;
         cfw_scene_render(sc, shadow, rl);
         ctx->shadow_stale = 0;
-        if (present) present_shadow(state, IMAGE_W, IMAGE_H, rl);
+        if (present) present_shadow(IMAGE_W, IMAGE_H, rl);
     }
     if (!sc->anim_active) cfw_scene_settled(ctx, sc);
     return 0;

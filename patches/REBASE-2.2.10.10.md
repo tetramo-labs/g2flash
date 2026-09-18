@@ -66,3 +66,28 @@ stock version.
 ./build_cfw.sh                 # download + verify stock, apply, verify output
 ./build_cfw.sh --update-patches  # regenerate cfw_patches.json from sources (needs clang)
 ```
+
+## 2026-09-18: upstream merge (Faceclaw/4 → Faceclaw/14) on top of this base
+
+Upstream `jimrandomh/g2flash` stayed on 2.2.9.22 and replaced its stock
+image-message hooks with a private SID-0xf0 transport. This fork keeps the
+stock path and adds the transport as a second ingress (revision
+`GLASSLYCFW/30`). The new sites were ported with the same masked
+instruction-window method; every window in `validate_message_transport_stock`
+and `validate_compass_calibration_stock` was re-read from the 2.2.10.10 image
+after the match, and both compass digest regions are byte-identical.
+
+| Site / callee | 2.2.9.22 | 2.2.10.10 | Evidence |
+| --- | --- | --- | --- |
+| `MESSAGE_RX_BL_SITE` (bl TPL_ReceivePacket) | `0x4d335a` | `0x4d5a16` | 18-byte window at `0x4d3350` unique at `0x4d5a0c`; bl decodes to `0x4ce54c` |
+| `CFW_STOCK_RECEIVE` | `0x4cf3e8` | `0x4ce54c` | prologue unique |
+| `MESSAGE_BRIDGE_BL_SITES` | `0x45e16e`, `0x45e2ca`, `0x4602c8` | `0x45e4ee`, `0x45e64a`, `0x460648` | all decode to `0x45d520`; +0x380 region delta |
+| `CFW_STOCK_BRIDGE_RECEIVE` | `0x45d1a0` | `0x45d520` | prologue unique |
+| `CFW_BRIDGE_SEND` | `0x46a58c` | `0x46ab70` | prologue unique (+0x5e4, as `0x46a73c` → `0x46ad20`) |
+| `CFW_BLE_SEND` | `0x47d72c` | `0x47e9c8` | +0x129c, the delta of `ALS_FW_SEND`/`COMPASS_SEND` |
+| `CFW_LENS_SIDE` | `0x45cfdc` | `0x45d35c` | already mapped |
+| osMutex new/take/give/delete | `0x442ef6`… | unchanged | byte-identical |
+| `COMPASS_ACCURACY_RESET_SITE` | `0x4b4c76` | `0x4b6b5a` | +0x1ee4 with its prologue `0x4b4450` → `0x4b6334`; literal pool `0x4b55cc` → `0x4b74b0` = {`0x20077400`, `0x20076220`} |
+| vendor mag-bias setter (digest, 190 B) | `0x51bdc6` | `0x51e66a` | same sha256 |
+| IMU FIFO bias/accuracy block (digest, 116 B) | `0x4b6936` | `0x4b881a` | same sha256 |
+| zlib init/inflate/end, "1.1.4" | `0x5d6167`/`0x5d6235`/`0x5d612b`/`0x7b75f8` | `0x5d8e57`/`0x5d8f25`/`0x5d8e1b`/`0x7bb6f8` | existing mapping |

@@ -470,6 +470,20 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   30 -> merged jimrandomh/g2flash main (Faceclaw/4..14, 2026-09-18): private
+//         SID-0xf0 message transport (length-prefixed streams across packet
+//         boundaries, transport-level zlib with a persistent inflater per
+//         ingress lens, decoded CRC-16, per-lens selection with bridge
+//         forwarding, ACK/NACK with a three-entry ACK history), custom modes
+//         dispatched from that transport with no EvenHub container, a
+//         256 KiB texture cache with uint32-offset modes 18/19/20 (the uint16
+//         modes 12/13/14 stay accepted), magnetic-calibration accuracy kept
+//         across IMU reconfiguration under the framebuffer lease, free/max
+//         heap statistics in the debug overlay, and an owned 640x480 shadow
+//         instead of the container's display buffer. Unlike upstream, the
+//         stock EvenHub image path (snapshot FIFO, deferred consumer,
+//         immediate ACK, 576x288 lift) is KEPT so existing phone apps still
+//         work; both ingress paths feed one dispatcher under one mutex.
 //   29 -> dirty-rect list folds overflow into a bounding box instead of
 //         dropping it, so multi-line text updates refresh every line under
 //         the revision-28 dirty-row panel refresh.
@@ -502,7 +516,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/29";
+        static const char caps[] = "GLASSLYCFW/30";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

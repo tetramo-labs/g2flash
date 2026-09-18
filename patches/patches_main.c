@@ -20,6 +20,7 @@
  * turn those into absolute relocations that build.py rejects.
  */
 
+#include "memory.c"
 #include "utils.c"
 #include "protobuf.c"
 #include "malloc.c"
@@ -27,7 +28,9 @@
 #include "cfw_context.c"
 #include "rle.c"
 #include "texture_cache.c"
+#include "image_buffers.c"
 #include "zlib_glue.c"
+#include "message_transport.c"
 #include "shapes.c"
 #include "scene.c"
 #include "compass.c"

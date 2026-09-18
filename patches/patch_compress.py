@@ -29,7 +29,22 @@ Build a CFW image for g2_2.2.9.22 with:
   (12) an ANCS relay (sid-0x09 fields 125/126) that retargets four `bl` sites
       inside the stock ANCC profile object so the right lens forwards every iOS
       notification it receives (source event, attributes, app display name) to
-      the phone; see ancs_relay.c for the contract and threading model.
+      the phone; see ancs_relay.c for the contract and threading model, and
+  (13) the upstream private SID-0xf0 message transport (message_transport.c):
+      the fff2 ATT write callback is probed before TPL reconstruction and the
+      three bridge-delivery `bl`s are intercepted before the worker pool, so
+      length-prefixed message streams (transport zlib, CRC-16, per-lens
+      selection, ACK/NACK with history) reach the same dispatcher as the stock
+      image path above -- both paths stay live, and
+  (14) magnetic-calibration accuracy preserved across IMU reconfiguration while
+      the Faceclaw framebuffer lease is valid (compass.c compass_preserve_accuracy).
+
+MERGED upstream jimrandomh/g2flash main (Faceclaw/4..14, still on 2.2.9.22) on
+2026-09-18: the new transport/compass sites and every stock entry point the new C
+code calls were located on 2.2.10.10 by the same masked instruction-window match
+against both stock images and confirmed by decoding the hooked `bl`s; the pinned
+prologue windows below were re-read from the 2.2.10.10 image and both compass
+digest regions are byte-identical across the two versions.
 
 REBASED 2.2.6.10 -> 2.2.9.22 (2026-08-22). Every address below was re-derived with
 normalized function/site matching and checked against the 2.2.9.22 disassembly. Two
@@ -78,8 +93,7 @@ independent (see build.py) and needs no load address at build time, so it compil
 in a single pass. A hard MRAM-ceiling check (duplicating g2flash.py's
 check_mainapp_fits_mram) refuses an oversized image.
 """
-import struct
-import sys, os, struct, zlib, json, subprocess
+import sys, os, struct, zlib, json, subprocess, hashlib
 
 DELTA = 0x379C33  # file_off = ghidra_addr - DELTA  (OTA mainApp component, 2.2.10.10)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -263,6 +277,21 @@ COMPASS_REPORT_BL_SITE = (0x4b8212, "fff759fc")  # bl DRV_IMUSendUIEvent(9,headi
 # (Thumb) is repointed at mic_peer_sync_hook, which passes everything through to stock except
 # peer audio-sync frames arriving at an armed, power-cycled RIGHT temple.
 AUDM_PEER_SYNC_TABLE_SITE = (0x6c12a4, "f7b15600")
+# Upstream private SID-0xf0 transport (2.2.10.10; upstream 2.2.9.22 sites in parentheses).
+# fff2 ATT write callback, before any TPL reconstruction or SID dispatch.
+# r0=pipe(0), r1=borrowed ATT value, r2=uint16 length; r0 returns status.
+MESSAGE_RX_BL_SITE = (0x4d5a16, "f8f799fd")  # bl TPL_ReceivePacket 0x4ce54c (was 0x4d335a -> 0x4cf3e8)
+# Bridge delivery: intercept BEFORE SendUserDataToThreadPool so reconstruction runs
+# in bridge-arrival order. All three `bl`s land on 0x45d520 (was 0x45d1a0).
+MESSAGE_BRIDGE_BL_SITES = (
+    (0x45e4ee, "fff717f8"),   # was 0x45e16e
+    (0x45e64a, "fef769ff"),   # was 0x45e2ca
+    (0x460648, "fcf76aff"),   # was 0x4602c8
+)
+# Inline accuracy reset immediately before the stock cached-mag-bias setter in
+# DRV_IMUSetSensorParameters: `movs r1,#0; strb r1,[r0]`. The helper returns the
+# accuracy pointer in r0; the following ldrb supplies r2. (was 0x4b4c76)
+COMPASS_ACCURACY_RESET_SITE = (0x4b6b5a, "00210170")
 
 def enc_bl(pc, target):
     """Encode a Thumb-2 BL (T1) from instruction address `pc` to `target`."""
@@ -370,6 +399,56 @@ def validate_ble_link_stock(img):
         if bytes(img[g2f(address):g2f(address) + len(expected)]) != expected:
             raise ValueError(f"BLE link stock ABI mismatch: {description} at {address:#x}")
 
+def validate_message_transport_stock(img):
+    """Pin ingress/bridge call sites, fallback entries and copying TX APIs (2.2.10.10).
+    Same windows as upstream's 2.2.9.22 table, re-read from the 2.2.10.10 image after
+    a masked instruction-window match (only `bl` immediates differ)."""
+    for address, expected in (
+        (0x4d5a0c, "1fb5069a079992b20020f8f799fd0400002c"),   # fff2 write cb around MESSAGE_RX_BL_SITE
+        (0x4ce54c, "2de9f04385b007000d00002d"),               # TPL_ReceivePacket (CFW_STOCK_RECEIVE)
+        (0x45e4e2, "a388e28814f10801bfb23800fff717f8"),       # bridge site 1
+        (0x45e63e, "a388e28814f10801bfb23800fef769ff"),       # bridge site 2
+        (0x46063a, "2569a96848888b88ca88083180b2fcf76aff"),   # bridge site 3
+        (0x45d520, "2de9f04385b006000f00150098462800fbf7e7f8"),  # SendUserDataToThreadPool (CFW_STOCK_BRIDGE_RECEIVE)
+        (0x46ab70, "2de9f84388b005000e0090461f00dff800452068002823d1"),  # bridge send (CFW_BRIDGE_SEND)
+        (0x46ad20, "039988681ffa88f810f10805424631002800cef757ff0120"),  # bridge send: copying enqueue
+        (0x47e9c8, "feb504000d0016001f00ccf7f1fa002821d0"),   # BLE notify send (CFW_BLE_SEND)
+        (0x47ea1e, "bfb2019700962b00dbb22200d2b200210020fff7d5fd"),
+        (0x47e77c, "04980772049880f80980049880f80a90049810f10b071ffa8bfb5a4621003800bbf722fa"),
+        (0x45d35c, "dff8100c00787047"),                       # lens side (CFW_LENS_SIDE)
+        (0x442ef6, "70b505000026fff761fc0028"),               # osMutexNew    (unchanged address)
+        (0x442f90, "f8b506000c0075086d0016f0"),               # osMutexAcquire
+        (0x442ff6, "70b505006c08640015f00105"),               # osMutexRelease
+        (0x443048, "38b5040064086400fff7b7fb"),               # osMutexDelete
+    ):
+        expected = bytes.fromhex(expected)
+        if bytes(img[g2f(address):g2f(address) + len(expected)]) != expected:
+            raise ValueError(f"message transport stock ABI mismatch at {address:#x}")
+
+
+def validate_compass_calibration_stock(img):
+    """Pin the inline hook ABI, cached bias/accuracy, and vendor restore code (2.2.10.10)."""
+    for address, expected in (
+        # Prologue saves LR and keeps SP 8-byte aligned at the injected call.
+        (0x4b6334, "2de9f04fcdb0"),                                             # was 0x4b4450
+        (0x4b6b56, "dff85809002101700278dff85019280067f080fd04430df18d03"),   # was 0x4b4c72
+        (0x4b74b0, "0074072020620720"),   # literal pool: accuracy 0x20077400, bias 0x20076220 (was 0x4b55cc)
+    ):
+        expected = bytes.fromhex(expected)
+        if bytes(img[g2f(address):g2f(address) + len(expected)]) != expected:
+            raise ValueError(f"compass calibration stock ABI mismatch at {address:#x}")
+    # The complete vendor setter restores bias, accuracy, covariance, and
+    # scaled internal bias. The FIFO block updates the cached bias/accuracy
+    # together and still owns anomaly/ready handling. Neither is patched. Both
+    # regions are byte-identical to 2.2.9.22 (same digests, relocated).
+    for address, size, digest in (
+        (0x51e66a, 190, "ddcdc7b2c82e92c65bc200de218dfea0fb94bd5398f3b34353c957d6fd331428"),  # was 0x51bdc6
+        (0x4b881a, 116, "84f348f853d5868a76e6b97f93d27feedacd87aca86ef3b3d9354e88d24b2fa7"),  # was 0x4b6936
+    ):
+        if hashlib.sha256(img[g2f(address):g2f(address) + size]).hexdigest() != digest:
+            raise ValueError(f"compass calibration stock ABI mismatch at {address:#x}")
+
+
 def layout(img):
     """Compile the single injected code blob (patches_main.c, which #includes every
     patch source) and append it at the tail of the main-app payload. Returns
@@ -377,6 +456,8 @@ def layout(img):
     ceiling (duplicate of g2flash.check_mainapp_fits_mram)."""
     validate_ring_battery_stock(img)
     validate_ble_link_stock(img)
+    validate_message_transport_stock(img)
+    validate_compass_calibration_stock(img)
     idx, comp_off, old_ps = find_mainapp(img)
 
     # This reservation is safe only if the stock image has no absolute pointer
@@ -443,6 +524,9 @@ def layout(img):
     ble_request_addr = base + _fn(built, "ble_hook_request")["offset"]
     ble_classify_addr = base + _fn(built, "ble_hook_classify")["offset"]
     peer_sync_addr = base + _fn(built, "mic_peer_sync_hook")["offset"]
+    message_rx_addr = base + _fn(built, "cfw_receive_packet")["offset"]
+    message_bridge_addr = base + _fn(built, "cfw_message_bridge_received")["offset"]
+    compass_accuracy_addr = base + _fn(built, "compass_preserve_accuracy")["offset"]
 
     # --- assemble the appended payload bytes (old_ps .. end) ---
     pad = blob_off - old_ps                     # alignment gap before the blob
@@ -469,6 +553,14 @@ def layout(img):
 
     # --- in-place live-code edits + bl retargets (targets are the appended addrs) ---
     in_place = [
+        # Upstream private SID-0xf0 transport: probe every fff2 write before TPL
+        # reassembly, and take bridge deliveries before the worker pool reorders them.
+        *[(g2f(site), old, enc_bl(site, message_bridge_addr),
+           "bl cfw_message_bridge_received (ordered private bridge delivery before worker pool)")
+          for site, old in MESSAGE_BRIDGE_BL_SITES],
+        (g2f(MESSAGE_RX_BL_SITE[0]), MESSAGE_RX_BL_SITE[1],
+         enc_bl(MESSAGE_RX_BL_SITE[0], message_rx_addr),
+         "bl cfw_receive_packet (private SID-f0 probe before TPL reassembly)"),
         (g2f(BLE_2M_SITE[0]), BLE_2M_SITE[1], "7d 20",
          "Set Local Feature: enable LE 2M bit 8"),
         (g2f(PRIMARY_TLSF_SIZE_SITE[0]), PRIMARY_TLSF_SIZE_SITE[1],
@@ -550,6 +642,9 @@ def layout(img):
         (g2f(COMPASS_REPORT_BL_SITE[0]), COMPASS_REPORT_BL_SITE[1],
          enc_bl(COMPASS_REPORT_BL_SITE[0], compass_report_addr),
          "bl compass_report_event (stock UI + heading with diagnostics over BLE)"),
+        (g2f(COMPASS_ACCURACY_RESET_SITE[0]), COMPASS_ACCURACY_RESET_SITE[1],
+         enc_bl(COMPASS_ACCURACY_RESET_SITE[0], compass_accuracy_addr),
+         "bl compass_preserve_accuracy (retain magnetic calibration under Faceclaw framebuffer lease)"),
         # BLE link speed: phone-selectable fast profile, stock by default.
         (g2f(BLE_MODE_BL_SITE[0]), BLE_MODE_BL_SITE[1],
          enc_bl(BLE_MODE_BL_SITE[0], ble_mode_addr),

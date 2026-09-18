@@ -46,9 +46,9 @@ static void rl_add(cfw_rectlist *rl, uint32_t l, uint32_t t, uint32_t w, uint32_
 }
 static void *cfw_heap13_malloc(uint32_t size) { return malloc(size); }
 static void cfw_heap13_free(void *p) { free(p); }
-static uint8_t *cfw_shadow_buffer(uint8_t *state) { return state ? g_container_shadow : 0; }
-static void present_shadow(uint8_t *state, uint32_t w, uint32_t h, cfw_rectlist *rl) {
-    (void)state; (void)w; (void)h; if (rl) rl->direct_submitted = 1;
+static uint8_t *cfw_shadow_buffer(void) { return g_container_shadow; }
+static void present_shadow(uint32_t w, uint32_t h, cfw_rectlist *rl) {
+    (void)w; (void)h; if (rl) rl->direct_submitted = 1;
 }
 static int  stub_timer_start(uint32_t h, uint32_t ms) { (void)h; (void)ms; return 0; }
 static int  stub_timer_stop(uint32_t h) { (void)h; return 0; }
