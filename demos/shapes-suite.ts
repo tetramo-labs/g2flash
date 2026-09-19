@@ -1689,7 +1689,7 @@ async function openLink(): Promise<Link> {
   // GLASSLYCFW/31: custom payloads ride the SID-0xf0 message transport (no image container).
   const transport = new CfwTransport(session, ACK_MS);
   const send = async (payload: Uint8Array) => {
-    if (!(await transport.send(payload))) throw new Error(`message (mode ${payload[0]}) was not acked by both lenses`);
+    if (!(await transport.send(payload))) throw new Error(`message (mode ${payload[0]}, ${payload.length} B): ${transport.lastOutcome}`);
   };
   await send(WARM_UP);
   await sleep(150);

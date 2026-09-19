@@ -94,7 +94,7 @@ const suffix = String(Date.now() % 10_000).padStart(4, "0");
 // GLASSLYCFW/31: custom payloads ride the SID-0xf0 message transport (no image container).
 const transport = new CfwTransport(session, ACK_MS);
 async function sendImage(payload: Uint8Array): Promise<void> {
-  if (!(await transport.send(payload))) throw new Error(`message (mode ${payload[0]}) was not acked by both lenses`);
+  if (!(await transport.send(payload))) throw new Error(`message (mode ${payload[0]}, ${payload.length} B): ${transport.lastOutcome}`);
 }
 
 async function lease(op: number): Promise<void> {

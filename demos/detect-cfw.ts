@@ -16,7 +16,7 @@
 //     no CFW capability field — stock firmware (or pre-caps CFW build)
 
 import { G2Session, querySettings } from "g2-kit/ble";
-import { queryGlasslyCfw, REQUIRED_REVISION } from "./glassly-cfw";
+import { describeDiag, queryGlasslyCfw, REQUIRED_REVISION } from "./glassly-cfw";
 
 const session = await G2Session.open();
 
@@ -32,6 +32,7 @@ if (!cfw) {
   console.log(`CFW detected: ${cfw.raw}`);
   const state = cfw.revision >= REQUIRED_REVISION ? "" : " — older than the demos here expect";
   console.log(`  revision ${cfw.revision} (required: ${REQUIRED_REVISION})${state}`);
+  console.log(`  ${describeDiag(cfw.diag)}`);
 }
 
 await session.close();

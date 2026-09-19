@@ -93,19 +93,29 @@ export class CfwTransport {
     });
   }
 
-  /** Resolves true when both lenses acked, false on NACK or timeout. */
+  /** Outcome of the last send: which lenses acked, which NACKed, or a timeout. */
+  lastOutcome = "";
+
+  /** Resolves true when both lenses acked, false on NACK or timeout (see lastOutcome). */
   async send(payload: Uint8Array): Promise<boolean> {
     const streamId = this.sequence;
     const frames = packets(record(payload), streamId);
     this.sequence = (this.sequence + frames.length) & 0xff;
     let acked = 0;
+    const name = (lens: number) => (lens === 1 ? "L" : "R");
     const done = new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => { this.waiter = undefined; resolve(false); }, this.ackTimeoutMs + payload.length / 8);
+      const timer = setTimeout(() => {
+        this.waiter = undefined;
+        this.lastOutcome = `timeout after ${this.ackTimeoutMs} ms, acked by ${acked ? name(acked & 1 || 2) : "neither lens"}${acked === 1 ? "" : acked === 2 ? "" : ""}`;
+        if (acked === 1) this.lastOutcome = `timeout: L acked, R silent`;
+        if (acked === 2) this.lastOutcome = `timeout: R acked, L silent`;
+        resolve(false);
+      }, this.ackTimeoutMs + payload.length / 8);
       this.waiter = (ack) => {
         if (ack.streamId !== streamId || ack.ordinal !== 0) return;
-        if (!ack.success) { clearTimeout(timer); this.waiter = undefined; resolve(false); return; }
+        if (!ack.success) { clearTimeout(timer); this.waiter = undefined; this.lastOutcome = `NACK from ${name(ack.lens)}`; resolve(false); return; }
         acked |= ack.lens;
-        if (acked === LENS_BOTH) { clearTimeout(timer); this.waiter = undefined; resolve(true); }
+        if (acked === LENS_BOTH) { clearTimeout(timer); this.waiter = undefined; this.lastOutcome = "acked by both"; resolve(true); }
       };
     });
     await sendFrames(this.session.left, frames);

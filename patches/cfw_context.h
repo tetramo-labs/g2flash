@@ -291,17 +291,14 @@ typedef struct {
     uint8_t  diag_pad0;
     uint32_t alloc_fail_count;              /* failed CFW mallocs since the last clear */
     uint32_t alloc_fail_bytes;              /* size of the last failed malloc */
-    /* --- Revision 35: shadow messages execute on the display task. The BLE or
-     * bridge task that reconstructed the record parks it here, wakes the display
-     * task with a refresh and waits on the display gate; display_copy_hook runs
-     * the dispatcher (the built-in font goes through stock LVGL, which is only
-     * safe on that task) and stores the result. --- */
-    const uint8_t *exec_src;
-    uint32_t exec_len;
-    volatile uint8_t exec_state;            /* 0 idle, 1 pending, 3 running, 2 done */
-    int8_t   exec_result;
-    uint16_t exec_timeouts;                 /* the display task did not run a message within the gate window */
+    /* --- Revision 36: text scratch for shape rendering. cfw_shape_draw kept 646
+     * bytes of it on the stack, too much for the 2 KiB stock display task that
+     * rasterizes animation frames in display_copy_hook. Rendering is serialized
+     * by the display gate, so one scratch serves every caller. --- */
+    uint8_t  shape_text_buf[136];           /* [x16][y16][color][len] + CFW_SHAPE_INLINE_MAX bytes */
+    uint32_t shape_tokens[128];             /* CFW_SHAPE_INLINE_MAX code points */
 } customCfwContext;
+
 
 #define CFW_NACK_FLAGS    1u   /* record flags/lens bits inconsistent with the stream */
 #define CFW_NACK_CONTEXT  2u   /* compressed record without a valid inflate context */
@@ -314,7 +311,7 @@ typedef struct {
 #define CFW_ALLOC_DIAG_MAGIC 0xA110CA7EU
 
 // Marker used to validate that the CFW context pointer hasn't been clobbered.
-#define CFW_CTX_MAGIC 0xC0FFEE70U    /* revision 35: display-task execution hand-off appended */
+#define CFW_CTX_MAGIC 0xC0FFEE70U    /* revision 36: hand-off fields replaced by the shape text scratch */
 
 #define FW_MS_TICK  (*(volatile uint32_t *)0x20076de0U)  /* firmware 1 ms OS tick (SysTick chain) */
 

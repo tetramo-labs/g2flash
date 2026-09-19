@@ -26,6 +26,37 @@ export interface GlasslyCfw {
   branded: boolean;
   /** The full advertised string, verbatim. */
   raw: string;
+  /** Settings field 107 (revision 36+): failure diagnostics, or null on older builds. */
+  diag: GlasslyDiag | null;
+}
+
+/** Field 107 of the settings reply: the counters the debug overlay shows. */
+export interface GlasslyDiag {
+  nackCount: number; nackReason: number; workerFailMode: number; workerFailCount: number;
+  gateTimeouts: number; execTimeouts: number; execState: number; execLast: number; execWaitMs: number;
+  directPending: number; directActive: number; gateHeld: number;
+  allocFailCount: number; allocFailHeap: number; lastWorkerUs: number;
+}
+
+export function parseGlasslyDiag(settingsPb: Uint8Array): GlasslyDiag | null {
+  const d = findLenDelimField(settingsPb, 107);
+  if (!d || d.length < 23 || d[0] !== 1) return null;
+  const u16 = (i: number) => d[i]! | (d[i + 1]! << 8);
+  return {
+    nackCount: u16(1), nackReason: d[3]!, workerFailMode: d[4]!, workerFailCount: u16(5),
+    gateTimeouts: u16(7), execTimeouts: u16(9), execState: d[11]!, execLast: d[12]!, execWaitMs: u16(13),
+    directPending: d[15]!, directActive: d[16]!, gateHeld: d[17]!,
+    allocFailCount: u16(18), allocFailHeap: d[20]!, lastWorkerUs: u16(21) * 100,
+  };
+}
+
+const NACK_REASONS = ["", "flags", "context", "inflate", "crc", "handler"];
+
+export function describeDiag(g: GlasslyDiag | null): string {
+  if (!g) return "diag: n/a (needs revision 36)";
+  return `diag: nack ${g.nackCount} (${NACK_REASONS[g.nackReason] ?? g.nackReason}) fail ${g.workerFailCount} mode ${g.workerFailMode}`
+    + ` gate-timeouts ${g.gateTimeouts} pending ${g.directPending} active ${g.directActive} held ${g.gateHeld}`
+    + ` alloc-fail ${g.allocFailCount} heap ${g.allocFailHeap} worker ${g.lastWorkerUs} us`;
 }
 
 // First top-level length-delimited field `fieldNo` of a protobuf message.
@@ -66,7 +97,7 @@ export function parseGlasslyCfw(settingsPb: Uint8Array): GlasslyCfw | null {
   const head = raw.split(/\s+/)[0] ?? "";
   const revision = Number(head.slice(head.indexOf("/") + 1));
   if (!Number.isInteger(revision) || revision <= 0) return null;
-  return { revision, branded, raw };
+  return { revision, branded, raw, diag: parseGlasslyDiag(settingsPb) };
 }
 
 /** Settings read plus field-100 parse. Null on stock firmware or ack timeout. */

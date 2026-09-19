@@ -470,6 +470,12 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   36 -> revision 35's display-task hand-off is gone: the stock display task
+//         has a 2 KiB stack and the scene dispatcher alone needs more, so every
+//         mode-37/38 message hung the lens. Shadow messages run on the receiving
+//         task again (16 KiB), with revision 29's display-gate discipline; the
+//         shape text buffers moved off the stack for the display task's animation
+//         renders. Settings field 107 carries the failure diagnostics.
 //   35 -> shadow messages execute on the display task again (the transport
 //         ran them on the BLE/bridge task; built-in font text goes through
 //         stock LVGL, which crashed the lens under fast text updates). The
@@ -537,12 +543,44 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 // (earlier this had to be spelled out byte-by-byte to avoid a rodata section).
 #define SETTINGS_RESPONSE_CAPACITY 256u
 
+/* Revision 36: settings field 107 carries the failure diagnostics that the
+ * debug overlay shows, so a phone or script can read them without a display.
+ * Little-endian: [1][nack_count u16][nack_reason][worker_fail_mode]
+ * [worker_fail_count u16][gate_timeouts u16][reserved 6 bytes, zero]
+ * [direct_pending][direct_active][gate_held]
+ * [alloc_fail_count u16][alloc_fail_heap][last_worker_us/100 u16][0]. */
+static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned capacity) {
+    customCfwContext *ctx = faceclaw_context_if_valid();
+    if (!ctx) return len;
+    unsigned char d[24];
+    uint32_t gt = ctx->gate_timeouts > 0xffffu ? 0xffffu : ctx->gate_timeouts;
+    uint32_t af = ctx->alloc_fail_count > 0xffffu ? 0xffffu : ctx->alloc_fail_count;
+    uint32_t wu = ctx->last_worker_us / 100u;
+    if (wu > 0xffffu) wu = 0xffffu;
+    d[0] = 1;
+    d[1] = (unsigned char)ctx->nack_count; d[2] = (unsigned char)(ctx->nack_count >> 8);
+    d[3] = ctx->nack_reason;
+    d[4] = ctx->worker_fail_mode;
+    d[5] = (unsigned char)ctx->worker_fail_count; d[6] = (unsigned char)(ctx->worker_fail_count >> 8);
+    d[7] = (unsigned char)gt; d[8] = (unsigned char)(gt >> 8);
+    d[9] = d[10] = d[11] = d[12] = d[13] = d[14] = 0;   /* reserved */
+    d[15] = ctx->direct_pending;
+    d[16] = ctx->direct_active;
+    d[17] = ctx->gate_held;
+    d[18] = (unsigned char)af; d[19] = (unsigned char)(af >> 8);
+    d[20] = ctx->alloc_fail_heap;
+    d[21] = (unsigned char)wu; d[22] = (unsigned char)(wu >> 8);
+    d[23] = 0;
+    return pb_append_bytes_field(buf, len, capacity, 107u, d, (unsigned)sizeof(d));
+}
+
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/35";
+        static const char caps[] = "GLASSLYCFW/36";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);
+        len = diag_append_status(buf, len, SETTINGS_RESPONSE_CAPACITY);
         len = mic_append_status(buf, len, SETTINGS_RESPONSE_CAPACITY);
         len = ble_append_status(buf, len, SETTINGS_RESPONSE_CAPACITY);
         /* Keep the settings reply inside one BLE frame. The ring report is

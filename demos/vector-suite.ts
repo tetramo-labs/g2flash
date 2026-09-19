@@ -69,7 +69,7 @@ const lease=async(op:5|6)=>{
 // GLASSLYCFW/31: custom payloads ride the SID-0xf0 message transport (no image container).
 const transport=new CfwTransport(session);
 const send=async(payload:Uint8Array)=>{
-  if(!await transport.send(payload))throw new Error(`message (mode ${payload[0]}) was not acked by both lenses`);
+  if(!await transport.send(payload))throw new Error(`message (mode ${payload[0]}, ${payload.length} B): ${transport.lastOutcome}`);
 };
 let acquired=false;
 try {

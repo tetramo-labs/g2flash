@@ -219,9 +219,7 @@ static void cfw_draw_flags(uint8_t *disp, uint32_t w, uint32_t h) {
     u_to_dec(line, ctx->alloc_fail_bytes, sizeof(line));
     strlcat(line, "b h", sizeof(line));
     u_to_dec(line, ctx->alloc_fail_heap, sizeof(line));
-    strlcat(line, " gate ", sizeof(line));        /* display-gate takes that timed out / hand-offs the display task missed */
+    strlcat(line, " gate ", sizeof(line));        /* display-gate takes that timed out */
     u_to_dec(line, ctx->gate_timeouts, sizeof(line));
-    strlcat(line, "/", sizeof(line));
-    u_to_dec(line, ctx->exec_timeouts, sizeof(line));
     draw_string(disp, w, h, IMAGE_X + 2, IMAGE_Y + 38, line, 15, 0);
 }

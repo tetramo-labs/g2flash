@@ -458,15 +458,14 @@ static void cfw_shape_draw_texture(const cfw_raster *r, const cfw_shape *s, cfw_
     uint32_t off = (uint16_t)s->p[2], len = (uint16_t)s->p[3];
     if (len > CFW_SHAPE_TEXT_MAX || off + len > CFW_TEXTURE_CACHE_SIZE) return;
     if (s->type == CFW_SHAPE_TEXT) {
-        uint8_t buf[6 + CFW_SHAPE_TEXT_MAX];
+        uint8_t *buf = ctx->shape_text_buf;            /* context scratch: see cfw_context.h */
         buf[0] = (uint8_t)x; buf[1] = (uint8_t)((uint32_t)x >> 8);
         buf[2] = (uint8_t)y; buf[3] = (uint8_t)((uint32_t)y >> 8);
         buf[4] = s->color;
         buf[5] = (uint8_t)len;
         for (uint32_t i = 0; i < len; i++) buf[6 + i] = ctx->texture_cache[off + i];
-        uint32_t tokens[CFW_SHAPE_TEXT_MAX];
         cfw_builtin_draw_string_buf(r->buf, r->stride, (uint32_t)r->w, (uint32_t)r->h,
-                                    buf, 6 + len, rl, tokens, CFW_SHAPE_TEXT_MAX);
+                                    buf, 6 + len, rl, ctx->shape_tokens, CFW_SHAPE_TEXT_MAX);
         return;
     }
     cfw_texture_draw_string_at(r->buf, r->stride, (uint32_t)r->w, (uint32_t)r->h,
@@ -483,15 +482,18 @@ static void cfw_shape_draw_inline_text(const cfw_raster *r, const cfw_shape *s, 
     if (w > 0 && x + w < clip_w) clip_w = x + w;
     if (h > 0 && y + h < clip_h) clip_h = y + h;
     if (clip_w <= 0 || clip_h <= 0) return;
-    uint8_t buf[6 + CFW_SHAPE_INLINE_MAX];
+    customCfwContext *ctx = peekCustomCfwContext();
+    if (ctx == 0) return;
+    _Static_assert(sizeof(ctx->shape_text_buf) >= 6u + CFW_SHAPE_INLINE_MAX, "shape_text_buf too small");
+    _Static_assert(sizeof(ctx->shape_tokens) / sizeof(ctx->shape_tokens[0]) >= CFW_SHAPE_INLINE_MAX, "shape_tokens too small");
+    uint8_t *buf = ctx->shape_text_buf;                /* context scratch: see cfw_context.h */
     buf[0] = (uint8_t)x; buf[1] = (uint8_t)((uint16_t)x >> 8);
     buf[2] = (uint8_t)y; buf[3] = (uint8_t)((uint16_t)y >> 8);
     buf[4] = s->color;
     buf[5] = (uint8_t)len;
     for (uint32_t i = 0; i < len; i++) buf[6 + i] = s->text[i];
-    uint32_t tokens[CFW_SHAPE_INLINE_MAX];
     cfw_builtin_draw_string_buf(r->buf, r->stride, (uint32_t)clip_w, (uint32_t)clip_h,
-                                buf, 6 + len, rl, tokens, CFW_SHAPE_INLINE_MAX);
+                                buf, 6 + len, rl, ctx->shape_tokens, CFW_SHAPE_INLINE_MAX);
 }
 
 static void cfw_shape_draw(const cfw_raster *r, const cfw_shape *s, cfw_rectlist *rl) {
