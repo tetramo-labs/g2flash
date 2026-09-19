@@ -212,8 +212,7 @@ static void cfw_texture_add_rect(cfw_rectlist *rl, int32_t x, int32_t y,
 }
 
 /* Clear the published pointer before freeing so repeated release/cleanup is
- * harmless. The cache lives on the EvenHub heap next to the shadow (see
- * image_buffers.c); the stock allocator serializes access to its heap. */
+ * harmless. The stock EvenHub allocator serializes access to its TLSF heap. */
 static void cfw_texture_cache_release(customCfwContext *ctx) {
     if (ctx && ctx->texture_cache) {
         uint8_t *cache = ctx->texture_cache;
@@ -224,7 +223,7 @@ static void cfw_texture_cache_release(customCfwContext *ctx) {
 
 /* Mode 18 payload: a list of [offset:u32][length:u16][data...]. Validate the complete list before
  * allocating or writing, then lazily allocate and zero the phone-owned
- * region (CFW_TEXTURE_CACHE_SIZE, EvenHub heap) on the first nonempty write. */
+ * the 256 KiB phone-owned region on the EvenHub heap on the first nonempty write. */
 static int cfw_texture_cache_update(const uint8_t *src, uint32_t len) {
     if (src == 0) return -1;
     const uint32_t hdr = 6u;

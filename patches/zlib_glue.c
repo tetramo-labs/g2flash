@@ -14,7 +14,12 @@ int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum) 
     customCfwContext *ctx = getCustomCfwContext();
     if (!ctx) return -1;
     ctx->message_probe.snapshot = (uint32_t)size | ((uint32_t)checksum << 16);
-    return image_worker(data, size);
+    int r = image_worker(data, size);
+    if (r != 0) {
+        ctx->worker_fail_count++;
+        ctx->worker_fail_mode = size ? data[0] : 0;
+    }
+    return r;
 }
 
 /*
@@ -477,6 +482,9 @@ static int image_dispatch(const uint8_t *src, uint32_t srclen, int present, cfw_
                 cfw_alloc_diag_clear();
                 ctx->diag_seen = ctx->fid_resync = 0;
                 ctx->last_fid = ctx->high_fid = 0;
+                ctx->nack_count = 0; ctx->nack_reason = 0;
+                ctx->worker_fail_count = 0; ctx->worker_fail_mode = 0;
+                ctx->alloc_fail_count = 0; ctx->alloc_fail_bytes = 0; ctx->alloc_fail_heap = 0;
                 for (uint32_t i = 0; i < CFW_FID_RING; i++) ctx->recent_fids[i] = 0xffff;
                 ctx->recent_pos = 0;
             } else if (sub == 1) {
@@ -759,7 +767,7 @@ static void present_buffer(customCfwContext *ctx, const uint8_t *buf, cfw_rectli
     }
     /* The debug overlay (cfw_draw_flags) paints the top ~12 rows every frame; when it is on,
      * always include them so it is not left stale by a tight dirty rect. */
-    if (!ctx->diag_hide && ftop > 12u) ftop = 0u;
+    if (!ctx->diag_hide && ftop > 50u) ftop = 0u;
     if (ctx->direct_pending && ctx->direct_dirty_bot != 0u) {   /* coalesced: union */
         if (ctx->direct_dirty_top < ftop) ftop = ctx->direct_dirty_top;
         if (ctx->direct_dirty_bot > fbot) fbot = ctx->direct_dirty_bot;

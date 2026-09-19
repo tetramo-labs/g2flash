@@ -470,6 +470,11 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   34 -> upstream's memory layout again (shadow and transport buffers on
+//         heap 13, 256 KiB texture cache on the EvenHub heap): the retained
+//         scene now renders into the owned shadow instead of a second 150 KiB
+//         frame on heap 13, which is what starved LVGL in 31/32. Overlay line 4
+//         reports NACK reasons, handler failures and failed mallocs.
 //   33 -> heap budget restored to revision 29's shape: the owned shadow, the
 //         64 KiB texture cache and the transport's transient decode buffer
 //         live on the EvenHub heap (where the image container's buffers were);
@@ -529,7 +534,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/33";
+        static const char caps[] = "GLASSLYCFW/34";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

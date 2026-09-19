@@ -41,7 +41,7 @@ typedef struct {
 
 typedef struct cfw_scene_s {
     uint32_t magic;
-    uint8_t *fb;            /* CFW-owned 640x480 packed-4bpp frame, lazily allocated */
+    uint8_t *fb;            /* the owned panel shadow while the scene renders (image_buffers.c) */
     uint32_t slot_hi;       /* one past the highest slot ever written */
     uint8_t  bg;            /* background gray the scene clears to */
     uint8_t  anim_active;   /* at least one slot has frames left */

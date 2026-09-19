@@ -154,11 +154,13 @@ static cfw_scene *cfw_scene_get(customCfwContext *ctx) {
     return sc;
 }
 
+/* Revision 34: the scene renders into the owned panel shadow (image_buffers.c)
+ * instead of a second 150 KiB frame. That frame existed so animation never
+ * touched EvenHub container memory; the shadow is CFW-owned now, and the
+ * extra frame on LVGL's heap 13 is what starved LVGL once the transport's
+ * buffers joined it. `fb` aliases the shadow while the scene owns the panel. */
 static uint8_t *cfw_scene_frame(cfw_scene *sc) {
-    if (sc->fb == 0) {
-        sc->fb = (uint8_t *)cfw_heap13_malloc(IMAGE_BYTES);
-        if (sc->fb) bzero(sc->fb, IMAGE_BYTES);
-    }
+    sc->fb = cfw_shadow_buffer();
     return sc->fb;
 }
 
@@ -191,8 +193,9 @@ static void cfw_scene_takeover(customCfwContext *ctx) {
     cfw_scene_settled(ctx, sc);
 }
 
-/* The last present came from the scene frame: copy it into the container shadow
- * so a raster delta composes onto what the panel shows. 0 when nothing to copy. */
+/* The last present came from the scene frame: copy it into the shadow so a
+ * raster delta composes onto what the panel shows. 0 when nothing to copy
+ * (always, now that the frame aliases the shadow; kept for the host tests). */
 static int cfw_scene_resync_shadow(customCfwContext *ctx, uint8_t *shadow) {
     cfw_scene *sc = cfw_scene_peek(ctx);
     if (sc == 0 || sc->fb == 0 || shadow == 0 || shadow == sc->fb) return 0;
@@ -210,7 +213,7 @@ static void cfw_scene_release(customCfwContext *ctx) {
     if (sc == 0) { if (ctx) ctx->scene = 0; return; }
     ctx->scene = 0;
     sc->magic = 0;
-    if (sc->fb) cfw_heap13_free(sc->fb);
+    sc->fb = 0;                                  /* aliases the shadow; not ours to free */
     for (uint32_t i=0;i<sc->slot_hi;i++) cfw_slot_clear(&sc->slots[i]);
     if (sc->vector_work) cfw_heap13_free(sc->vector_work);
     cfw_heap13_free(sc);

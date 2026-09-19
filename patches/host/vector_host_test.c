@@ -143,11 +143,10 @@ static void invalid_and_lifecycle(void) {
     CHECK(dispatch(rotateop(2,0,180*256,50,50,1000))==0);
     g_lease=0;CHECK(dispatch(rotateop(2,0,0,50,50,0))==-1);tick(33);CHECK(!sc->anim_active);
     reset();
-    /* No framebuffer: static final state survives in the container shadow. */
-    g_fail_frame_alloc=1;len=boxpath(0,20,20,20,20,0);end=pathop(2,0,0,len);
-    CHECK(dispatch(rotateop(end,0,90*256,30,30,1000))==0);
-    CHECK(g_ctx.scene->fb==0 && !g_ctx.scene->slots[0].rotation.duration);
-    CHECK(pixel_at(g_container_shadow,30,30)==15);reset();
+    /* No shadow at all: the commit fails instead of rendering anywhere. */
+    g_shadow_missing=1;len=boxpath(0,20,20,20,20,0);end=pathop(2,0,0,len);
+    CHECK(dispatch(rotateop(end,0,90*256,30,30,1000))==-1);
+    g_shadow_missing=0;reset();
     g_ctx.scene_timer=0;g_fail_timer=1;
     end=pathop(2,0,0,len);CHECK(dispatch(rotateop(end,0,90*256,30,30,1000))==0);
     CHECK(!g_ctx.scene->anim_active && g_ctx.scene->slots[0].rotation.angle==90*256);

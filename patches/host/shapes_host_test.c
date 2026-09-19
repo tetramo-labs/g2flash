@@ -322,9 +322,8 @@ static void test_scene(const char *dir) {
     { uint8_t m[] = { 2 }; CHECK(cfw_scene_dispatch(&g_ctx, 38, m, 1, 1, &rl) == 0); }
     CHECK(g_ctx.scene == 0);
 
-    /* no room for the CFW frame: a commit still draws into the container shadow
-     * and a glide lands on its end value instead of animating */
-    g_fail_frame_alloc = 1;
+    /* the scene frame IS the owned shadow: a commit renders there and a glide
+     * animates; with no shadow at all the commit fails */
     bzero(g_container_shadow, sizeof g_container_shadow);
     uint8_t fb[2 + 2 + CFW_SHAPE_RECORD_BYTES + 11];
     fb[0] = CFW_SCENE_FLAG_COMMIT | CFW_SCENE_FLAG_CLEAR; fb[1] = 0; fb[2] = CFW_SCENE_OP_SET; fb[3] = 0;
@@ -334,13 +333,12 @@ static void test_scene(const char *dir) {
     int started = g_timer_started;
     CHECK(cfw_scene_dispatch(&g_ctx, 37, fb, sizeof fb, 1, &rl) == 0);
     sc = cfw_scene_peek(&g_ctx);
-    CHECK(sc && sc->fb == 0 && sc->anim_active == 0 && g_timer_started == started);
-    CHECK(sc->slots[0].p[0] == 300 && sc->slots[0].frames == 0);
-    CHECK(g_presented_shadow == 1 && pixel_at(g_container_shadow, 300, 100) == 15);
+    CHECK(sc && sc->fb == g_container_shadow && sc->anim_active == 1 && g_timer_started == started + 1);
+    CHECK(sc->slots[0].frames == 10 && pixel_at(g_container_shadow, 100, 100) == 15);
+    cfw_scene_release(&g_ctx);
     g_shadow_missing = 1;
-    CHECK(cfw_scene_dispatch(&g_ctx, 37, fb, sizeof fb, 1, &rl) == -1);   /* no shadow either */
+    CHECK(cfw_scene_dispatch(&g_ctx, 37, fb, sizeof fb, 1, &rl) == -1);   /* no shadow: nothing to render into */
     g_shadow_missing = 0;
-    g_fail_frame_alloc = 0;
     cfw_scene_release(&g_ctx);
 }
 
@@ -396,9 +394,10 @@ static void test_ownership(void) {
     int16_t x = sc->slots[0].p[0];
     CHECK(sc->anim_active == 0 && sc->slots[0].frames == 0 && x > 300 && x < 500);
     CHECK(g_settled == 3 && g_settled_tag == 0x9abc);
-    bzero(g_container_shadow, sizeof g_container_shadow);
-    CHECK(cfw_scene_resync_shadow(&g_ctx, g_container_shadow) == 1);
-    CHECK(pixel_at(g_container_shadow, x, 240) == 15 && pixel_at(g_container_shadow, 100, 240) == 0);
+    /* the frozen frame already is the shadow: nothing to copy, the last rendered
+     * position is what a raster delta composes onto */
+    CHECK(cfw_scene_resync_shadow(&g_ctx, g_container_shadow) == 0);
+    CHECK(pixel_at(g_container_shadow, 100, 240) == 0 && count_color(g_container_shadow, 15) > 0);
 
     /* inside a bundle: rendered into the shadow, nothing presented, settled */
     bzero(g_container_shadow, sizeof g_container_shadow);

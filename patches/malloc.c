@@ -19,11 +19,22 @@ static void cfw_alloc_diag_clear(void) {
     *(volatile uint32_t *)CFW_ALLOC_DIAG_SLOT = CFW_ALLOC_DIAG_MAGIC;
 }
 
+/* Sticky per-context record of the last failed allocation (overlay line 4).
+ * Peeks only: cfw_malloc allocates the context itself. */
+static void cfw_alloc_note_failure(uint32_t size, uint8_t heap) {
+    *(volatile uint32_t *)CFW_ALLOC_DIAG_SLOT = CFW_ALLOC_DIAG_MAGIC | 1u;
+    customCfwContext *ctx = peekCustomCfwContext();
+    if (ctx) {
+        ctx->alloc_fail_count++;
+        ctx->alloc_fail_bytes = size;
+        ctx->alloc_fail_heap = heap;
+    }
+}
+
 __attribute__((noinline)) static void *cfw_malloc(uint32_t size) {
     cfw_alloc_diag();
     void *p = FW_MALLOC(size);
-    if (p == 0)
-        *(volatile uint32_t *)CFW_ALLOC_DIAG_SLOT = CFW_ALLOC_DIAG_MAGIC | 1u;
+    if (p == 0) cfw_alloc_note_failure(size, 20);
     return p;
 }
 
@@ -33,8 +44,7 @@ __attribute__((noinline)) static void *cfw_malloc(uint32_t size) {
 __attribute__((noinline)) static void *cfw_heap13_malloc(uint32_t size) {
     cfw_alloc_diag();
     void *p = FW_HEAP_MALLOC(FW_HEAP_13_DESCRIPTOR, size);
-    if (p == 0)
-        *(volatile uint32_t *)CFW_ALLOC_DIAG_SLOT = CFW_ALLOC_DIAG_MAGIC | 1u;
+    if (p == 0) cfw_alloc_note_failure(size, 13);
     return p;
 }
 

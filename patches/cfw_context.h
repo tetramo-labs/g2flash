@@ -102,7 +102,7 @@ typedef struct {
     uint8_t direct_failed;
     uint8_t direct_active;                    /* physical framebuffer currently owns the image */
     uint32_t direct_lease_deadline;            /* fail-open repaint-guard deadline */
-    /* Phone-owned texture data (64 KiB, EvenHub heap), allocated lazily on the first mode-18
+    /* Phone-owned texture data (256 KiB, EvenHub heap), allocated lazily on the first mode-18
      * write and released with the Faceclaw framebuffer lease. Protocol references
      * into this block are uint32 offsets (modes 18/19/20). */
     uint8_t *texture_cache;
@@ -277,17 +277,34 @@ typedef struct {
      * dispatcher across the BLE, bridge and EvenHub deferred tasks. --- */
     volatile cfw_message_probe message_probe; /* latest valid SID-f0 payload (debug overlay) */
     uint32_t image_mutex;                   /* stock mutex handle; created lazily */
-    uint8_t *framebuffer_shadow;            /* owned 640x480 packed 4bpp (EvenHub heap); released by mode 11 */
+    uint8_t *framebuffer_shadow;            /* owned 640x480 packed 4bpp (heap 13); released by mode 11 */
     cfw_message_stream message_streams[2];  /* index = BLE ingress lens bit - 1 */
     uint8_t  transport_pad0[4];
+    /* --- Failure diagnostics (revision 34), shown on the debug overlay's fourth
+     * line and cleared by mode 7 sub 0. A NACK carries no reason on the wire;
+     * these say which check refused the last message and what ran out. --- */
+    uint16_t nack_count;                    /* transport NACKs sent by this lens */
+    uint8_t  nack_reason;                   /* CFW_NACK_* of the last NACK */
+    uint8_t  worker_fail_mode;              /* mode byte of the last message whose handler failed */
+    uint16_t worker_fail_count;             /* handler failures (the NACK reason 5 subset) */
+    uint8_t  alloc_fail_heap;               /* 13 or 20 (EvenHub): heap of the last failed malloc */
+    uint8_t  diag_pad0;
+    uint32_t alloc_fail_count;              /* failed CFW mallocs since the last clear */
+    uint32_t alloc_fail_bytes;              /* size of the last failed malloc */
 } customCfwContext;
+
+#define CFW_NACK_FLAGS    1u   /* record flags/lens bits inconsistent with the stream */
+#define CFW_NACK_CONTEXT  2u   /* compressed record without a valid inflate context */
+#define CFW_NACK_INFLATE  3u   /* decode buffer allocation or inflate failed */
+#define CFW_NACK_CRC      4u   /* decoded CRC-16 mismatch */
+#define CFW_NACK_HANDLER  5u   /* image_dispatch refused the message (see worker_fail_mode) */
 
 #define CFW_CTX_SLOT  0x2029f4a8U    /* first word of the CFW-reserved TLSF tail */
 #define CFW_ALLOC_DIAG_SLOT 0x2029f4acU /* second word: magic | sticky failure bit */
 #define CFW_ALLOC_DIAG_MAGIC 0xA110CA7EU
 
 // Marker used to validate that the CFW context pointer hasn't been clobbered.
-#define CFW_CTX_MAGIC 0xC0FFEE6EU    /* revision 31: legacy snapshot FIFO / zlib fields removed */
+#define CFW_CTX_MAGIC 0xC0FFEE6FU    /* revision 34: failure diagnostics appended */
 
 #define FW_MS_TICK  (*(volatile uint32_t *)0x20076de0U)  /* firmware 1 ms OS tick (SysTick chain) */
 

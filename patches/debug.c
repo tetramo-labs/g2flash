@@ -148,7 +148,7 @@ static void append_heap_kib(char *out, cfw_heap_stats stats, uint32_t maxlen) {
  * heap, in whole KiB (LVGL = heap 13 @ 0x201350a8, EvenHub = 0x202020a8,
  * Other = the primary arena @ 0x202728a8). Heap snapshots are approximate;
  * failed validation displays ?/?. Suppressed when diag_hide is set (mode 7).
- * present_buffer keeps rows 0..38 in every dirty range while the overlay is on. */
+ * present_buffer keeps rows 0..50 in every dirty range while the overlay is on. */
 static void cfw_draw_flags(uint8_t *disp, uint32_t w, uint32_t h) {
     customCfwContext *ctx = getCustomCfwContext();
     if (ctx == 0 || ctx->diag_hide) return;
@@ -200,4 +200,24 @@ static void cfw_draw_flags(uint8_t *disp, uint32_t w, uint32_t h) {
     strlcat(line, " Other ", sizeof(line));
     append_heap_kib(line, heap_27, sizeof(line));
     draw_string(disp, w, h, IMAGE_X + 2, IMAGE_Y + 26, line, 15, 0);
+
+    /* Fourth line: why the last message was refused. "nack N rR" counts transport
+     * NACKs and the reason of the last one (1 flags, 2 context, 3 inflate, 4 crc,
+     * 5 handler); "fail N mM" counts handler refusals and the mode byte of the last;
+     * "alloc N bytes hH" counts failed CFW mallocs and the size/heap of the last. */
+    strlcpy(line, "nack ", sizeof(line));
+    u_to_dec(line, ctx->nack_count, sizeof(line));
+    strlcat(line, " r", sizeof(line));
+    u_to_dec(line, ctx->nack_reason, sizeof(line));
+    strlcat(line, " fail ", sizeof(line));
+    u_to_dec(line, ctx->worker_fail_count, sizeof(line));
+    strlcat(line, " m", sizeof(line));
+    u_to_dec(line, ctx->worker_fail_mode, sizeof(line));
+    strlcat(line, " alloc ", sizeof(line));
+    u_to_dec(line, ctx->alloc_fail_count, sizeof(line));
+    strlcat(line, " ", sizeof(line));
+    u_to_dec(line, ctx->alloc_fail_bytes, sizeof(line));
+    strlcat(line, "b h", sizeof(line));
+    u_to_dec(line, ctx->alloc_fail_heap, sizeof(line));
+    draw_string(disp, w, h, IMAGE_X + 2, IMAGE_Y + 38, line, 15, 0);
 }
