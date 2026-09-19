@@ -304,6 +304,7 @@ static int is_shadow_message(const uint8_t *src, uint32_t srclen) {
 #define CFW_IMAGE_MUTEX_GIVE ((int (*)(uint32_t))0x00442ff7u)
 #define CFW_IMAGE_MUTEX_DELETE ((int (*)(uint32_t))0x00443049u)
 static int image_worker_locked(const uint8_t *src, uint32_t size);
+static int image_worker_on_display_task(customCfwContext *ctx, const uint8_t *src, uint32_t size);
 static int image_worker(const uint8_t *src, uint32_t size) {
     customCfwContext *ctx = getCustomCfwContext();
     if (!ctx) return -1;
@@ -319,9 +320,64 @@ static int image_worker(const uint8_t *src, uint32_t size) {
         }
     }
     if (CFW_IMAGE_MUTEX_TAKE(mutex, 0xffffffffu) != 0) return -1;
-    int result = image_worker_locked(src, size);
+    int result;
+    if (!is_shadow_message(src, size)) {
+        /* Control messages (buzzer, compass, diagnostics, sensors, cache upload)
+         * touch no LVGL state: run them right here on the receiving task. */
+        result = image_worker_locked(src, size);
+    } else {
+        result = image_worker_on_display_task(ctx, src, size);
+    }
     CFW_IMAGE_MUTEX_GIVE(mutex);
     return result;
+}
+
+/* Revision 35. Shadow messages render text through the stock LVGL font chain
+ * and mutate the shadow the display task copies, so they must not run on the
+ * BLE or bridge task (revision 29 ran them on the EvenHub UI task; the transport
+ * moved them to the BLE task and the glasses crashed under fast text updates).
+ * Hand the message to the display task instead: take the display gate so the
+ * shadow is ours, park the message, queue a one-row refresh to wake the task,
+ * and take the gate a second time -- it only becomes available again when the
+ * stock refresh path signals it after display_copy_hook, which is where the
+ * dispatcher actually runs. Then give the extra take back. A timeout leaves
+ * the message unexecuted (state reclaimed atomically so the display task can
+ * never touch a record the transport has since freed) and reports failure. */
+static int image_worker_on_display_task(customCfwContext *ctx, const uint8_t *src, uint32_t size) {
+    void *sem = FW_DISPLAY_SEM;
+    if (sem == 0) return image_worker_locked(src, size);       /* no gate: best effort inline */
+    if (!FW_SEM_TAKE(sem, FW_DISPLAY_GATE_TICKS)) { ctx->gate_timeouts++; return -1; }
+    ctx->gate_held = 1;
+    ctx->exec_src = src;
+    ctx->exec_len = size;
+    ctx->exec_result = -1;
+    __atomic_store_n(&ctx->exec_state, 1, __ATOMIC_RELEASE);
+    int r = -1;
+    if (FW_DISPLAY_QUEUE(0, 0, 0, 0, PANEL_W - 1u, 0) != 0) {
+        uint8_t st = 1;
+        __atomic_compare_exchange_n(&ctx->exec_state, &st, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        ctx->gate_held = 0;
+        FW_DISPLAY_SIGNAL();
+        return -1;
+    }
+    if (FW_SEM_TAKE(sem, FW_DISPLAY_GATE_TICKS)) {
+        if (__atomic_load_n(&ctx->exec_state, __ATOMIC_ACQUIRE) == 2) r = ctx->exec_result;
+        __atomic_store_n(&ctx->exec_state, 0, __ATOMIC_RELEASE);
+        FW_DISPLAY_SIGNAL();                                    /* balance the second take */
+    } else {
+        ctx->exec_timeouts++;
+        uint8_t st = 1;
+        if (!__atomic_compare_exchange_n(&ctx->exec_state, &st, 0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            /* The display task is running it right now: wait for it to finish
+             * before the transport frees the record. */
+            while (__atomic_load_n(&ctx->exec_state, __ATOMIC_ACQUIRE) == 3) {}
+            if (__atomic_load_n(&ctx->exec_state, __ATOMIC_ACQUIRE) == 2) r = ctx->exec_result;
+            __atomic_store_n(&ctx->exec_state, 0, __ATOMIC_RELEASE);
+        }
+        /* The first take is still ours; the display task gives it after its copy. */
+    }
+    ctx->gate_held = 0;
+    return r;
 }
 
 /* Private receive calls this dispatcher under the image mutex. Each receiving lens kicks the keepalive once per top-level
@@ -347,35 +403,17 @@ static int image_worker_locked(const uint8_t *src, uint32_t srclen) {
     rl.direct_submitted = 0;
     rl.direct_failed = 0;
 
-    /* Shadow updates bypass LVGL, but still use the stock display task to refresh
-     * the panel. Take its gate before touching the shared shadow and leave it held
-     * through the queued refresh; the stock task signals it after display_copy_hook.
-     * This prevents the next pipelined delta from changing the shadow while the hook
-     * is copying it. Non-image control messages never take the gate. */
+    /* Shadow messages arrive here on the display task with the display gate
+     * already held by the submitting task (image_worker_on_display_task), so the
+     * shadow is exclusively ours and the copy that follows in display_copy_hook
+     * sees the finished frame. Control messages run on the receiving task. */
     customCfwContext *ctx = getCustomCfwContext();
-    int gated = is_shadow_message(src, srclen);
-    int held = 0;
-    if (gated) {
-        if (ctx == 0) return -1;
-        /* 2.2.10.69: take the gate ourselves and trust only the take's own result. A timeout
-         * drops this frame (the phone's NACK path retries) instead of touching a shadow the
-         * display task may still be copying; a successful take is always paired with a give. */
-        void *sem = FW_DISPLAY_SEM;
-        if (sem != 0) {
-            held = FW_SEM_TAKE(sem, FW_DISPLAY_GATE_TICKS) != 0;
-            if (!held) { ctx->gate_timeouts++; return -1; }
-        }
-        ctx->gate_held = (uint8_t)held;
-    }
-
     uint32_t t;
-    cfw_time_calibrate();                          /* worker thread: the only place we spin */
+    cfw_time_calibrate();                          /* one-time tick-edge spin */
     cfw_time_start(&t);
     int r = image_dispatch(src, srclen, 1, &rl);
     if (rl.direct_failed) r = -1;                  /* present could not be queued: NACK */
     uint32_t us = cfw_time_end(&t);
-
-    if (held && !rl.direct_submitted) { ctx->gate_held = 0; FW_DISPLAY_SIGNAL(); }
     if (ctx) ctx->last_worker_us = us;
     return r;
 }
@@ -485,6 +523,7 @@ static int image_dispatch(const uint8_t *src, uint32_t srclen, int present, cfw_
                 ctx->nack_count = 0; ctx->nack_reason = 0;
                 ctx->worker_fail_count = 0; ctx->worker_fail_mode = 0;
                 ctx->alloc_fail_count = 0; ctx->alloc_fail_bytes = 0; ctx->alloc_fail_heap = 0;
+                ctx->gate_timeouts = 0; ctx->exec_timeouts = 0;
                 for (uint32_t i = 0; i < CFW_FID_RING; i++) ctx->recent_fids[i] = 0xffff;
                 ctx->recent_pos = 0;
             } else if (sub == 1) {
@@ -902,6 +941,16 @@ static void copy_panel_rows(uint8_t *fb, const uint8_t *shadow, uint32_t top, ui
  * presentation restore the transparent stock pass-through. */
 void display_copy_hook(void) {
     customCfwContext *ctx = peekCustomCfwContext();
+    /* Revision 35: a shadow message parked by image_worker_on_display_task runs
+     * here, on the display task, before this refresh copies the shadow. Claim it
+     * atomically so a submitter that gave up waiting cannot free it under us. */
+    if (ctx) {
+        uint8_t st = 1;
+        if (__atomic_compare_exchange_n(&ctx->exec_state, &st, 3, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            ctx->exec_result = (int8_t)image_worker_locked(ctx->exec_src, ctx->exec_len);
+            __atomic_store_n(&ctx->exec_state, 2, __ATOMIC_RELEASE);
+        }
+    }
     if (ctx == 0 || !ctx->direct_pending || ctx->direct_shadow == 0) {
         if (ctx && ctx->direct_active) {
             uint32_t deadline = ctx->direct_lease_deadline;

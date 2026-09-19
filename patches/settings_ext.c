@@ -470,6 +470,11 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   35 -> shadow messages execute on the display task again (the transport
+//         ran them on the BLE/bridge task; built-in font text goes through
+//         stock LVGL, which crashed the lens under fast text updates). The
+//         receiving task parks the record, wakes the display task and waits
+//         on the display gate; control messages still run inline.
 //   34 -> upstream's memory layout again (shadow and transport buffers on
 //         heap 13, 256 KiB texture cache on the EvenHub heap): the retained
 //         scene now renders into the owned shadow instead of a second 150 KiB
@@ -534,7 +539,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/34";
+        static const char caps[] = "GLASSLYCFW/35";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);
