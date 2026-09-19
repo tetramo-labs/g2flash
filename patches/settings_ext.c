@@ -470,8 +470,13 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
-//   32 -> texture cache back on heap 13 at 64 KiB (uint32 wire modes kept):
-//         the 256 KiB EvenHub-heap block starved stock page work.
+//   33 -> heap budget restored to revision 29's shape: the owned shadow, the
+//         64 KiB texture cache and the transport's transient decode buffer
+//         live on the EvenHub heap (where the image container's buffers were);
+//         heap 13 (LVGL's) keeps only the scene frame, transport record buffer,
+//         inflater and mic relay. Revisions 31/32 put the shadow and transport
+//         buffers on heap 13 and starved LVGL on hardware.
+//   32 -> texture cache on heap 13 at 64 KiB (uint32 wire modes kept).
 //   31 -> the stock EvenHub image path is no longer patched (snapshot FIFO,
 //         deferred consumer, immediate ACK and the 576x288 lift are gone, as
 //         upstream Faceclaw/8): custom commands arrive ONLY over the SID-0xf0
@@ -524,7 +529,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/32";
+        static const char caps[] = "GLASSLYCFW/33";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

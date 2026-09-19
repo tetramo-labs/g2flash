@@ -68,15 +68,17 @@ window are kept alive for the whole session (reset per frame) instead of being
 allocated and freed on every update. Because this mode
 writes directly to the framebuffer without going through EvenHub's
 screen-update functions, stock containers do not contribute visible content
-while the direct framebuffer lease is held. A lease-scoped 64 KiB texture cache (heap 13) lets the phone upload RLE
+while the direct framebuffer lease is held. A lease-scoped 64 KiB texture cache lets the phone upload RLE
 icons and glyphs once, then draw cached images and strings with small update
 messages. The cache is zeroed on its first write and released when the
 Faceclaw framebuffer lease ends. Modes 18/19/20 (upstream `Faceclaw/13`) take
 32-bit cache offsets, including glyph-table entries; the 16-bit modes 12/13/14
-were retired in revision 31. Upstream sizes this cache at 256 KiB on the EvenHub
-heap; this fork keeps revision 29's 64 KiB on heap 13 because shape records
-address the cache with 16-bit offsets and the EvenHub heap also carries the
-stock page objects. Upload lengths remain 16-bit. Cached draw commands carry an options
+were retired in revision 31. Upstream sizes this cache at 256 KiB; this fork
+keeps 64 KiB because shape records address the cache with 16-bit offsets.
+Heap budget (revision 33): the 640x480 shadow, the texture cache and the
+transport's transient decode buffer live on the EvenHub heap, where the
+retired image container's buffers were; heap 13 is LVGL's and keeps only the
+scene frame, the transport record buffer and inflater, and the mic relay. Upload lengths remain 16-bit. Cached draw commands carry an options
 byte whose low nibble selects the top output color; bit 4 makes source color 0
 transparent, and bit 5 reverses the proportional 16-entry color ramp.
 Image-handler mode 15 draws a length-prefixed UTF-8 string with the glasses'

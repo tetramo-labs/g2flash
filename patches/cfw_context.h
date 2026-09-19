@@ -102,7 +102,7 @@ typedef struct {
     uint8_t direct_failed;
     uint8_t direct_active;                    /* physical framebuffer currently owns the image */
     uint32_t direct_lease_deadline;            /* fail-open repaint-guard deadline */
-    /* Phone-owned texture data (64 KiB, heap 13), allocated lazily on the first mode-18
+    /* Phone-owned texture data (64 KiB, EvenHub heap), allocated lazily on the first mode-18
      * write and released with the Faceclaw framebuffer lease. Protocol references
      * into this block are uint32 offsets (modes 18/19/20). */
     uint8_t *texture_cache;
@@ -277,7 +277,7 @@ typedef struct {
      * dispatcher across the BLE, bridge and EvenHub deferred tasks. --- */
     volatile cfw_message_probe message_probe; /* latest valid SID-f0 payload (debug overlay) */
     uint32_t image_mutex;                   /* stock mutex handle; created lazily */
-    uint8_t *framebuffer_shadow;            /* owned 640x480 packed 4bpp (heap 13); released by mode 11 */
+    uint8_t *framebuffer_shadow;            /* owned 640x480 packed 4bpp (EvenHub heap); released by mode 11 */
     cfw_message_stream message_streams[2];  /* index = BLE ingress lens bit - 1 */
     uint8_t  transport_pad0[4];
 } customCfwContext;

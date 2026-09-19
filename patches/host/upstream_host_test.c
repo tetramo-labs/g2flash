@@ -156,7 +156,7 @@ static void settings(void) {
     sends = 0;
     assert(settings_send_wrapper(1,9,buf,44) == 0 && sends == 2);
     const uint8_t *caps = field(sent[0],sent_len[0],100,&n);
-    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/32",13) == 0);
+    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/33",13) == 0);
     assert(sent_len[0] == 44 + 16 + 24 + 20); /* revision string, microphone and BLE status */
     assert(sent_len[0] + 2 <= 232); /* payload plus CRC stays in one BLE frame */
     assert(field(sent[0],sent_len[0],104,&n) && n == 21);

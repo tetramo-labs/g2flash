@@ -27,6 +27,15 @@ static cfw_message_stream *cfw_message_state(uint8_t origin) {
 #define CFW_STREAM_STATE cfw_message_state
 #define CFW_MESSAGE_MALLOC cfw_heap13_malloc
 #define CFW_MESSAGE_FREE cfw_heap13_free
+/* Revision 33: the 64 KiB decode buffer is transient and large; take it from
+ * the EvenHub heap with the shadow rather than from LVGL's heap 13 (see
+ * image_buffers.c). The record buffer and the inflater stay on heap 13. */
+#define CFW_DECODED_MALLOC cfw_malloc
+#define CFW_DECODED_FREE FW_FREE
+#endif
+#ifndef CFW_DECODED_MALLOC
+#define CFW_DECODED_MALLOC CFW_MESSAGE_MALLOC
+#define CFW_DECODED_FREE CFW_MESSAGE_FREE
 #endif
 
 #include "transport_compression.c"
@@ -135,7 +144,7 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
         stream->ack_capacity = stream->packet_capacity;
     valid = valid && stream->context_valid;
     if (stream->flags & CFW_MESSAGE_COMPRESSED) {
-        decoded = CFW_MESSAGE_MALLOC(CFW_MESSAGE_MAX + 1u);
+        decoded = CFW_DECODED_MALLOC(CFW_MESSAGE_MAX + 1u);
         valid = valid && stream->context_valid && decoded && cfw_inflate_message(stream, decoded, &size);
         data = decoded;
     }
@@ -148,7 +157,7 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
     }
     int result = cfw_message_reply(stream, here, origin,
         valid ? CFW_MESSAGE_ACK : CFW_MESSAGE_NACK, (uint16_t)size);
-    if (decoded) CFW_MESSAGE_FREE(decoded);
+    if (decoded) CFW_DECODED_FREE(decoded);
     if (stream->buffer) CFW_MESSAGE_FREE(stream->buffer);
     stream->buffer = 0;
     stream->size = stream->used = stream->length_bytes = 0;
