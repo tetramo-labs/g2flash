@@ -297,6 +297,9 @@ typedef struct {
      * by the display gate, so one scratch serves every caller. --- */
     uint8_t  shape_text_buf[136];           /* [x16][y16][color][len] + CFW_SHAPE_INLINE_MAX bytes */
     uint32_t shape_tokens[128];             /* CFW_SHAPE_INLINE_MAX code points */
+    /* Upstream Faceclaw/19: timestamped R1 (ring) SysEvent, sent before stock filtering. */
+    uint8_t  ring_notify_buf[25];
+    uint8_t  ring_pad0[3];
 } customCfwContext;
 
 
