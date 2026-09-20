@@ -53,7 +53,7 @@
 //
 // While the wake lease is held, the idle gestures the stock display thread
 // drops are reported through the same field with other event codes (see
-// faceclaw_idle_input_gate below); their last two bytes are the raw touch
+// faceclaw_idle_input_forward below); their last two bytes are the raw touch
 // source and 0 rather than a nonce:
 //
 //   field 102 bytes = ['F','C',version=1,event=2|3|4,source,0]
@@ -87,13 +87,13 @@ void ble_apply_control(const uint8_t *data, uint32_t len);
 unsigned ble_append_status(unsigned char *buf, unsigned len, unsigned capacity);
 typedef void (*display_start_fn)(unsigned app_id, void *arg, unsigned arg_len, void *cb);
 
-#define FW_SEND 0x0047eaa5 /* FUN_0047d808 | thumb bit */
-#define FW_NOTIFY_SEND 0x0047ebabu /* FUN_0047d90e | thumb bit */
-#define FW_PB_DECODE ((pb_decode_fn)0x0049ed3du)       /* FUN_0049da08 */
-#define FW_DISPLAY_START ((display_start_fn)0x0046a983u) /* FUN_0046a39e */
-#define FW_SIDE_ID ((lens_side_fn)0x0045d35du)         /* 1=right, 2=left */
+#define FW_SEND 0x0047ef05 /* FUN_0047d808 | thumb bit */
+#define FW_NOTIFY_SEND 0x0047f025u /* FUN_0047d90e | thumb bit */
+#define FW_PB_DECODE ((pb_decode_fn)0x0049f1a5u)       /* FUN_0049da08 */
+#define FW_DISPLAY_START ((display_start_fn)0x0046a673u) /* FUN_0046a39e */
+#define FW_SIDE_ID ((lens_side_fn)0x00465d4du)         /* 1=right, 2=left */
 typedef unsigned (*wear_status_fn)(void);
-#define FW_WEAR_STATUS ((wear_status_fn)0x004ad667u)   /* cached WearDetect status: 1=off, 2=on */
+#define FW_WEAR_STATUS ((wear_status_fn)0x004adddbu)   /* cached WearDetect status: 1=off, 2=on */
 
 #define FACECLAW_PROTO_VERSION 1u
 #define FACECLAW_CONTROL_FIELD 101u
@@ -238,37 +238,24 @@ static void faceclaw_send_gesture_event(customCfwContext *ctx, unsigned event, u
  * so unlike the double-tap wake there is no CLAIM/fallback handshake, and the
  * stock branch still runs (and frees the record) exactly as before.
  *
- * HOOK: 0x0045f39a `bl FUN_0045e6e8` (the mode check right after the idle gate)
- * is retargeted to faceclaw_idle_input_gate. r4 holds the input record there:
+ * 2.3.0 removed the old mode check. headup_gate_impl now calls this helper
+ * only when the stock idle gate returns 1, before the record is freed:
  * u16 raw source at +2 (0/1 = temple touchpads, 4 = ring), u32 gesture subtype
  * at +4 -- the same record the UI dispatcher reads (from +2) while an app is
- * running. The shim passes r4 as the C argument; the impl returns the stock
- * mode result unchanged and only forwards in the mode where the stock code
- * would have launched the dashboard on a double tap (mode != 1). */
-typedef int (*idle_mode_fn)(void);
-#define FW_IDLE_MODE ((idle_mode_fn)0x0045ea69u) /* FUN_0045e6e8 */
+ * running. The caller preserves the stock gate result and register state. */
 #define IDLE_GESTURE_TAP     0u
 #define IDLE_GESTURE_LONG    3u
 #define IDLE_GESTURE_RELEASE 0xeu
 
-int faceclaw_idle_input_gate_impl(const unsigned char *record) {
-    int mode = FW_IDLE_MODE();
-    if (mode == 1 || !record) return mode;
+void faceclaw_idle_input_forward(const unsigned char *record) {
+    if (!record) return;
     uint32_t subtype = (uint32_t)record[4] | ((uint32_t)record[5] << 8) |
                        ((uint32_t)record[6] << 16) | ((uint32_t)record[7] << 24);
     unsigned event = subtype == IDLE_GESTURE_TAP ? FACECLAW_EVENT_TAP
                    : subtype == IDLE_GESTURE_LONG ? FACECLAW_EVENT_LONG
                    : subtype == IDLE_GESTURE_RELEASE ? FACECLAW_EVENT_RELEASE : 0u;
-    if (event == 0u || !cfw_wake_lease_active()) return mode;
+    if (event == 0u || !cfw_wake_lease_active()) return;
     faceclaw_send_gesture_event(faceclaw_context_if_valid(), event, record[2]);
-    return mode;
-}
-
-/* r4 (the input record) is outside the stock no-argument ABI of the replaced
- * call; hand it over as the C argument and tail-branch so the stock caller's
- * return address and its use of r0 are untouched. */
-__attribute__((naked)) int faceclaw_idle_input_gate(void) {
-    __asm volatile("mov r0, r4\n\tb faceclaw_idle_input_gate_impl");
 }
 
 /* Send the stock OnboardingDataPackage EVENT/GLS_WEAR_STATUS wire shape
@@ -460,7 +447,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
         "ldmia sp, {r0-r3}\n"
         "mov r6, r0\n"
         "1:\n"
-        "movw r12, #0x79ff\n"   /* 0x004f79fe | Thumb bit; BX needs bit 0 set */
+        "movw r12, #0x919b\n"   /* 0x004f79fe | Thumb bit; BX needs bit 0 set */
         "movt r12, #0x004f\n"
         "bx r12\n"
         "2:\n"
@@ -470,6 +457,10 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   37 -> rebased onto stock G2 2.3.0.24 (upstream jimrandomh/g2flash main, which
+//         also brings ring touch-down forwarding as SysEvent 14). Every stock
+//         address was re-derived for 2.3.0.24; the fork keeps its own ANCS relay
+//         (fields 125/126) instead of upstream's raw-GATT relay.
 //   36 -> revision 35's display-task hand-off is gone: the stock display task
 //         has a 2 KiB stack and the scene dispatcher alone needs more, so every
 //         mode-37/38 message hung the lens. Shadow messages run on the receiving
@@ -576,7 +567,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/36";
+        static const char caps[] = "GLASSLYCFW/37";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

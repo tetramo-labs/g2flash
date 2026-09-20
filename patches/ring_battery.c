@@ -1,17 +1,17 @@
 #include <stdint.h>
 #include "protobuf.h"
 
-/* 2.2.9.22: SVC_RingBattery_Update (0x512cfc) receives the R1 report;
- * ux battery-sync calls the cache setter at 0x00515634. The dashboard's getter
- * 0x004aaf16 calls 0x00515652, reading 0x20077314 (level) and +1 (charging).
- * 0x00480260 is the dashboard's role-aware ring-connected predicate.
+/* 2.3.0.24: SVC_RingBattery_Update (0x517ac0) receives the R1 report;
+ * ux battery-sync calls the cache setter at 0x517b48. The dashboard's getter
+ * 0x4ab556 calls 0x517b66, reading 0x2007837e (level) and +1 (charging).
+ * 0x4806c8 is the dashboard's role-aware ring-connected predicate.
  * See docs/ring-battery.md for the disassembly evidence and wire contract. */
 #ifndef RING_BATTERY_CACHE
-#define RING_BATTERY_CACHE (*(volatile uint16_t *)0x20077314u)
-#define RING_BATTERY_CONNECTED() (((unsigned (*)(void))0x00480261u)())
-#define RING_BATTERY_SIDE() (((unsigned (*)(void))0x0045d35du)())
+#define RING_BATTERY_CACHE (*(volatile uint16_t *)0x2007837eu)
+#define RING_BATTERY_CONNECTED() (((unsigned (*)(void))0x004806c9u)())
+#define RING_BATTERY_SIDE() (((unsigned (*)(void))0x00465d4du)())
 #define RING_BATTERY_SEND(buf, len) \
-    (((int (*)(int, int, unsigned char *, unsigned))0x0047ebabu)(1, 9, buf, len))
+    (((int (*)(int, int, unsigned char *, unsigned))0x0047f025u)(1, 9, buf, len))
 #endif
 
 /* Field 106: ['R','B',1,flags,level]; flags: connected=1, valid=2,

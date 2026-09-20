@@ -18,9 +18,9 @@ _Static_assert(sizeof(cfw_zstream) == 0x38, "firmware zlib ABI");
 #define CFW_ZSTREAM cfw_zstream
 /* 2.2.10.10: inflateInit2_ / inflate / inflateEnd and the "1.1.4" version literal
  * (zlib_glue.c FW_INIT2 / FW_INFLATE / FW_END / ZLIB_VER carry the same values). */
-#define CFW_ZINIT(s) ((int (*)(void *, int, const char *, int))0x005d8e57u)(s, 15, (const char *)0x007bb6f8u, 0x38)
-#define CFW_ZINFLATE(s) ((int (*)(void *, int))0x005d8f25u)(s, 0)
-#define CFW_ZEND(s) ((int (*)(void *))0x005d8e1bu)(s)
+#define CFW_ZINIT(s) ((int (*)(void *, int, const char *, int))0x005dbfd7u)(s, 15, (const char *)0x007c5ee4u, 0x38)
+#define CFW_ZINFLATE(s) ((int (*)(void *, int))0x005dc0a5u)(s, 0)
+#define CFW_ZEND(s) ((int (*)(void *))0x005dbf9bu)(s)
 #endif
 
 __attribute__((used)) static void *cfw_zalloc(void *opaque, uint32_t items, uint32_t size) {

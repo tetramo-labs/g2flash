@@ -32,8 +32,8 @@
  * revision 31. A mode-6 keyframe seeds it. The bookkeeping
  * is anchored by a pointer in 1 KiB of SRAM explicitly
  * removed from the top of the stock primary TLSF arena by patch_compress.py. The
- * stock arena is [0x202728a8,0x2029f8a8); the patched size is 0x2cc00, reserving
- * [0x2029f4a8,0x2029f8a8) for CFW. Its first word holds the context pointer and
+ * stock arena is [0x2027299c,0x2029f8a8); the patched size is 0x2cc00, reserving
+ * [0x2029f59c,0x2029f8a8) for CFW. Its first word holds the context pointer and
  * its second holds a magic-guarded sticky allocation-failure diagnostic. This is
  * deliberately carved out rather than
  * inferred padding: 0x20003ffc, used before EVENCFW/11, is actually the +0 callback
@@ -306,14 +306,14 @@ typedef struct {
 #define CFW_NACK_CRC      4u   /* decoded CRC-16 mismatch */
 #define CFW_NACK_HANDLER  5u   /* image_dispatch refused the message (see worker_fail_mode) */
 
-#define CFW_CTX_SLOT  0x2029f4a8U    /* first word of the CFW-reserved TLSF tail */
-#define CFW_ALLOC_DIAG_SLOT 0x2029f4acU /* second word: magic | sticky failure bit */
+#define CFW_CTX_SLOT  0x2029f59cU    /* first word of the CFW-reserved TLSF tail */
+#define CFW_ALLOC_DIAG_SLOT 0x2029f5a0U /* second word: magic | sticky failure bit */
 #define CFW_ALLOC_DIAG_MAGIC 0xA110CA7EU
 
 // Marker used to validate that the CFW context pointer hasn't been clobbered.
 #define CFW_CTX_MAGIC 0xC0FFEE70U    /* revision 36: hand-off fields replaced by the shape text scratch */
 
-#define FW_MS_TICK  (*(volatile uint32_t *)0x20076de0U)  /* firmware 1 ms OS tick (SysTick chain) */
+#define FW_MS_TICK  (*(volatile uint32_t *)0x20077e4cU)  /* firmware 1 ms OS tick (SysTick chain) */
 
 static customCfwContext *peekCustomCfwContext(void);
 static customCfwContext *getCustomCfwContext(void);

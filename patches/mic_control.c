@@ -151,17 +151,17 @@ typedef void (*algo_process_fn)(const void *pcm, uint32_t length, int16_t *ssr, 
 typedef int  (*audio_notify_fn)(const void *buf, uint32_t len);
 typedef uint32_t (*lens_side_fn2)(void);
 
-#define FW_CODEC_MIC_INIT    ((mic_sel_fn)0x005ab8cbU)      /* production_codec_mic_func_init  */
-#define FW_CODEC_MIC_DEINIT  ((mic_void_fn)0x005ab97bU)     /* production_codec_mic_func_deinit */
-#define FW_PDM_MIC_INIT      ((mic_sel_fn)0x005ab9e1U)      /* production_pdm_mic_func_init    */
-#define FW_PDM_MIC_DEINIT    ((mic_void_fn)0x005aba37U)     /* production_pdm_mic_func_deinit  */
-#define FW_PCM_REGISTER      ((pcm_register_fn)0x00595f75U) /* SVC_PcmAppRegister   (ABI inferred) */
-#define FW_PCM_UNREGISTER    ((pcm_unregister_fn)0x005960cdU)/* SVC_PcmAppUnregister (ABI inferred) */
-#define FW_ALGO_PROCESS      ((algo_process_fn)0x005adf19U) /* service_algo_process (ABI inferred) */
-#define FW_AUDIO_NOTIFY      ((audio_notify_fn)0x0047ed09U) /* streaming notify     (ABI inferred) */
-/* _private_getCurrentRoleStatus getter (rebased to 0x0045D35D on 2.2.10.10 by the address
+#define FW_CODEC_MIC_INIT    ((mic_sel_fn)0x005aef33U)      /* production_codec_mic_func_init  */
+#define FW_CODEC_MIC_DEINIT  ((mic_void_fn)0x005aefe3U)     /* production_codec_mic_func_deinit */
+#define FW_PDM_MIC_INIT      ((mic_sel_fn)0x005af049U)      /* production_pdm_mic_func_init    */
+#define FW_PDM_MIC_DEINIT    ((mic_void_fn)0x005af09fU)     /* production_pdm_mic_func_deinit  */
+#define FW_PCM_REGISTER      ((pcm_register_fn)0x00599501U) /* SVC_PcmAppRegister   (ABI inferred) */
+#define FW_PCM_UNREGISTER    ((pcm_unregister_fn)0x00599659U)/* SVC_PcmAppUnregister (ABI inferred) */
+#define FW_ALGO_PROCESS      ((algo_process_fn)0x005b1581U) /* service_algo_process (ABI inferred) */
+#define FW_AUDIO_NOTIFY      ((audio_notify_fn)0x0047f17dU) /* streaming notify     (ABI inferred) */
+/* _private_getCurrentRoleStatus getter (rebased to 0x00465d4d on 2.2.10.10 by the address
  * profile): returns RAM byte set from GPIO156 at boot, 1 = RIGHT, 2 = LEFT, 3 = unknown. */
-#define FW_MIC_SIDE          ((lens_side_fn2)0x0045d35dU)   /* 1 = right temple, 2 = left temple */
+#define FW_MIC_SIDE          ((lens_side_fn2)0x00465d4dU)   /* 1 = right temple, 2 = left temple */
 
 /* 2.2.10.18: the code seam below is a 2.2.9.22 literal rebased by the address profile; the RAM cells are 2.2.10.10 addresses (RAM is not rebased).
  * thread.audio's own codec-control primitive: posts {id 0, param} to the audio thread.
@@ -171,7 +171,7 @@ typedef uint32_t (*lens_side_fn2)(void);
  * ABI (uint32 param) INFERRED from stock callers 0x5ab8ca (production init: `movs r0,#1;
  * bl 0x5565e0`) and 0x56ac64 (acquire). Gated behind MIC_FLAG_MGR_CTRL from the phone. */
 typedef void (*codec_ctrl_fn)(uint32_t param);
-#define FW_CODEC_CTRL        ((codec_ctrl_fn)0x005565e1U)   /* 2.2.9.22 literal; rebased to 0x005565E1 by the profile */
+#define FW_CODEC_CTRL        ((codec_ctrl_fn)0x005599cdU)   /* 2.2.9.22 literal; rebased to 0x005599cd by the profile */
 /* 2.2.10.28: the codec-prep message the stock service_audio_manager acquire (0x56ac64) posts
  * to the audio thread IMMEDIATELY BEFORE ctrl(1). Disassembly (2026-09-14): acquire does
  * `movs r0,#1; bl 0x556602` then `movs r0,#1; bl 0x5565e0` — 0x556602 posts codec message
@@ -181,23 +181,23 @@ typedef void (*codec_ctrl_fn)(uint32_t param);
  * DMA read its free-running output as full-scale noise (the array-capture root cause). Doing
  * prep(1) then ctrl(1) reproduces the exact clean bring-up the stock LEFT mic uses; it has no
  * side gate so it works on the RIGHT temple too. 2.2.9.22 literal 0x00556602 rebased to
- * 0x00556603 by the profile (0x556602 on 2.2.10.10, Thumb +1). ABI (uint32 subtype) inferred
+ * 0x005599ef by the profile (0x556602 on 2.2.10.10, Thumb +1). ABI (uint32 subtype) inferred
  * from the two stock callers 0x556602 (subtype 1) and 0x556624 (subtype 4). */
 typedef void (*codec_prep_fn)(uint32_t subtype);
-#define FW_CODEC_PREP        ((codec_prep_fn)0x00556603U)   /* 2.2.9.22 literal 0x00556602+1; rebased to 0x00556603 by the profile */
+#define FW_CODEC_PREP        ((codec_prep_fn)0x005599efU)   /* 2.2.9.22 literal 0x00556602+1; rebased to 0x005599ef by the profile */
 /* 2.2.10.46: the LEFT temple is the service_audio_manager hardware owner (role 2). Its own codec
  * power-cycle resets the shared audio-manager state and disables the codec/DMA, so after the cycle
  * the LEFT re-acquires through the manager to bring the codec + PDM + DMA back before it taps
  * (openCFW: first acquire resets shared state and enables PDM + codec; release when all slots 0
  * disables them). The RIGHT has no audio manager and never calls these. Rebased by the profile. */
 typedef void (*audm_fn)(uint32_t app_id);
-#define FW_AUDM_ACQUIRE      ((audm_fn)0x0056ac65U)   /* rebased to 0x0056AC65 */
+#define FW_AUDM_ACQUIRE      ((audm_fn)0x0056e155U)   /* rebased to 0x0056e155 */
 /* 2.2.10.52: the two halves of the stock ctrl(2) reboot, so the rail cycle can be staged over
  * RTOS timers instead of blocking the CONFIGURE thread for the codec's whole boot. */
 typedef void (*codec_pwr_step_fn)(void);
-#define FW_CODEC_PWR_OFF     ((codec_pwr_step_fn)0x005959b9U)    /* gx8002 power off; rebased to 0x005959B9 */
-#define FW_CODEC_PWR_ON      ((codec_pwr_step_fn)0x00595905U)    /* gx8002 power on;  rebased to 0x00595905 */
-#define FW_AUDM_RELEASE      ((audm_fn)0x0056adf3U)   /* rebased to 0x0056ADF3 */
+#define FW_CODEC_PWR_OFF     ((codec_pwr_step_fn)0x00598f45U)    /* gx8002 power off; rebased to 0x00598f45 */
+#define FW_CODEC_PWR_ON      ((codec_pwr_step_fn)0x00598e91U)    /* gx8002 power on;  rebased to 0x00598e91 */
+#define FW_AUDM_RELEASE      ((audm_fn)0x0056e2e7U)   /* rebased to 0x0056e2e7 */
 #define MIC_AUDM_APP_ID      7u
 /* RAM cells read by the codec watchdog (0x5564d2) and the codec-control handler (0x556404):
  *   CODEC_ON_FLAG   u8   1 while the on-path completed; the one-shot check only runs if set
@@ -205,41 +205,41 @@ typedef void (*codec_pwr_step_fn)(void);
  *   I2S_INIT / CODEC_POWER u8  driver state; SYNC_FLAG u8 master/slave boot-sync state
  *   APP_SLOTS       u8[8] service.audio.manager app table (LEFT only): release shuts the
  *                   hardware down when every slot is 0. Slot 7 is unused by stock apps (1..6). */
-#define CODEC_ON_FLAG        ((volatile uint8_t *)0x20077470U)
-#define DMA_FRAME_COUNT      ((volatile uint32_t *)0x20076e48U)
-#define CODEC_I2S_INIT       ((volatile uint8_t *)0x200773d7U)
-#define CODEC_POWER_ON       ((volatile uint8_t *)0x200773d6U)
-#define AUDIO_SYNC_FLAG      ((volatile uint8_t *)0x20077451U)
-#define AUDIO_APP_SLOTS      ((volatile uint8_t *)0x200763b8U)
+#define CODEC_ON_FLAG        ((volatile uint8_t *)0x200784e6U)
+#define DMA_FRAME_COUNT      ((volatile uint32_t *)0x20077eacU)
+#define CODEC_I2S_INIT       ((volatile uint8_t *)0x20078446U)
+#define CODEC_POWER_ON       ((volatile uint8_t *)0x20078445U)
+#define AUDIO_SYNC_FLAG      ((volatile uint8_t *)0x200784c6U)
+#define AUDIO_APP_SLOTS      ((volatile uint8_t *)0x200773f8U)
 #define AUDIO_APP_SLOT_CFW   7u
 /* 2.2.10.19: phone-link connection parameters as granted by the central. The slave
- * connection context pointer lives at 0x200765b8; the update-event handler (0x47cc08)
+ * connection context pointer lives at 0x200775f8; the update-event handler (0x47cc08)
  * stores the granted interval (+0x18, 1.25 ms units), latency (+0x1a), supervision
  * timeout (+0x1c, 10 ms units) and profile mode (+0x1e, 0xa3 fast / 0xa4 slow) there.
- * 0x200773a5 is the fast-mode-in-effect flag (set by the update-event handler when the
+ * 0x20078411 is the fast-mode-in-effect flag (set by the update-event handler when the
  * central grants the fast profile, cleared when it leaves it; 2.2.10.19-.23 mislabelled
  * it "central connected"). Read-only diagnostics. */
-#define BLE_CONN_CTX_PTR     ((volatile uint32_t *)0x200765b8U)
-#define BLE_FAST_MODE_FLAG   ((volatile uint8_t *)0x200773a5U)
+#define BLE_CONN_CTX_PTR     ((volatile uint32_t *)0x200775f8U)
+#define BLE_FAST_MODE_FLAG   ((volatile uint8_t *)0x20078411U)
 #ifndef BLE_MODE_FAST
 #define BLE_MODE_FAST        0xA3u   /* also defined by ble_link.c (same TU) */
 #endif
 /* 2.2.10.26: request-path state cells, read-only, appended to the 'ML' record so the phone
  * can see whether a fast request was made, deferred, capped or accepted:
- *   0x20004d7f last mode handed to _connectParamReq_impl (0xa3/0xa4)
- *   0x20004d80 mode currently accepted (written by the update-event handler 0x47cc08)
- *   0x20004d82 mode the 45 s rate limiter is holding for its retry timer
- *   0x20004d83 mode recorded by the request setter 0x47b922
- *   0x200773a4 fast-budget link bitmask (bit per link, cap 2; 0x47b61e/0x47b736)
- *   0x200773a7 rate-limiter pending flag (0x200765c0 its timestamp)
- *   0x200765c4 request counter (0x47b922 increments it on every request) */
-#define BLE_REQ_MODE_LAST    ((volatile uint8_t *)0x20004d7fU)
-#define BLE_MODE_ACCEPTED    ((volatile uint8_t *)0x20004d80U)
-#define BLE_MODE_DEFERRED    ((volatile uint8_t *)0x20004d82U)
-#define BLE_MODE_SETTER      ((volatile uint8_t *)0x20004d83U)
-#define BLE_FAST_BUDGET_MASK ((volatile uint8_t *)0x200773a4U)
-#define BLE_REQ_PENDING      ((volatile uint8_t *)0x200773a7U)
-#define BLE_REQ_COUNTER      ((volatile uint32_t *)0x200765c4U)
+ *   0x2000550b last mode handed to _connectParamReq_impl (0xa3/0xa4)
+ *   0x2000550c mode currently accepted (written by the update-event handler 0x47cc08)
+ *   0x2000550f mode the 45 s rate limiter is holding for its retry timer
+ *   0x2000550d mode recorded by the request setter 0x47b922
+ *   0x20078410 fast-budget link bitmask (bit per link, cap 2; 0x47b61e/0x47b736)
+ *   0x20078413 rate-limiter pending flag (0x2007760c its timestamp)
+ *   0x200775fc request counter (0x47b922 increments it on every request) */
+#define BLE_REQ_MODE_LAST    ((volatile uint8_t *)0x2000550bU)
+#define BLE_MODE_ACCEPTED    ((volatile uint8_t *)0x2000550cU)
+#define BLE_MODE_DEFERRED    ((volatile uint8_t *)0x2000550fU)
+#define BLE_MODE_SETTER      ((volatile uint8_t *)0x2000550dU)
+#define BLE_FAST_BUDGET_MASK ((volatile uint8_t *)0x20078410U)
+#define BLE_REQ_PENDING      ((volatile uint8_t *)0x20078413U)
+#define BLE_REQ_COUNTER      ((volatile uint32_t *)0x200775fcU)
 /* 2.2.10.24: request the fast connection profile ourselves. Disassembly (2026-09-14) of the
  * 2.2.10.10 connection-parameter path showed stock only asks the central for the fast
  * profile when (a) its streaming dispatcher (_dispatchMsgTxByBle 0x47e5de) is backpressured
@@ -253,19 +253,19 @@ typedef void (*codec_pwr_step_fn)(void);
  * exactly what the protobuf handler passes. It only touches flags and an app timer, so it
  * is safe from the settings-write context that runs mic_apply_control. ABI (uint32
  * auto_slow) inferred from the protobuf handler (`movs r0,#0; bl`) and the 60 s timer arm
- * behind a nonzero argument. 2.2.9.22 literal, rebased to 0x0047D429 by the profile. */
+ * behind a nonzero argument. 2.2.9.22 literal, rebased to 0x0047d6cd by the profile. */
 typedef void (*conn_speed_fn)(uint32_t auto_slow);
-#define FW_CONN_FAST         ((conn_speed_fn)0x0047d429U)
+#define FW_CONN_FAST         ((conn_speed_fn)0x0047d6cdU)
 /* 2.2.10.50: Cordio DmSetPhy(connId, allPhys, txPhys, rxPhys, phyOptions) and the phone
  * connection object (connId byte at +4; the stock conn-param request reads the same slot). */
 typedef void (*dm_set_phy_fn)(uint8_t conn_id, uint8_t all_phys, uint8_t tx_phys, uint8_t rx_phys, uint16_t phy_options);
-#define FW_DM_SET_PHY        ((dm_set_phy_fn)0x004ddb05U)
-#define PHONE_CONN_OBJ_PTR   ((volatile uint32_t *)0x20076594U)
+#define FW_DM_SET_PHY        ((dm_set_phy_fn)0x004df155U)
+#define PHONE_CONN_OBJ_PTR   ((volatile uint32_t *)0x200775d4U)
 /* 2.2.10.72: the stock ble_msgtx control block (queue handle at +0xc). The stock enqueue drops a
  * streaming message silently once the 150-entry queue is half full and still returns success,
  * so the relay could not tell it was losing frames under load. Read the FreeRTOS queue depth
  * (Queue_t.uxMessagesWaiting at +0x38) and skip a frame while the queue is near that watermark. */
-#define BLE_MSGTX_CTRL       ((volatile uint32_t *)0x20004780U)
+#define BLE_MSGTX_CTRL       ((volatile uint32_t *)0x20004f14U)
 #define BLE_QUEUE_DEPTH_OFF  0x38u
 #define RELAY_NOTIFY_MAX_DEPTH 48u
 static uint32_t ble_notify_queue_depth(void) {
@@ -282,8 +282,8 @@ static uint32_t ble_notify_queue_depth(void) {
  * u16 at +0xc). The controller clamps to what the central negotiated; a refusal is harmless. */
 typedef void (*hci_set_data_len_fn)(uint16_t handle, uint16_t tx_octets, uint16_t tx_time);
 typedef void *(*dm_conn_ccb_fn)(uint8_t conn_id);
-#define FW_HCI_LE_SET_DATA_LEN ((hci_set_data_len_fn)0x00543997U)
-#define FW_DM_CONN_CCB         ((dm_conn_ccb_fn)0x004cca83U)
+#define FW_HCI_LE_SET_DATA_LEN ((hci_set_data_len_fn)0x00546f53U)
+#define FW_DM_CONN_CCB         ((dm_conn_ccb_fn)0x004cd9a7U)
 #define DLE_TX_OCTETS          251u
 #define DLE_TX_TIME_US         2120u
 /* 2.2.10.51: stock common-data handler for inter-temple frame 0x010C (audio-manager peer
@@ -296,17 +296,17 @@ typedef void *(*dm_conn_ccb_fn)(uint8_t conn_id);
  * r2=length). The .51-.64 hook took (data, len) and so read the record id as its data pointer,
  * which is why relay control packets were never recognised (ctlRx stayed 0). */
 typedef uint32_t (*common_data_fn)(uint32_t record_id, const uint8_t *data, uint32_t len, void *entry);
-#define FW_AUDM_PEER_MSG_ORIG ((common_data_fn)0x0056b1f7U)
+#define FW_AUDM_PEER_MSG_ORIG ((common_data_fn)0x0056e6ebU)
 /* 2.2.10.62: inter-temple common-data send, as used by the audio manager's peer-sync sender
  * (2.2.10.10 0x46b0ac, 2.2.9.22 0x0046b0ac, identical bodies): send(record_id, buf, len, 0). */
 typedef int (*peer_send_fn)(uint32_t record_id, const void *buf, uint32_t len, uint32_t opt);
-#define FW_PEER_SEND         ((peer_send_fn)0x0046b0adU)
+#define FW_PEER_SEND         ((peer_send_fn)0x0046ad9dU)
 /* 2.2.10.62: stock LC3 wrapper SVC_Lc3EncodeMono (2.2.10.10 0x595d3c, 2.2.9.22 0x00595d3c):
  * encode(pcm, bytes, out, &written, ctx); ctx = {u8 fmt; u32 dt_us; u32 sr_hz; u32 nch; u32 ch;
  * u32 bitrate; void *enc; u8 mem[]} — the encoder is created lazily inside mem when enc == 0.
  * Interleaved input: bytes must be a whole number of frames of (samples * nch * 2). */
 typedef int (*lc3_encode_fn)(const void *pcm, uint32_t bytes, void *out, int32_t *written, void *ctx);
-#define FW_LC3_ENCODE_MONO   ((lc3_encode_fn)0x00595d3dU)
+#define FW_LC3_ENCODE_MONO   ((lc3_encode_fn)0x005992c9U)
 static int relay_on(const customCfwContext *ctx);
 static void relay_tap(customCfwContext *ctx, const void *pcm, uint32_t bytes);
 /* Future validation-gate seam, unused until its ABI is confirmed: on-device LC3

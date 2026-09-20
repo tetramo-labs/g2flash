@@ -84,6 +84,7 @@ static uint32_t ble_stock_classify(const void *conn) {
 #define BLE_DEFER_CANCEL(fn) ((void)(ble_cancels++, assert((fn) == BLE_REQUEST_CB)))
 #define BLE_DEFER_POST(fn, arg, ms) ((void)(ble_posts++, ble_post_fn = (fn), ble_post_arg = (arg), ble_post_ms = (ms)))
 #define BLE_REQUEST_CB 0x0047b475u
+#define BLE_REQ_GEN() 0u
 #define BLE_SEND_REQUEST(mode, conn) (ble_sends++, ble_sent_mode = (mode), ble_sent_conn = (conn), 0)
 #define BLE_CLASSIFY(conn) ble_stock_classify(conn)
 #define BLE_CONN() ble_conn_ptr
@@ -160,7 +161,7 @@ static void settings(void) {
     sends = 0;
     assert(settings_send_wrapper(1,9,buf,44) == 0 && sends == 2);
     const uint8_t *caps = field(sent[0],sent_len[0],100,&n);
-    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/36",13) == 0);
+    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/37",13) == 0);
     assert(sent_len[0] == 44 + 16 + 27 + 24 + 20); /* revision string, diagnostics, microphone and BLE status */
     assert(field(sent[0],sent_len[0],107,&n) && n == 24);
     assert(sent_len[0] + 2 <= 232); /* payload plus CRC stays in one BLE frame */

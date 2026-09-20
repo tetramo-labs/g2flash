@@ -5,13 +5,13 @@
 /* 2.2.10.10 addresses (upstream 2.2.9.22 in the comments), located by masked
  * instruction-window match and confirmed by decoding the hooked `bl`s; the
  * stock prologues are pinned by validate_message_transport_stock(). */
-#define CFW_STOCK_RECEIVE ((uint32_t (*)(uint8_t, const uint8_t *, uint16_t))0x004ce54du)        /* TPL_ReceivePacket, was 0x004cf3e9 */
-#define CFW_STOCK_BRIDGE_RECEIVE ((uint32_t (*)(uint32_t, const uint8_t *, uint32_t, uint16_t))0x0045d521u) /* was 0x0045d1a1 */
-#define CFW_LENS_SIDE ((uint32_t (*)(void))0x0045d35du)                                          /* FUN_0045cfdc */
+#define CFW_STOCK_RECEIVE ((uint32_t (*)(uint8_t, const uint8_t *, uint16_t))0x004cf471u)        /* TPL_ReceivePacket, was 0x004cf3e9 */
+#define CFW_STOCK_BRIDGE_RECEIVE ((uint32_t (*)(uint32_t, const uint8_t *, uint32_t, uint16_t))0x00465f11u) /* was 0x0045d1a1 */
+#define CFW_LENS_SIDE ((uint32_t (*)(void))0x00465d4du)                                          /* FUN_0045cfdc */
 /* Both APIs copy the supplied bytes into owned queue storage before returning.
  * SendDataToBoth also delivers a local echo; origin tags below suppress it. */
-#define CFW_BRIDGE_SEND ((int (*)(uint16_t, const uint8_t *, uint16_t, void *))0x0046ab71u)     /* was 0x0046a58d */
-#define CFW_BLE_SEND ((int (*)(uint8_t, uint8_t, const uint8_t *, uint16_t))0x0047e9c9u)        /* was 0x0047d72d */
+#define CFW_BRIDGE_SEND ((int (*)(uint16_t, const uint8_t *, uint16_t, void *))0x0046a861u)     /* was 0x0046a58d */
+#define CFW_BLE_SEND ((int (*)(uint8_t, uint8_t, const uint8_t *, uint16_t))0x0047ee0bu)        /* was 0x0047d72d */
 #endif
 
 #define CFW_BRIDGE_REQUEST 1u

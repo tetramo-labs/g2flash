@@ -14,29 +14,29 @@
  * STOCK MECHANISM (2.2.9.22, host side of the BLE stack)
  *
  *   _connectParamReq_impl(mode) @0x47c0e8   mode 0xa3 = fast, 0xa4 = slow
- *     movs r5,r0 ; bl 0x475814 (connection getter)          <- hook 1 (0x47c0ee)
+ *     movs r5,r0 ; bl 0x475400 (connection getter)          <- hook 1 (0x47c0ee)
  *     ... validation and a 45 s hold-off after the last update (0x47c2f4,
- *     flag 0x200773a7 / timestamp 0x200765c0) that reposts the deferred
+ *     flag 0x20078413 / timestamp 0x2007760c) that reposts the deferred
  *     request every 2 s (0x47c45e); 0x47c468: if mode == applied_mode
- *     (0x20004d82) the repost waits 10 s instead
+ *     (0x2000550f) the repost waits 10 s instead
  *     0x47c4aa: bl 0x47bbf6(conn)                             <- hook 3
  *               classifies the LIVE link: 0xa3 ("already fast") when the
  *               connection record's interval (+0x18, 1.25 ms units) is below
  *               25 and its latency (+0x1a) equals the stock fast profile's,
  *               else 0xa4. A 0xa3 verdict ends the request right there:
  *               nothing is sent, the profile slot is not touched.
- *     0x47c5a8: profile = (mode == 0xa3) ? 0x7b286c : 0x7b285c
- *     0x47c5b4: *(0x200765ec) = profile                       (pointer, not a copy)
+ *     0x47c5a8: profile = (mode == 0xa3) ? 0x7bcb9c : 0x7b285c
+ *     0x47c5b4: *(0x20077630) = profile                       (pointer, not a copy)
  *     0x47c6e0: bl 0x47b940(mode, conn)                       <- hook 2
- *               reads the profile through *(0x200765ec) and sends the request
- *     0x47c6e8: current_mode(0x20004d7f) = mode
+ *               reads the profile through *(0x20077630) and sends the request
+ *     0x47c6e8: current_mode(0x2000550b) = mode
  *
  *   Profile entry (16 bytes): +4 min, +6 max (1.25 ms units), +8 latency,
  *   +10 supervision timeout (10 ms units), +12 retries. Stock fast is
  *   15..30 ms / latency 0; stock slow is 45..90 ms / latency 4.
  *
  *   Requests are queued the same way the stock state machine does it:
- *   0x47b922(mode) records the wanted mode (0x20004d83), then the deferred
+ *   0x47b922(mode) records the wanted mode (0x2000550d), then the deferred
  *   call 0x47c710(mode) is (re)scheduled through 0x458ed2/0x458d82 and posts
  *   the message that reaches _connectParamReq_impl on the BLE task.
  *
@@ -63,7 +63,7 @@
  *   to both. Mode 11 cleanup returns the link to stock.
  *
  *   Field 128 also carries the interval and latency (+0x18/+0x1a) of the
- *   connection record the classifier sees (the object at 0x200765b8) after the
+ *   connection record the classifier sees (the object at 0x200775f8) after the
  *   profile, so the phone can see what the central actually granted rather
  *   than what was asked for.
  *
@@ -72,21 +72,25 @@
  */
 
 #ifndef BLE_LINK_HOST_TEST
-#define BLE_PROFILE_SLOT        (*(volatile const uint8_t **)0x200765ecu)
-#define BLE_STOCK_FAST_PROFILE  ((const uint8_t *)0x007b286cu)
-#define BLE_APPLIED_MODE        (*(volatile uint8_t *)0x20004d82u)
-#define BLE_WANTED_MODE         (*(volatile uint8_t *)0x20004d83u)
-#define BLE_SET_WANTED(mode)    (((void (*)(uint32_t))0x0047b923u)(mode))
-#define BLE_DEFER_CANCEL(fn)    (((void (*)(uint32_t))0x00458ed3u)(fn))
+#define BLE_PROFILE_SLOT        (*(volatile const uint8_t **)0x20077630u)
+#define BLE_STOCK_FAST_PROFILE  ((const uint8_t *)0x007bcb9cu)
+#define BLE_APPLIED_MODE        (*(volatile uint8_t *)0x2000550fu)
+#define BLE_WANTED_MODE         (*(volatile uint8_t *)0x2000550du)
+#define BLE_SET_WANTED(mode)    (((void (*)(uint32_t))0x0047b52fu)(mode))
+#define BLE_DEFER_CANCEL(fn)    (((void (*)(uint32_t))0x00458d87u)(fn))
 #define BLE_DEFER_POST(fn, arg, ms) \
-    (((void (*)(uint32_t, uint32_t, uint32_t))0x00458d83u)((fn), (arg), (ms)))
-#define BLE_REQUEST_CB          0x0047c711u
-#define BLE_SEND_REQUEST(mode, conn) (((int (*)(uint32_t, void *))0x0047b941u)((mode), (conn)))
-#define BLE_CLASSIFY(conn)      (((uint32_t (*)(const void *))0x0047bbf7u)(conn))
+    (((void (*)(uint32_t, uint32_t, uint32_t))0x00458be7u)((fn), (arg), (ms)))
+#define BLE_REQUEST_CB          0x0047c451u
+#define BLE_SEND_REQUEST(mode, conn) (((int (*)(uint32_t, void *))0x0047b5c1u)((mode), (conn)))
+#define BLE_CLASSIFY(conn)      (((uint32_t (*)(const void *))0x0047b891u)(conn))
+/* 2.3.0.24: every connection-parameter request carries a 16-bit generation; the
+ * wanted-mode setter bumps it and _connectParamReq_impl drops requests whose
+ * generation is stale, so the deferred callback argument is mode | gen << 8. */
+#define BLE_REQ_GEN()           (*(volatile uint16_t *)0x2007835cu)
 /* The connection record _connectParamReq_impl hands the classifier (0x47c4a4
- * loads it from 0x200765b8); the getter at 0x475814 returns a different object. */
-#define BLE_CONN()              (*(const uint8_t *volatile *)0x200765b8u)
-#define BLE_SIDE()              (((uint32_t (*)(void))0x0045d35du)())
+ * loads it from 0x200775f8); the getter at 0x475400 returns a different object. */
+#define BLE_CONN()              (*(const uint8_t *volatile *)0x200775f8u)
+#define BLE_SIDE()              (((uint32_t (*)(void))0x00465d4du)())
 #define BLE_PEEK()              peekCustomCfwContext()
 #define BLE_CTX()               getCustomCfwContext()
 #endif
@@ -151,8 +155,8 @@ __attribute__((used, noinline)) int ble_hook_request(uint32_t mode, void *conn) 
 }
 
 #ifndef BLE_LINK_HOST_TEST
-/* Hook 1: replaces `bl 0x475814` at 0x47c0ee, right after `movs r5,r0` saved
- * the mode. r5 is the caller's copy of the mode for the rest of the function,
+/* Hook 1: replaces `bl 0x475400` at 0x47bdb8, right after `movs r5,r0` saved
+ * the mode (2.3.0.24 also keeps the request generation in r7, untouched here). r5 is the caller's copy of the mode for the rest of the function,
  * so it is rewritten here and the connection getter is tail-called. */
 __attribute__((naked)) void ble_hook_mode(void) {
     __asm volatile(
@@ -161,7 +165,7 @@ __attribute__((naked)) void ble_hook_mode(void) {
         "bl ble_filter_mode\n"
         "mov r5, r0\n"
         "pop {r1-r3, lr}\n"
-        "movw r12, #0x5815\n"   /* 0x00475814 | Thumb bit */
+        "movw r12, #0x5401\n"   /* 0x00475400 | Thumb bit */
         "movt r12, #0x0047\n"
         "bx r12\n"
     );
@@ -174,9 +178,9 @@ __attribute__((naked)) void ble_hook_mode(void) {
  * mode is what changes); the stack rewrites it when the update completes. */
 static void ble_request(uint32_t mode) {
     BLE_APPLIED_MODE = 0;
-    BLE_SET_WANTED(mode);
+    BLE_SET_WANTED(mode);                       /* also bumps the request generation */
     BLE_DEFER_CANCEL(BLE_REQUEST_CB);
-    BLE_DEFER_POST(BLE_REQUEST_CB, mode, 0);
+    BLE_DEFER_POST(BLE_REQUEST_CB, mode | ((uint32_t)BLE_REQ_GEN() << 8), 0);
 }
 
 static void ble_set_fast(customCfwContext *ctx, int fast) {

@@ -38,7 +38,7 @@ __attribute__((noinline)) static void *cfw_malloc(uint32_t size) {
     return p;
 }
 
-/* Allocate from the independent 820 KiB TLSF arena at 0x201350a8. Go through
+/* Allocate from the independent 820 KiB TLSF arena at 0x2013519c. Go through
  * the stock generic heap coordinator rather than calling TLSF directly so the
  * descriptor's mutex, current-byte counter, and peak-byte counter stay valid. */
 __attribute__((noinline)) static void *cfw_heap13_malloc(uint32_t size) {

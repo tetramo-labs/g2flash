@@ -4,7 +4,7 @@
 #
 # Does everything needed to go from a fresh clone to a flashable image:
 #   1. creates a Python virtualenv (./venv) and installs the flasher's deps
-#   2. downloads the stock G2 2.2.10.10 firmware from Even's CDN
+#   2. downloads the stock G2 2.3.0.24 firmware from Even's CDN
 #   3. verifies the download hashes as expected (refuses to proceed otherwise)
 #   4. applies the committed patch set (patches/cfw_patches.json) to the stock
 #      image to produce the CFW image
@@ -40,14 +40,14 @@
 set -euo pipefail
 
 # ---- config (pinned) -------------------------------------------------------
-FW_URL="https://cdn.evenreal.co/firmware/5d2abaf086ad7cc4709cad679b7b24d1.bin"
-BASE="g2_2.2.10.10.bin"           # stock image (downloaded)
-OUT="g2_2.2.10.10_cfw.bin"        # patched image (produced)
+FW_URL="https://cdn.evenreal.co/firmware/1dbdf37b03a1169c384945e94d671371.bin"
+BASE="g2_2.3.0.24.bin"            # stock image (downloaded)
+OUT="g2_2.3.0.24_cfw.bin"         # patched image (produced)
 PATCH_JSON="patches/cfw_patches.json"   # committed patch set (applied to produce OUT)
 GEN="patches/gen_patches.py"      # clang: (re)generate the patch set
 APPLY="patches/apply_patches.py"  # no clang: replay the patch set onto BASE
-BASE_SHA256="927879057685a4147c6ba1fe33e5f3740d3cc48f87141a9039204d94516e65b8"
-OUT_SHA256="514496d3017db7d483ad434d3d382044a9a432869210228fd14a605acab240b4"
+BASE_SHA256="187ccf2bcc5c17a212106e8a376745511e8289c4232b634a7ea94b9bf25a0979"
+OUT_SHA256="5e2cc5ccf49980ee7c46406ef4651cb971ca50411bc44d72e7c27ed79cd76b8d"
 
 SKIP_VENV=0
 FORCE_DOWNLOAD=0
@@ -136,7 +136,7 @@ fi
 if [ "$FORCE_DOWNLOAD" -eq 0 ] && [ -f "$BASE" ] && [ "$(sha256 "$BASE")" = "$BASE_SHA256" ]; then
   say "stock image already present and verified ($BASE)"
 else
-  say "downloading stock G2 2.2.10.10 firmware from Even's CDN"
+  say "downloading stock G2 2.3.0.24 firmware from Even's CDN"
   download "$FW_URL" "$BASE"
   verify "$BASE" "$BASE_SHA256" "stock firmware"
   ok "stock image verified ($BASE)"
