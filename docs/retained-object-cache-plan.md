@@ -14,6 +14,11 @@ This is a shared cache for dashboard and miniapp objects, not a reserved dashboa
 bank. Cache hits still require on-device rasterization; this plan does not cache
 an additional full-panel framebuffer per view.
 
+Backwards compatibility is not a requirement. Replace the existing scene/cache
+wire formats and update firmware, both mobile clients, demos, and test tools
+together. Maintain one protocol implementation without old-format decoders,
+dual encoders, or older-firmware fallbacks.
+
 ## Current behavior and constraints
 
 - `patches/scene.h` defines one retained scene with 128 slots. Slot index also
@@ -24,6 +29,9 @@ an additional full-panel framebuffer per view.
 - `patches/texture_cache.c` exposes phone-owned bytes at raw offsets, not an
   object allocator. The firmware budget is 256 KiB. Glassly's current scene
   texture allocator uses only 64 KiB because shape references use 16-bit offsets.
+- Modes 18/19/20 and font-table glyph entries already use 32-bit offsets. The
+  remaining narrowing is in scene IMAGE/TEXT/TEXT_CACHED records and the mobile
+  scene encoders; increasing the mobile allocator limit alone is insufficient.
 - `patches/settings_ext.c` frees textures when the framebuffer lease expires or
   is released. Scene slots can survive that event with unusable texture references.
   Mode 11 cleanup releases both scene and texture storage.
@@ -55,11 +63,43 @@ Use current constants and executable code when specifying the new protocol.
    Switching views changes the active list without deleting inactive objects.
 4. Treat image, glyph/font, and path data as tracked dependencies. A resident
    object is drawable only when its entire dependency set is resident and valid.
-   New cached-object commands must not trust legacy raw texture offsets.
+   Cached-object commands resolve versioned asset references rather than trusting
+   phone-selected raw texture offsets.
 5. Preserve the last drawn object state on hide. Freeze hidden animations and
    retain their current geometry. Keep mutable animation state distinct from
    immutable content versions; the phone need not predict every timer tick.
    Reopening may atomically apply authoritative geometry/content updates.
+
+### 32-bit asset storage offsets
+
+Include removal of the 64 KiB scene addressing limit in this change, using the
+new object protocol rather than introducing an intermediate scene record format.
+
+- Use explicit `uint32_t` offsets for asset storage and dependency resolution.
+  Keep geometry and animation parameters at their existing widths; do not widen
+  every `p[]`, `from[]`, or `to[]` entry merely to carry asset addresses.
+- New scene objects reference versioned asset IDs. Firmware resolves those IDs
+  to 32-bit storage offsets before drawing. Physical relocation/reuse must not
+  change logical identity or allow an old reference to draw a replacement asset.
+- Cover image data, cached string data, font tables, and glyph data. Ensure the
+  new rendering path reaches the existing 32-bit texture helpers without passing
+  resolved addresses through 16-bit shape parameters.
+- Make the full existing 256 KiB texture region addressable. This removes the
+  phone's 64 KiB restriction without increasing the firmware's current texture
+  allocation. Usable payload capacity still depends on allocator overhead and
+  fragmentation; descriptor count and other memory budgets remain separate.
+- Replace the existing 16-bit asset-bearing scene layouts with the asset-reference
+  format. Remove the 64 KiB allocation restriction and obsolete encode/decode paths.
+- Update Swift and Kotlin encoding/model code to remove narrowing conversions
+  such as `UInt16(offset)` from the new path. Keep wire integer widths explicit;
+  a 32-bit asset ID is an identity, not an interchangeable raw storage offset.
+- Reuse internal 32-bit upload/draw helpers where they fit allocator ownership.
+  Replace externally addressed raw texture writes with allocator-owned asset
+  uploads. Upload chunk lengths can stay 16-bit; split larger data across bounded
+  transactions.
+- Validate ranges without overflow: check `offset <= capacity` and
+  `length <= capacity - offset` before access. Audit helper calls, dependency
+  tables, cache reports, and phone-side comparisons for truncation or sign errors.
 
 ### Bounded allocation and LRU
 
@@ -84,9 +124,11 @@ Use current constants and executable code when specifying the new protocol.
 
 ## Protocol design
 
-Assign wire codes and advertise a capability/revision during implementation.
-Keep modes 37/38 and existing clients working; define explicit invalidation or
-isolation when legacy commands and the new cache protocol are mixed.
+Assign wire codes and a new protocol revision during implementation. Replace
+existing scene/cache commands, including the old modes 37/38 layouts; retaining
+their numeric codes is optional. Update all producers and consumers together.
+Revision checking identifies a mismatched installation; it does not select a
+compatibility implementation or fall back to an old format.
 
 Proposed logical operations (names are illustrative):
 
@@ -150,7 +192,7 @@ by this low-latency fast path.
 - Queries neither update LRU order nor guarantee a future hit. SHOW must always
   validate references even after a successful background reconciliation.
 
-## Lifecycle and compatibility
+## Lifecycle and protocol transition
 
 - Normal dashboard hide retains objects. Restoring another app makes the old
   dashboard objects eligible for eviction rather than deleting them immediately.
@@ -162,7 +204,8 @@ by this low-latency fast path.
   implementation for uncertain lifecycle events.
 - App stop, replacement, changed settings, and account/session changes must
   invalidate phone replay eligibility independently of physical cache residency.
-- Capability-gate new commands. Older firmware uses the existing full-scene path.
+- Require the matching scene/cache protocol revision on the phone and glasses.
+  Remove older-firmware scene/cache fallbacks and obsolete format handling.
 - Keep changes in C extension code and phone code where possible. Avoid new
   firmware offsets, boot-time hooks, and allocations before custom messages.
 
@@ -179,12 +222,15 @@ by this low-latency fast path.
 
 ### 2. Implement firmware cache and host tests
 
-- Add bounded object/dependency storage and LRU bookkeeping behind the new
-  capability. Reuse the current rasterizer and owned panel shadow.
+- Replace the current scene/cache storage with bounded object/dependency storage
+  and LRU bookkeeping. Reuse the current rasterizer and owned panel shadow.
 - Add an active ordered reference list, pinning, and staged transactional changes.
+- Implement 32-bit asset offset resolution through the raster path and enforce
+  allocator ownership for asset uploads. Delete superseded record decoders.
 - Add cache state replies/journal and lifecycle invalidation under the existing
   serialization rules. Validate thread safety with lease expiry and scene timers.
-- Leave the legacy retained scene protocol operational.
+- Migrate affected demos, payload generators, replay tools, and test fixtures to
+  the replacement protocol; remove tests whose only purpose is old-format support.
 
 ### 3. Implement native phone mirrors
 
@@ -192,6 +238,8 @@ by this low-latency fast path.
   `G2` transport/lifecycle integration in `../glassly`.
 - Track confirmed and in-flight residency separately per lens. Retain IDs and
   versions across view switches; support selective uploads and bounded recovery.
+- Use the advertised full texture capacity and encode asset references without
+  16-bit narrowing. Delete superseded encoders and the 64 KiB fallback.
 - Separate panel contents, scene residency, texture residency, and timer warm-up
   state. Blanking the panel must not imply all four were reset.
 - Add background reconciliation without delaying active display work.
@@ -211,7 +259,7 @@ by this low-latency fast path.
 
 - Run applicable existing host/raster/scene/transport tests and firmware build
   checks, plus new cache tests, before hardware evaluation.
-- Test capability fallback and both mobile platforms. Use a controlled hardware
+- Test the coordinated protocol update on both mobile platforms. Use a controlled hardware
   rollout with the existing recovery/OTA path intact; this plan does not authorize
   flashing or release.
 - Document the final protocol, memory limits, lifecycle, and measured latency.
@@ -224,6 +272,14 @@ by this low-latency fast path.
   epochs, counter wrap, and delayed replies cannot draw the wrong object.
 - Dependencies: shared textures, partial uploads, texture loss, allocator
   exhaustion/fragmentation, path budgets, and replacement peak memory are handled.
+- Offset boundaries: render images, cached strings, and font tables/glyphs below,
+  at, and above `0xFFFF`/`0x10000`, including data spanning the boundary. Verify
+  valid allocations ending exactly at 256 KiB and reject out-of-range or wrapping
+  offsets/lengths, including `UINT32_MAX`. Cover Swift/Kotlin wire parity and the
+  firmware decoder. Reallocation above 64 KiB cannot revive stale asset IDs.
+- Protocol transition: firmware, Swift/Kotlin encoders, demos, and replay tools
+  agree on the replacement format. Revision mismatches are reported explicitly;
+  no old-format fallback or externally addressed texture-write path remains.
 - Transactions: a failed update/SHOW leaves the previous visible scene valid;
   staged objects are reclaimed after cancellation; rejected work cannot corrupt
   pinned dependencies. Inject allocation failure at each staging step.
