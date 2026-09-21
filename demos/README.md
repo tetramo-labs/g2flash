@@ -14,6 +14,14 @@ G2 glasses over Bluetooth and show off the [custom firmware](../) built by
   retained scene (mode 37) and lets the firmware animate it: eased glides and
   tweens of geometry, color and stroke width, driven by one small message per
   transition. Needs the `glassly-cfw` build, revision 26 or later.
+- **`card-demo.ts`** — card-on-top with depth on the object cache: content
+  objects stay on the list while a card painted after them slides in from the
+  right at a nearer depth, glides out, and pops back as pure references. Depth
+  on the G2 is stereo disparity, so the card's objects go out in two
+  lens-targeted SHOWs (x + d on the left lens, x − d on the right); the phone
+  SDK does the same per-lens split for elements with a `depth`.
+  `G2_DEPTH=10 bun card-demo.ts` picks the disparity. Revision 38 or later.
+
 - **`ble-mode.ts`** — switches the BLE link between the stock connection
   profile (default) and the 7.5 ms fast profile, or queries it:
   `bun ble-mode.ts [stock|fast|query]`. Sends sid 0x09 field 127 to both
