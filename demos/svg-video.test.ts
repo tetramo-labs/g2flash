@@ -16,12 +16,14 @@ test("video tile replacement clears old tiles and keeps frame timing", () => {
     {paths: []},
   ]};
   const steps = svgVideoSteps(video);
-  expect([...steps[0].payload.slice(0, 3)]).toEqual([37, 3, 0]);
-  expect([...steps[0].payload.slice(8, 12)]).toEqual([32, 0, 24, 0]);
-  expect([...steps[1].payload]).toEqual([37, 3, 0]);
-  expect(steps[0].waitMs).toBe(200);
-  expect([...steps[2].payload]).toEqual([38, 2]);
-  expect(svgVideoSteps(video, 1).length).toBe(2);
+  expect([...steps[0].payload]).toEqual([41, 0, 0, 0, 0, 0]);                 // reset both caches first
+  const frame0 = steps[1].payload;
+  expect([...frame0.slice(0, 8)]).toEqual([38, 0, 0, 0, 0, 1, 0, 2]);          // SHOW, PRESENT, bg 0, two embedded tiles
+  expect([...frame0.slice(8 + 9 + 4, 8 + 9 + 8)]).toEqual([32, 0, 24, 0]);    // first tile at (x + 0, y + 0)
+  expect([...steps[2].payload.slice(0, 10)]).toEqual([38, 0, 0, 0, 0, 1, 0, 0, 0, 0]);   // blank frame: an empty list
+  expect(steps[1].waitMs).toBe(200);
+  expect([...steps[3].payload]).toEqual([39, 0, 0, 0, 0, 1, 0]);              // hide, blanking the panel
+  expect(svgVideoSteps(video, 1).length).toBe(3);
   expect(() => svgVideoSteps({...video, fps: 0})).toThrow();
   expect(() => svgVideoSteps({...video, frames: [{paths: [{d: "M0 0Z", x: 0, y: 0, edges: 513}]}]})).toThrow();
 });

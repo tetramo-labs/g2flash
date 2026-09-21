@@ -104,25 +104,26 @@ int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum) 
  *                              PASSIVE STOP. Reports arrive as sid-0x09 field 105.
  *   17          -> [17][0] query cached R1 battery (no display change).
  *                              Master replies on sid-0x09 field 106; see ring_battery.c.
- *   18          -> [18][offset32][length16][data]... update the lazily allocated,
- *                              zero-initialized 64 KiB phone-owned texture cache.
- *                              Every entry is validated before any bytes are written.
- *   19          -> [19][offset32][x16][y16][options8] draw a cached image. At offset:
+ *   18          -> retired (rejected): raw texture writes are gone; assets are uploaded
+ *                              through the object cache (mode 37 PUT_ASSET).
+ *   19          -> [19][asset id32][x16][y16][options8] draw an image asset:
  *                              [width8][height8][4bpp RLE], decoded directly into
  *                              the full-panel shadow with clipping.
- *   20          -> [20][font-offset32][x16][y16][options8][strlen8][string]
+ *   20          -> [20][font asset id32][x16][y16][options8][strlen8][string]
  *                              draw cached glyphs. Options contains a low-nibble
  *                              top color plus transparency (bit 4) and inverse (bit 5).
- *                              The font is a 96-entry uint32 image-offset table for
- *                              characters 32..127. Bytes 1..31 adjust x by -10..20;
- *                              each glyph advances x by its cached image width.
+ *                              The font asset is a 96-entry uint32 table of glyph image
+ *                              offsets (relative to the asset) for characters 32..127.
+ *                              Bytes 1..31 adjust x by -10..20; each glyph advances x by
+ *                              its image width.
  *   36          -> [36][count8][shape record x count] draw vector shapes straight into
  *                              the shadow (shapes.h). Composable inside mode 8.
- *   37          -> [37][flags8][bg8][scene records]... patch the retained shape scene
- *                              (scene.c); flag bit 0 renders and presents the scene
- *                              from a CFW-owned 640x480 frame.
- *   38          -> [38][sub]... animation control: 0 freeze all, 1 [ms] frame period,
- *                              2 release the scene, 3 finish all and present.
+ *   37..41      -> retained object cache (scene.c): 37 PUT objects/assets, 38 SHOW an
+ *                              ordered list of (id, version) references with animation
+ *                              ops, 39 HIDE, 40 STATE query, 41 CONTROL (reset, drop,
+ *                              frame period). Each answers with a transport reply
+ *                              (kind 5) before its ACK; the formats are at the top of
+ *                              scene.c.
  *   anything else / too short  -> reject the custom message (NACK).
  *
  * The HIGH BIT of the mode byte is a "lenses differ" flag; most modes ignore it. For
@@ -132,8 +133,8 @@ int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum) 
  *
  * Custom modes 3/6/8/9/15/19/20/36 use a lazily allocated 153600-byte CFW
  * framebuffer shadow (image_buffers.c), independent of EvenHub containers; a
- * running scene (37/38) is stopped and its frame copied into the shadow before a
- * raster mode composes onto it (panel ownership, revision 27).
+ * running scene (38) is frozen and hidden before a raster mode composes onto
+ * the shadow (panel ownership, revision 27).
  *
  * RLE (modes 3 and 6 only): message bodies contain run-length encoded pixels.
  * Transport DEFLATE wraps the entire message (including mode and image headers).
@@ -290,8 +291,8 @@ static int is_shadow_message(const uint8_t *src, uint32_t srclen) {
     if (src == 0 || srclen == 0) return 0;
     uint8_t mode = src[0] & 0x7fu;
     return mode == 3 || mode == 6 || mode == 8 || mode == 9 || mode == 11 ||
-           mode == 15 || mode == 19 || mode == 20 || mode == 36 || mode == 37 ||
-           mode == 38;
+           mode == 15 || mode == 19 || mode == 20 || mode == 36 ||
+           (mode >= 37 && mode <= 41);
 }
 
 /* Commands can arrive on both BLE and bridge receive tasks. The osMutex entry
@@ -330,6 +331,9 @@ static int image_worker(const uint8_t *src, uint32_t size) {
      * back here. Control messages never take the gate. */
     int held = 0;
     if (is_shadow_message(src, size)) {
+        /* Revision 38: the object cache's heap allocations happen here, before
+         * the gate, never under it (see cfw_cache_prepare). */
+        cfw_cache_prepare(ctx, src[0] & 0x7fu);
         void *sem = FW_DISPLAY_SEM;
         if (sem != 0) {
             held = FW_SEM_TAKE(sem, FW_DISPLAY_GATE_TICKS) != 0;
@@ -562,12 +566,6 @@ static int image_dispatch(const uint8_t *src, uint32_t srclen, int present, cfw_
         return cfw_cleanup_session();
     }
 
-    if (mode == 18) {
-        /* Cache update is not a shadow mutation and therefore does not hold the
-         * display gate. The helper validates the entire entry list first. */
-        return cfw_texture_cache_update(src + 1, srclen - 1);
-    }
-
     /* Custom shadow geometry is deliberately independent from the EvenHub carrier. */
     uint32_t w = IMAGE_W;
     uint32_t h = IMAGE_H;
@@ -576,12 +574,9 @@ static int image_dispatch(const uint8_t *src, uint32_t srclen, int present, cfw_
         uint8_t *shadow = cfw_shadow_buffer();
         if (shadow == 0) return -1;
         int r;
-        if (mode == 19)
-            r = cfw_texture_draw_image(shadow, (w + 1u) >> 1, w, h,
-                                       src + 1, srclen - 1, rl);
-        else if (mode == 20)
-            r = cfw_texture_draw_string(shadow, (w + 1u) >> 1, w, h,
-                                        src + 1, srclen - 1, rl);
+        if (mode == 19 || mode == 20)
+            r = cfw_cache_immediate(getCustomCfwContext(), mode, shadow, (w + 1u) >> 1, w, h,
+                                    src + 1, srclen - 1, rl);
         else if (mode == 15)
             r = cfw_builtin_draw_string(shadow, (w + 1u) >> 1, w, h,
                                         src + 1, srclen - 1, rl);
@@ -593,9 +588,9 @@ static int image_dispatch(const uint8_t *src, uint32_t srclen, int present, cfw_
         return 0;
     }
 
-    if (mode == 37 || mode == 38) {
-        /* Retained scene: renders into and presents its own CFW-owned frame at top
-         * level; inside a mode-8 bundle a COMMIT renders into the shadow instead. */
+    if (mode >= 37 && mode <= 41) {
+        /* Object cache: a SHOW/HIDE presents from the owned shadow at top level;
+         * inside a mode-8 bundle it renders into the shadow the bundle presents. */
         return cfw_scene_dispatch(getCustomCfwContext(), mode, src + 1, srclen - 1,
                                   present, rl);
     }
@@ -620,7 +615,7 @@ static int image_dispatch(const uint8_t *src, uint32_t srclen, int present, cfw_
             uint8_t submode = src[pos] & 0x7fu;
             if (submode != 3 && submode != 6 && submode != 9 &&
                 submode != 15 && submode != 19 && submode != 20 &&
-                submode != 36 && submode != 37 && submode != 38) return -1;
+                submode != 36 && (submode < 37 || submode > 41)) return -1;
             if (image_dispatch(src + pos, seglen, 0, rl) != 0) return -1;
             pos += seglen;
         }
@@ -827,8 +822,8 @@ static int cfw_cleanup_session(void) {
     ctx->direct_pending = 0;
     ctx->direct_shadow = 0;
     ctx->direct_failed = 0;
-    cfw_texture_cache_release(ctx);
-    cfw_scene_release(ctx);
+    ctx->cache_lost = 0;
+    cfw_scene_release(ctx);                   /* descriptors, asset store, new epoch */
     cfw_shadow_release(ctx);                  /* owned 640x480 shadow (image_buffers.c) */
     ctx->shadow_stale = 0;
     if (ctx->scene_timer) {
@@ -906,6 +901,9 @@ static void copy_panel_rows(uint8_t *fb, const uint8_t *shadow, uint32_t top, ui
 void display_copy_hook(void) {
     customCfwContext *ctx = peekCustomCfwContext();
     if (ctx == 0 || !ctx->direct_pending || ctx->direct_shadow == 0) {
+        /* The display task owns the gate here, so a cache lost with the lease
+         * can be released without racing a handler or an animation frame. */
+        if (ctx && ctx->cache_lost && ctx->magic == CFW_CTX_MAGIC) cfw_cache_reap(ctx);
         if (ctx && ctx->direct_active) {
             uint32_t deadline = ctx->direct_lease_deadline;
             if (deadline != 0 && (int32_t)(deadline - FW_MS_TICK) > 0)

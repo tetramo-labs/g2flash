@@ -1,6 +1,7 @@
 import {GifReader} from "omggif";
 import {mkdir} from "node:fs/promises";
 import {contourSvg, path, scene, svgPath, traceBitmap} from "./vector-protocol";
+import {control, hide} from "./object-cache";
 import type {VectorStep} from "./vector-cases";
 
 /** Offline contour compiler. Exact contours at each sampled resolution; reduce
@@ -10,7 +11,7 @@ export async function badAppleVectors(gifFile: string, frames = 300, svgOut?: st
   const rgba=new Uint8Array(gif.width*gif.height*4);
   const stride=Math.max(1,Math.round(100/Math.max(1,gif.frameInfo(0).delay)/10));
   const count=Math.min(frames,Math.floor(gif.numFrames()/stride));
-  const steps: VectorStep[]=[];
+  const steps: VectorStep[]=[{name:"reset",payload:control.reset(),waitMs:0}];
   const histogram=new Map<number,number>();
   if(svgOut)await mkdir(svgOut,{recursive:true});
   for(let f=0;f<count;f++) {
@@ -41,14 +42,14 @@ export async function badAppleVectors(gifFile: string, frames = 300, svgOut?: st
       const index=seed%sampled.length,x=index%width,y=Math.floor(index/width),scale=576/width;
       probes.push([Math.floor(32+(x+0.5)*scale),Math.floor(96+(y+0.5)*scale),sampled[index]?15:0]);
     }
-    steps.push({name:`bad-apple-${f}-edges-${edges}`,payload:scene([path(0,commands,"evenodd",32,96)],f===0),waitMs:100,
+    steps.push({name:`bad-apple-${f}-edges-${edges}`,payload:scene([path(0,commands,"evenodd",32,96)]),waitMs:100,
       probes,snapshot:[30,60,120,180,240,299].includes(f)});
     if(svgOut)await Bun.write(`${svgOut}/${String(f).padStart(4,"0")}.svg`,
       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 288"><rect width="576" height="288" fill="black"/><path fill="white" fill-rule="evenodd" d="${d}"/></svg>\n`);
   }
-  const sizes=steps.map(s=>s.payload.length).sort((a,b)=>a-b);
+  const sizes=steps.slice(1,-1).map(s=>s.payload.length).sort((a,b)=>a-b);
   console.log(`[vectors] ${count} frames; payload mean ${Math.round(sizes.reduce((a,b)=>a+b,0)/Math.max(1,count))} B, p95 ${sizes[Math.floor(count*0.95)]??0} B, max ${sizes.at(-1)??0} B`);
   console.log(`[vectors] source-width/frame-count: ${[...histogram].map(([w,n])=>`${w}/${n}`).join(", ")}`);
-  steps.push({name:"release",payload:Uint8Array.from([38,2]),waitMs:0});
+  steps.push({name:"release",payload:hide(),waitMs:0});
   return steps;
 }

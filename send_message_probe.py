@@ -65,6 +65,20 @@ def make_packets(messages, mtu=23, sequence=7, options=3, *, max_write=None):
             for index, offset in enumerate(range(0, len(stream), capacity))]
 
 
+def parse_cache_reply(frame):
+    """Return (stream, ordinal, lens, mode, request, status, epoch, revision, extra) for a
+    GLASSLYCFW/38 object-cache reply (kind 5), or None."""
+    if (len(frame) < 25 or frame[:2] != b'\xaa\x12' or frame[3] != len(frame) - 8
+            or frame[4:8] != bytes((1, 1, 0xf0, 0))):
+        return None
+    body = frame[8:-2]
+    if crc16(body) != frame[-2:] or body[0] != 5 or body[4] not in (1, 2):
+        return None
+    return (body[1], int.from_bytes(body[2:4], 'little'), body[4], body[5],
+            int.from_bytes(body[6:8], 'little'), body[8], int.from_bytes(body[9:11], 'little'),
+            int.from_bytes(body[11:15], 'little'), bytes(body[15:]))
+
+
 def parse_acks(frame):
     """Return explicit (stream, ordinal, lens, size, CRC) entries, or None.
 
@@ -135,6 +149,13 @@ def send_probe(transport, messages, mtu=23, ack_timeout=10, sequence=7, options=
 
     def receive_ack(characteristic, frame):
         if characteristic.lower() != CTRL[2]:
+            return
+        reply = parse_cache_reply(frame)
+        if reply is not None:
+            stream_id, message_id, lens, mode, request, status, epoch, revision, extra = reply
+            name = 'left' if lens == 1 else 'right'
+            print(f"  {name} cache reply: stream {stream_id}, message {message_id}, mode {mode}, "
+                  f"request {request}, status {status}, epoch {epoch}, revision {revision}, extra {extra.hex()}")
             return
         acks = parse_acks(frame)
         if acks is None:

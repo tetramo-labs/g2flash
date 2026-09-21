@@ -20,9 +20,14 @@ G2 glasses over Bluetooth and show off the [custom firmware](../) built by
   lenses and prints the field-128 status from each reply.
 - **`shapes-suite.ts`** — the glassly example-miniapp shapes test suite (every
   `render()` shape element plus the transition contract, 43 cases) run straight
-  against the glasses. The phone's render pipeline and its mode-37 scene encoder
+  against the glasses. The phone's render pipeline and its object-cache encoder
   are ported into the script, so it prints the same pass/fail verdicts as the
-  miniapp's tester page, plus per-case ack and render timings.
+  miniapp's tester page, plus per-case ack and render timings and how many
+  objects the glasses hold.
+- **`object-cache.ts`** — the reference encoder for the revision-38 object cache
+  (modes 37-41): shape records, PUT/SHOW/HIDE/STATE/CONTROL messages, ops,
+  reply parsing. `cfw-transport.ts` adds `CacheLink`, which owns the session
+  epoch and turns the kind-5 replies into results.
 - **`bad-apple-tests.ts`** — the example miniapp's three Bad Apple tests
   (`--text`, `--bitmap`, `--shapes`): the same clip played the three ways a
   miniapp can animate, sent as what the phone puts on the air for each — the
@@ -105,7 +110,7 @@ G2_TRACE=1 bun shapes-suite.ts         # per-frame op counts, bytes, ack times
 G2_HOLD_SCALE=0.5 G2_OUT=results.json bun shapes-suite.ts
 ```
 
-Each case renders its frames in order, one mode-37 patch per frame, then judges
+Each case renders its frames in order, one SHOW per frame, then judges
 the last frame's `dropped` / `degraded` report against the case's expectation
 for a 576×288 canvas that draws every shape and animates. `G2_OUT` writes the
 per-case results as JSON. The verdicts come from the ported phone-side logic;
@@ -123,30 +128,35 @@ animation.
 
 Every TWEEN carries the element's full tweenable geometry (plus color and stroke
 width), not only the parameters that changed: the firmware takes an unmasked
-parameter's end value from the slot's current, possibly mid-flight, value, so a
+parameter's end value from the object's current, possibly mid-flight, value, so a
 partial mask would freeze that axis when a second move lands during the first.
-The phone's `G2CfwScene.swift` masks changed parameters only; that is on the
-list for the glassly audit.
+
+Objects are the unit of caching: every element slot has a stable id derived
+from the element id, and a frame is one SHOW of (id, version) references plus
+the PUTs for new or changed definitions and the TWEENs for animated changes.
+An element that leaves a frame stays on the glasses; when it comes back it is
+a pure reference (`G2_TRACE=1` prints the per-frame put/cached/tween counts).
+A blank frame is a HIDE; objects hidden mid-tween are re-snapped when shown
+again.
 
 ### Replaying the suite through the firmware code
 
 `--dump` writes every payload, the wait between them and a label per case;
-`patches/host/scene_replay_host.c` pushes that stream through the real
-`scene.c` on the host, ticking the animation timer through each wait, and
-reports rejected messages, every tween's start/end/frames and how many ticks it
-got before the next message, and any slot still animating when the next case
-starts.
+`patches/host/vector_host_test.c` pushes that stream through the real
+`scene.c` on the host (filling in the session epoch and request ids the way
+the link does), ticking the animation timer through each wait, and reports
+every message the firmware refuses.
 
 ```bash
 bun shapes-suite.ts --dump /tmp/suite.bin
-cd ../patches/host
-cc -std=c11 -O1 -Wall -Wno-unused-function -I.. -o /tmp/scene_replay scene_replay_host.c
-/tmp/scene_replay /tmp/suite.bin
+cd ../..
+cc -std=c11 -O1 -Wall -Wno-unused-function -Ipatches -o /tmp/vector_host_test patches/host/vector_host_test.c
+/tmp/vector_host_test /tmp/out /tmp/suite.bin
 ```
 
 ## Bad Apple tests
 
-For revision-21 filled SVG paths and animated rotation, use:
+For filled SVG paths and animated rotation on the object cache, use:
 
 ```sh
 bun run test:vectors                         # offline C + TS + video/pixel suite

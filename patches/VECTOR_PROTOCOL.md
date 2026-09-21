@@ -1,33 +1,35 @@
-# Revision 21: filled paths and rotation
+# Filled paths and rotation
 
-Revision 24 moves the graphics transport from modes 16/17/18 to **36/37/38**
-to avoid upstream sensor commands. The path and rotation operations introduced
-in revision 21 keep their record formats and opcodes (8 and 9). Check
-`GLASSLYCFW/24` or later before sending these packets (revision 25 drops the
-feature tokens, so check the revision number only).
-Modes 37/38 remain standalone messages, not mode-8 batch children.
+Revision 38 carries paths and rotation on the retained object cache (modes
+37–41, `scene.c`): a path is a shape record of type 18 defining an object, and
+rotation is an op of a mode-38 SHOW addressed by object id. Check
+`GLASSLYCFW/38` or later before sending these packets. Cache messages are
+also accepted inside mode-8 bundles.
 
 The glasses render retained vector paths themselves. The wire input is compiled
 geometry, not SVG XML. `demos/vector-protocol.ts` converts the supported SVG path
 syntax into this format, independently of Glassly/mobile.
 
-## SET_PATH (operation 8)
+## PATH records (shape type 18)
 
-Inside `[37][scene flags][background][operations...]`:
+Revision 38: paths are objects of the retained object cache (`scene.c`). A path
+is defined by a PUT_OBJECT entry (inside a mode-37 PUT or embedded in a mode-38
+SHOW) whose shape record is:
 
 ```text
-[8:u8][slot:u8][visible:u8][color:u8][fill-rule:u8]
+[18:u8][flags:u8][color:u8][fill-rule:u8]
 [x:i16][y:i16][scale:u16][length:u16][commands:length bytes]
 ```
 
-All multibyte values are little endian. Slot is 0–127. Visible is 0 or 1;
-color is 0–15. Fill rule 0 is nonzero winding, 1 is even-odd. The complete set
-of contours in a path is filled together, so holes and overlapping contours
-follow the selected rule. Paths paint in the same slot order as other shapes.
+All multibyte values are little endian. Flags bit 0 is visible; color is 0–15.
+Fill rule 0 is nonzero winding, 1 is even-odd. The complete set of contours in
+a path is filled together, so holes and overlapping contours follow the
+selected rule. Paths paint in the order of the SHOW's reference list like
+every other object.
 
 `x,y` translate the asset in panel pixels. Scale is uniform Q8: 256 means 1×,
 512 means 2×; valid values are 0–2048 (0×–8×). Scaling acts around the asset's
-local origin, then translation is applied, then the slot's rotation.
+local origin, then translation is applied, then the object's rotation.
 
 Commands use signed **Q4 coordinates** (1/16 pixel, int16; -2048 through
 2047.9375), in the asset's local coordinate space:
@@ -48,22 +50,22 @@ it is not adaptive screen-space tessellation during animation. No antialiasing
 is applied. Paths currently support solid fills, not strokes, gradients,
 filters, clipping paths, embedded SVG animation or arbitrary path morphing.
 
-Limits, enforced before applying the scene:
+Limits, enforced before applying the message:
 
 - 8,192 command bytes and 1,024 commands per path.
 - 512 flattened edges per path; subdivision depth at most 8.
-- 4,096 retained edges across the final scene, plus at most 4,096 staged edges
-  per incoming message. Each edge occupies 16 bytes.
-- One SET_PATH per slot per message. A message may replace several distinct
-  path slots atomically. The all-slots index 255 is not valid for SET_PATH.
+- 4,096 edges across the paths on the active list of a SHOW. Each edge occupies
+  16 bytes of the asset store as a private asset of its object.
+- One definition per object id per message. A message may define several
+  distinct path objects atomically.
 
-SET_PATH replaces that slot, stops its old animations and resets its rotation
-to zero. Geometry is immutable until another SET_PATH replaces it. The path is
-represented internally as shape type 18; type 18 cannot be created by an
-ordinary SET or immediate mode-36 shape record.
+A new version of a path object replaces it (the previous edges are freed),
+stops its animations and resets its rotation to zero. Geometry is immutable
+until another version replaces it. Type 18 cannot be drawn by an immediate
+mode-36 record.
 
-Paths use the existing MOVE/GLIDE, SHOW, DELETE, FREEZE and FINISH operations.
-For their legacy TWEEN operation, only these mask bits are valid:
+Paths use the SHOW ops MOVE/GLIDE, VISIBLE, FREEZE and FINISH like other
+objects. For TWEEN, only these mask bits are valid:
 
 | Bit | Parameter |
 | --- | --- |
@@ -73,16 +75,17 @@ For their legacy TWEEN operation, only these mask bits are valid:
 | 8 | color, 0–15 |
 
 Geometry/color tweens keep the existing frame-count semantics. A path's
-control points do not morph when a new asset replaces it.
+control points do not morph when a new version replaces it.
 
-## ROTATE (operation 9)
+## ROTATE (SHOW op 9)
 
 ```text
-[9:u8][slot:u8][angle:i32][pivot-x:i16][pivot-y:i16]
+[9:u8][object id:u32][angle:i32][pivot-x:i16][pivot-y:i16]
 [duration-ms:u16][curve-x1:u8][curve-y1:u8][curve-x2:u8][curve-y2:u8]
 ```
 
-This is a 16-byte operation. Angles are **degrees × 256**, positive clockwise.
+This is a 19-byte operation inside a mode-38 SHOW; its target must be on the
+SHOW's active list. Angles are **degrees × 256**, positive clockwise.
 Allowed targets are -36,000 through +36,000 degrees (100 turns either way).
 Angles remain unwrapped during interpolation: 0→360 is one complete turn;
 350→10 goes backward 340 degrees. For a short forward turn, send 370 instead
@@ -91,7 +94,7 @@ of 10. Exact full-turn angles use the original primitive rasterizer.
 The pivot is explicit, in **panel pixels**, and stays fixed when geometry moves.
 For a moving-center rotation, update the pivot along with the application's
 position targets; for an orbit, leave the pivot fixed. Pivot changes apply
-immediately; the pivot itself does not tween. Use the same pivot for every slot
+immediately; the pivot itself does not tween. Use the same pivot for every object
 when rotating a multipart SVG or a group of shapes together.
 
 Duration 0 applies immediately; 1–65,535 animates over that many milliseconds.
@@ -108,37 +111,32 @@ channels; ordinary SET/SET_PATH/DELETE reset both. FREEZE's existing display
 commit semantics still apply. Under framebuffer/timer allocation failure,
 animations snap to their final state for static presentation.
 
-Supported targets are existing geometric shapes 1–13 and retained paths 18.
-Rotation of an empty slot, image, cached text or inline text is rejected before
-any operation in that message applies. Slot 255 is not accepted. Text/image
+Supported targets are geometric shapes 1–13 and paths 18. Rotation of an
+absent object, image, cached text or inline text refuses the whole message
+before any operation in it applies. The all-objects id is not accepted. Text/image
 sampling remains axis-aligned. Transformed geometry is generated from the
 original coordinates each draw to avoid accumulating rounding error.
 
 ## Transaction and lifetime
 
 The entire message's structure, path geometry, target types, reserved fields
-and final edge budget are validated before the scene changes. All replacement
-paths are allocated first. Failure frees staging allocations and retains the
-previous slots, colors, background, animations and displayed frame. Lazy scene
-or scratch workspace allocation can remain cached after a rejected message.
+and the active edge budget are validated before the cache changes. Staged
+definitions are allocated first; failure frees them and retains the previous
+objects, background, animations and displayed frame (the reply names the
+cause). The scratch workspace can remain cached after a rejected message.
 
-Successful replacement happens under the display gate. The previous path is
-freed only when the replacement is ready; the display task cannot see an
-incomplete upload. This also permits CLEAR plus replacements in one message.
+Replacement happens under the display gate. The previous edges are freed only
+when the replacement is committed; the display task cannot see an incomplete
+upload. Objects that leave the active list stay cached and are evicted least
+recently used when room is needed; RESET (mode 41) and mode 11 cleanup free
+everything. Scratch workspace is about 10.5 KiB on heap 13, allocated on first
+path/rotation use. The cache descriptors use about 38 KiB of heap 13; edges,
+images, fonts and strings share the 256 KiB store on the EvenHub heap.
 
-DELETE, CLEAR, SET replacement, SET_PATH replacement, mode 38 release and mode
-11 cleanup free the paths they supersede. Scratch workspace is about 10.5 KiB,
-allocated on first path/rotation use, and freed on scene release. The extended
-slot table plus inline text uses about 28 KiB; the framebuffer remains 150 KiB.
-The maximum live plus staged edge storage is 128 KiB, in addition to those
-allocations and any texture cache. Actual available heap is hardware-dependent.
-
-Framebuffer lease expiry/release stops animation and rejects new scene writes;
-as with the previous retained scene implementation, scene storage is kept
-until explicit mode 38 release or mode 11 cleanup. Lease callbacks do not own
-the display gate and must not free buffers the display task may still use.
-Clients should release the scene before releasing the lease, and replay the
-scene after reconnecting rather than assuming an old baseline.
+Framebuffer lease expiry/release stops animation, marks the cache lost and
+changes its epoch; the memory is released under the display gate afterwards.
+Clients learn about it from the STALE reply to their next cache message, reset
+the cache and rebuild rather than assuming an old baseline.
 
 ## Standalone validation and demos
 
@@ -187,7 +185,7 @@ GIF's existing video-style compositing assumptions and samples 10 fps, up to
 tracing or path morphing. It starts at 144×72 sampling and reduces resolution
 only if necessary to meet the edge budget; it reports that choice. Live playback
 skips late frames instead of building a queue. The compiled payload retains one
-path slot per frame. Representative frames and 24 source-pixel probes per frame
+path object per frame. Representative frames and 24 source-pixel probes per frame
 are replayed on the host. The included 300 frames all fit at 144×72.
 
 The dump format extends the old suite replay format: kind 1 + u16 length + raw

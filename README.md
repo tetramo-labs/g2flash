@@ -54,8 +54,8 @@ layout; modes 3/6 carry plain RLE. All commands dispatch through one owned
 to exercise the path (the default payload is a mode-7 no-op and the debug
 overlay shows the last received size and CRC).
 
-Mode 11 cleanup releases the shadow, the texture cache and the scene once
-pending display refreshes have finished.
+Mode 11 cleanup releases the shadow and the object cache (descriptors and
+asset store) once pending display refreshes have finished.
 
 Image traffic is compressed with
 zlib+RLE. Screen contents can be up to 640x480 (larger than the screen area
@@ -68,50 +68,58 @@ window are kept alive for the whole session (reset per frame) instead of being
 allocated and freed on every update. Because this mode
 writes directly to the framebuffer without going through EvenHub's
 screen-update functions, stock containers do not contribute visible content
-while the direct framebuffer lease is held. A lease-scoped 256 KiB texture cache lets the phone upload RLE
-icons and glyphs once, then draw cached images and strings with small update
-messages. The cache is allocated on the EvenHub heap and zeroed on its first
-write and released when the Faceclaw framebuffer lease ends. Modes 18/19/20
-(upstream `Faceclaw/13`) take 32-bit cache offsets, including glyph-table
-entries; the 16-bit modes 12/13/14 were retired in revision 31. Memory layout
-matches upstream (revision 34): the shadow and the transport's buffers live on
-heap 13, and the retained scene renders into that shadow rather than a frame
-of its own. The debug overlay's fourth line reports why a message was refused
-(NACK reason, failing mode, failed malloc size and heap). Upload lengths remain 16-bit. Cached draw commands carry an options
-byte whose low nibble selects the top output color; bit 4 makes source color 0
-transparent, and bit 5 reverses the proportional 16-entry color ramp.
+while the direct framebuffer lease is held. A lease-scoped 256 KiB asset store
+(revision 38, allocated on the EvenHub heap) holds RLE images, cached fonts and
+strings that the phone uploads once through the object cache; the whole store
+is addressable, and the wire never carries a raw storage offset, only 32-bit
+asset ids. Modes 19/20 draw an image asset or a string with a font asset into
+the shadow. Memory layout otherwise matches upstream (revision 34): the shadow
+and the transport's buffers live on heap 13, and the retained scene renders
+into that shadow rather than a frame of its own. The debug overlay's fourth
+line reports why a message was refused (NACK reason, failing mode, failed
+malloc size and heap). Upload chunk lengths remain 16-bit. Cached draw
+commands carry an options byte whose low nibble selects the top output color;
+bit 4 makes source color 0 transparent, and bit 5 reverses the proportional
+16-entry color ramp.
 Image-handler mode 15 draws a length-prefixed UTF-8 string with the glasses'
 built-in 20 px font chain and its default pair kerning. Its payload after the
 mode byte is `[x:u16][y:u16][options:u8][strlen:u8][UTF-8 bytes]`; options match
 the cached draw commands, and inline bytes 1–31 adjust x by -10 through 20 just
 as they do in cached-font mode 20.
 
-The Glassly build of this firmware (branch `glassly-cfw`, base 2.2.9.22) adds
-vector shapes and firmware-side animation on top of the texture cache:
+The Glassly build of this firmware adds vector shapes, a retained object cache
+and firmware-side animation on top of the asset store:
 
- * Mode 36 draws a list of 20-byte shape records straight into the shadow:
-   `[36][count][records]`. A record is
+ * Mode 36 draws a list of shape records straight into the shadow:
+   `[36][count][records]`. A geometric record is
    `[type][flags][color][width][p0..p7 as int16 LE]` and covers hairline and
    wide lines, plain and rounded rectangles (fill or stroke), circles and rings,
-   triangles, quads, quadratic and cubic beziers, arcs and pie sectors, plus
-   cached images and text (built-in 20 px font with the string carried inline in
-   the record and clipped to its box, or read from the texture cache, or a cached
-   mode-20 font). Coordinates are signed pixels and
-   everything clips to the 640x480 panel. Mode 36 composes inside a mode-8 batch
-   like modes 15/19/20. See `patches/shapes.h` for the type table.
- * Mode 37 keeps a retained scene of up to 128 shape slots (slot order is paint
-   order) that the glasses re-render themselves: `[37][flags][bg][ops...]` with
-   ops to set, delete, show/hide or move a slot, GLIDE it by a delta over N
-   frames, or TWEEN any parameters (including color and stroke width) to target
-   values, each with a CSS-style cubic-bezier easing curve. Flag bit 0 renders
-   and presents the scene; bit 1 clears it first. The scene renders into a
-   CFW-owned full-panel frame, so animation frames never touch EvenHub container
-   memory, and a lapsed framebuffer lease stops the animation timer. If heap 13
-   cannot spare that 150 KiB frame, a commit still draws the scene into the
-   container shadow and only animation is refused. The record grammar is
-   documented at the top of `patches/scene.c`.
- * Mode 38 controls animation: freeze, set the frame period (10-250 ms, default
-   33), release the scene, or finish every animation and present the end state.
+   triangles, quads, quadratic and cubic beziers, arcs and pie sectors; image
+   and text records reference assets by id (built-in 20 px font with the string
+   carried inline in the record and clipped to its box, a string asset, or a
+   string drawn with a font asset). Coordinates are signed pixels and everything
+   clips to the 640x480 panel. Mode 36 composes inside a mode-8 batch like modes
+   15/19/20. See `patches/shapes.h` for the record layouts.
+ * Modes 37-41 are the retained object cache (revision 38). Every drawable is a
+   versioned object with a stable 32-bit id, and images, fonts and shared
+   strings are versioned assets; both stay resident after the view that showed
+   them is hidden, and the least recently used unpinned ones are evicted when
+   room is needed (256 objects, 256 assets, a 256 KiB store). A PUT (37) defines
+   or updates objects and assets, a SHOW (38) validates an ordered list of
+   (id, version) references, applies animation ops (move, glide, tween, rotate,
+   freeze, finish, visibility, each with a CSS-style cubic-bezier easing) and
+   presents; a HIDE (39) freezes and blanks without flushing anything; STATE
+   (40) returns the mutation revision, journal deltas or a paginated inventory;
+   CONTROL (41) resets the cache to a session epoch, drops objects or sets the
+   frame period. Reopening a hidden dashboard is therefore one SHOW of
+   references, with no definitions, asset uploads or warm-up. Every cache
+   message carries a session epoch and a request id; each lens answers with a
+   transport reply (kind 5) naming the outcome (applied, stale epoch, missing
+   references, capacity, refused) before its ACK, and a repeated request id is
+   acknowledged without running its motion twice. A tagged SHOW still reports
+   settings field 129 when its animations settle. The wire formats, the
+   eviction and transaction rules and the reply layouts are documented at the
+   top of `patches/scene.c`; `demos/object-cache.ts` is the reference encoder.
 
 All of these are implied by the firmware revision (see below); there are no
 per-feature capability tokens.
@@ -150,19 +158,28 @@ statistics on the debug overlay and an owned panel shadow. Unlike upstream,
 the stock image path is not stripped; both paths stay live.
 
 Revision 27 makes panel ownership explicit. Any raster mode (3/6/9/15/19/20/36)
-stops and freezes a running scene animation, and when the last present came
-from the scene's own frame it first copies that frame into the container shadow
-so deltas compose onto what is on glass. A mode-37 patch may carry a TAG record
-(op 10, `[10][0][tag:u16]`); the next COMMIT reports settings field 129 =
-`[tagLo][tagHi]` once every animation it started has ended (immediately when
-none did, or when a raster mode takes over). Modes 37/38 are accepted inside a
-mode-8 bundle, where a COMMIT renders into the shadow the bundle presents.
+stops and freezes a running scene animation and takes the panel over; in
+revision 38 that is an implicit HIDE (the objects leave the active list and
+stay cached). A SHOW with the TAG flag reports settings field 129 =
+`[requestLo][requestHi]` once every animation it started has ended (immediately
+when none did, or when a raster mode takes over). Cache messages are accepted
+inside a mode-8 bundle, where a SHOW or HIDE renders into the shadow the bundle
+presents.
+
+Revision 38 replaces the 128-slot scene (modes 37/38) and the raw texture
+writes (mode 18) with the retained object cache described above. There is no
+compatibility path: phone apps, demos and replay tools speak only the new
+format, and a revision mismatch is reported through the field-100 string. Lease
+loss and release no longer free the store from the settings thread; they mark
+the cache lost and the memory is reclaimed under the display gate by the next
+handler or display refresh. `docs/retained-object-cache-plan.md` records the
+design; the acceptance tests live in `patches/host/shapes_host_test.c`.
 
 Run the complete offline suite with
 `python3 patches/host/run_vector_tests.py --out /tmp/g2-vector-tests`.
 It tests the firmware C under sanitizers and replays the standalone shape and
 Bad Apple SVG payloads before any mobile integration. After installing revision
-24 on the glasses, `cd demos && bun vector-suite.ts --device` runs the visual
+38 on the glasses, `cd demos && bun vector-suite.ts --device` runs the visual
 suite; add `--bad-apple` for the vector video demo.
 
 Revision 20 adds an ANCS relay. On iOS the stock firmware already reads the

@@ -1,19 +1,20 @@
 #!/usr/bin/env bun
-// Staged demo of the Glassly CFW's vector and text modes (image-handler modes
-// 36, 37, 38). Each stage draws its own screen, runs, blanks the panel and
-// pauses, so what you see on the glasses maps 1:1 onto the stage names printed
-// here. Text stages use inline TEXT records: the glasses draw the string with
-// their own font, so an update is one small message and the slot can glide,
-// tween and fade like any shape.
+// Staged demo of the Glassly CFW's vector and text modes (immediate mode 36
+// and the retained object cache, modes 37-41). Each stage draws its own
+// screen, runs, blanks the panel and pauses, so what you see on the glasses
+// maps 1:1 onto the stage names printed here. Text stages use inline TEXT
+// records: the glasses draw the string with their own font, so an update is
+// one small message and the object can glide, tween and fade like any shape.
 //
 //     bun shapes-demo.ts                # every stage
 //     G2_STAGE=3 bun shapes-demo.ts     # one stage
 //     G2_PAUSE_MS=1500 G2_LOOPS=2 bun shapes-demo.ts
 //
-// Needs the glassly-cfw firmware, revision 31 or later (SID-0xf0 transport).
+// Needs the glassly-cfw firmware, revision 38 or later (object cache).
 
 import { G2Session, buildCreateStartUpPageContainer, querySettings } from "g2-kit/ble";
-import { CfwTransport } from "./cfw-transport";
+import { CacheLink, CfwTransport } from "./cfw-transport";
+import { control, hash31, hide, ops, putObject, show, type Ref } from "./object-cache";
 import { describeCfw, queryGlasslyCfw, REQUIRED_REVISION } from "./glassly-cfw";
 import { startHeartbeat } from "g2-kit/ui";
 
@@ -52,17 +53,43 @@ function text(options: number, x: number, y: number, w: number, h: number, s: st
 }
 // mode 36: immediate shapes into the shadow
 const immediate = (...recs: number[][]) => Uint8Array.from([36, recs.length, ...recs.flat()]);
-// mode 37: retained scene ops
+// The object cache: `scene()` turns a list of definitions/removals/ops into one
+// SHOW. Definitions are objects with stable ids (the old slot numbers); a
+// changed record is a new version (an embedded PUT), an unchanged one a pure
+// reference, so re-showing a stage after a blank costs no definitions.
 const COMMIT = 1, CLEAR = 2;
-const SET = (slot: number, rec: number[]) => [0, slot, ...rec];
-const DELETE = (slot: number) => [1, slot];
-const GLIDE = (slot: number, dx: number, dy: number, frames: number, curve: number[]) => [4, slot, ...i16(dx), ...i16(dy), frames, ...curve];
+type Item = number[] | { set: number; rec: number[] } | { del: number };
+/** Object ids are nonzero: the demo's slot numbers start at 0, so slot n is object n + 1. */
+const oid = (slot: number) => slot + 1;
+const SET = (slot: number, rec: number[]): Item => ({ set: oid(slot), rec });
+const DELETE = (slot: number): Item => ({ del: oid(slot) });
+const GLIDE = (slot: number, dx: number, dy: number, frames: number, curve: readonly number[]) => ops.glide(oid(slot), dx, dy, frames, curve);
 const P = (i: number) => 1 << i, COLOR = 1 << 8, WIDTH = 1 << 9;   // tween mask bits
-const TWEEN = (slot: number, mask: number, frames: number, curve: number[], ...values: number[]) =>
-  [5, slot, ...u16(mask), frames, ...curve, ...values.flatMap(i16)];
-const scene = (flags: number, bg: number, ...ops: number[][]) => Uint8Array.from([37, flags, bg, ...ops.flat()]);
-// mode 38: animation control
-const animCtl = (...b: number[]) => Uint8Array.from([38, ...b]);
+const TWEEN = (slot: number, mask: number, frames: number, curve: readonly number[], ...values: number[]) => ops.tween(oid(slot), mask, frames, curve, values);
+const definitions = new Map<number, { version: number; rec: number[] }>();
+const resident = new Map<number, number>();
+let order: number[] = [];
+function scene(flags: number, bg: number, ...items: Item[]): Uint8Array {
+  if (flags & CLEAR) order = [];
+  const opList: number[][] = [];
+  for (const it of items) {
+    if (Array.isArray(it)) { opList.push(it); continue; }
+    if ("del" in it) { order = order.filter((id) => id !== it.del); continue; }
+    definitions.set(it.set, { version: hash31(it.rec.join(",")), rec: it.rec });
+    if (!order.includes(it.set)) order.push(it.set);
+  }
+  const puts: number[][] = [], refs: Ref[] = [];
+  for (const id of order) {
+    const d = definitions.get(id)!;
+    if (resident.get(id) !== d.version) { puts.push(putObject(id, d.version, d.rec)); resident.set(id, d.version); }
+    refs.push({ id, version: d.version });
+  }
+  // An op may only address an object on the list: a line that glides out and leaves in the same message just leaves.
+  const targeted = opList.filter((op) => { const id = (op[1]! | op[2]! << 8 | op[3]! << 16 | op[4]! << 24) >>> 0; return id === 0xffffffff || order.includes(id); });
+  return show({ puts, refs, ops: targeted, bg, present: (flags & COMMIT) !== 0 });
+}
+// animation control
+const animCtl = (sub: number, value = 33) => (sub === 1 ? control.period(value) : hide());
 
 // Framebuffer lease over sid 0x09 field 101 (['F','C',1,op,nonceLo,nonceHi]);
 // commandId=2 / magicRandom keep the stock decoder happy.
@@ -91,11 +118,10 @@ console.log(`CFW detected: ${cfw.raw}`);
 const hb = startHeartbeat({ session, nextMagic });
 const suffix = String(Date.now() % 10_000).padStart(4, "0");
 
-// GLASSLYCFW/31: custom payloads ride the SID-0xf0 message transport (no image container).
+// GLASSLYCFW/38: custom payloads ride the SID-0xf0 message transport; cache messages share one session epoch.
 const transport = new CfwTransport(session, ACK_MS);
-async function sendImage(payload: Uint8Array): Promise<void> {
-  if (!(await transport.send(payload))) throw new Error(`message (mode ${payload[0]}, ${payload.length} B): ${transport.lastOutcome}`);
-}
+const cache = new CacheLink(transport);
+async function sendImage(payload: Uint8Array): Promise<void> { await cache.send(payload); }
 
 async function lease(op: number): Promise<void> {
   const { pb, magic: m } = leasePb(op);
@@ -113,6 +139,7 @@ try {
 
   await lease(5);                                  // FB_ACQUIRE (90 s, fail-open)
   renew = setInterval(() => void lease(5), 30_000);
+  await cache.reset();
 
   // ---- stage runner ------------------------------------------------------------
   // Slot 0 is the stage label in every scene stage; content starts at slot 1.
@@ -126,7 +153,7 @@ try {
     const t0 = performance.now();
     await body(stageNo);
     console.log(`[stage ${stageNo}] done in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
-    await send(scene(COMMIT | CLEAR, 0));          // blank between stages
+    await send(hide());                            // blank between stages; the objects stay cached
     await sleep(PAUSE_MS);
   }
   /** Send `count` scene patches as fast as the link acks them; returns the achieved rate. */
@@ -161,7 +188,7 @@ try {
   });
 
   // ---- 2. inline text: many lines, gray levels, clipping --------------------------
-  await stage("inline text lines (mode 37)", async (n) => {
+  await stage("inline text lines (object cache)", async (n) => {
     const lines = ["The glasses draw this text themselves.", "Each line is one slot with its bytes inline.", "No texture cache, no bitmaps, no re-sends."];
     await send(scene(COMMIT | CLEAR, 0,
       label(n, "inline text lines"),
@@ -221,7 +248,7 @@ try {
     await send(scene(COMMIT | CLEAR, 0, label(n, "text animation: caption scroll"), SET(9, record(T.RECT, 5, 1, 30, top - 10, 580, rows * pitch + 14, 8))));
     for (let step = 0; step < captions.length; step++) {
       const slot = 10 + (step % 4);
-      const ops: number[][] = [SET(slot, text(ink(15), 40, top + rows * pitch, 560, pitch, captions[step]))];
+      const ops: Item[] = [SET(slot, text(ink(15), 40, top + rows * pitch, 560, pitch, captions[step]))];
       for (let k = Math.max(0, step - rows); k <= step; k++) ops.push(GLIDE(10 + (k % 4), 0, -pitch, 10, EASE.out));
       if (step >= rows) ops.push(DELETE(10 + ((step - rows) % 4)));
       await send(scene(COMMIT, 0, ...ops));
@@ -297,8 +324,16 @@ try {
     await send(animCtl(1, 33));
   });
 
-  console.log("[18] release scene");
-  await send(animCtl(2));
+  // ---- 7. reopen from the cache: stage 5's objects come back with one SHOW of references ----
+  await stage("reopen from cache", async () => {
+    const t0 = performance.now();
+    await send(scene(COMMIT, 0));                  // the current list is stage 6's; rebuild stage 5's list by reference
+    console.log(`  blank-to-scene in ${(performance.now() - t0).toFixed(0)} ms (no definitions sent)`);
+    await sleep(1500);
+  });
+
+  console.log("[18] hide scene");
+  await send(hide());
 } finally {
   if (renew) clearInterval(renew);
   await lease(6).catch(() => {});                  // FB_RELEASE

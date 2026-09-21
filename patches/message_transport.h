@@ -7,6 +7,7 @@
 #define CFW_MESSAGE_BOTH (CFW_MESSAGE_LEFT | CFW_MESSAGE_RIGHT)
 #define CFW_MESSAGE_ACK 1u
 #define CFW_MESSAGE_NACK 3u
+#define CFW_MESSAGE_REPLY 5u /* revision 38: object-cache reply, sent before the ACK */
 #define CFW_MESSAGE_COMPRESSED 4u
 #define CFW_MESSAGE_RESET_CONTEXT 8u
 #define CFW_MESSAGE_MAX 65535u
@@ -14,6 +15,8 @@
 #define CFW_MESSAGE_END 0x40u
 #define CFW_ACK_HISTORY 3u
 #define CFW_ACK_ENTRY_SIZE 7u /* stream, ordinal LE16, size LE16, CRC LE16 */
+#define CFW_REPLY_HDR_SIZE 5u /* kind, stream, ordinal LE16, lens */
+#define CFW_REPLY_MAX_SIZE 255u
 
 /* One ordered byte stream per BLE ingress lens. Payload is owned until the
  * handler returns, or a packet reset/error discards it. A record contains
@@ -26,6 +29,7 @@ typedef struct {
     uint8_t length_bytes, active, next_sequence, stream_id, options;
     uint8_t flags, context_valid;
     uint8_t ack_count, ack_capacity, packet_capacity;
+    uint8_t reply_capacity; /* largest request packet body seen: a reply that size fits the link */
     uint8_t ack_history[CFW_ACK_HISTORY][CFW_ACK_ENTRY_SIZE];
 } cfw_message_stream;
 int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum);

@@ -3,12 +3,12 @@
 import {vectorCases, type VectorStep} from "./vector-cases";
 import {badAppleVectors} from "./bad-apple-vector";
 import {loadSvgVideo} from "./svg-video";
-import {framebufferLease, i32, u16} from "./vector-protocol";
+import {framebufferLease, u32 as i32, u16} from "./vector-protocol";
 
 const args=process.argv.slice(2);
 const option=(name:string)=>{const i=args.indexOf(name);if(i<0)return undefined;const v=args[i+1];if(!v || v.startsWith("--"))throw new Error(`Missing value for ${name}`);return v;};
 if(args.includes("--help")) {
-  console.log(`Revision 24 SVG paths and rotation suite (offline by default)
+  console.log(`Revision 38 SVG paths and rotation suite on the object cache (offline by default)
   bun vector-suite.ts --dump /tmp/vector-suite.bin
   bun vector-suite.ts --device                  # visual checks on glasses
   bun vector-suite.ts --bad-apple --dump /tmp/bad-apple-vector.bin
@@ -31,7 +31,7 @@ const svgVideo=option("--svg-video") ?? (args.includes("--bad-apple") && !option
 const video=args.includes("--bad-apple") || !!svgVideo;
 const steps=svgVideo?await loadSvgVideo(svgVideo,frameCount,option("--svg-out")):
   video?await badAppleVectors(option("--gif")??new URL("bad_apple_quarter.gif",import.meta.url).pathname,frameCount,option("--svg-out")):vectorCases();
-const frameMs=video?steps[0].waitMs:100;
+const frameMs=video?(steps.find(s=>s.name!=="reset")?.waitMs??100):100;
 if(args.includes("--list")){console.log(steps.map(s=>s.name).join("\n"));process.exit(0);}
 
 const dump=option("--dump");
@@ -52,7 +52,7 @@ if(!args.includes("--device") || args.includes("--dry-run")) {
 }
 
 const {G2Session,buildCreateStartUpPageContainer,querySettings}=await import("g2-kit/ble");
-const {CfwTransport}=await import("./cfw-transport");
+const {CfwTransport,CacheLink}=await import("./cfw-transport");
 const {queryGlasslyCfw,REQUIRED_REVISION}=await import("./glassly-cfw");
 const {startHeartbeat}=await import("g2-kit/ui");
 const sleep=(ms:number)=>new Promise(r=>setTimeout(r,ms));
@@ -68,9 +68,8 @@ const lease=async(op:5|6)=>{
 };
 // GLASSLYCFW/31: custom payloads ride the SID-0xf0 message transport (no image container).
 const transport=new CfwTransport(session);
-const send=async(payload:Uint8Array)=>{
-  if(!await transport.send(payload))throw new Error(`message (mode ${payload[0]}, ${payload.length} B): ${transport.lastOutcome}`);
-};
+const link=new CacheLink(transport);
+const send=(payload:Uint8Array)=>link.send(payload);
 let acquired=false;
 try {
   await querySettings(session,nextMagic());
@@ -81,12 +80,14 @@ try {
   const create=buildCreateStartUpPageContainer({name:`s${suffix}`,items:["."],containerId:1,captureEvents:false,magic:nextMagic()});
   if(!await session.sendPb(0xe0,create.pb,create.magic,{ackTimeoutMs:8000}))throw new Error("CREATE did not ACK");
   await sleep(300);await lease(5);acquired=true;
+  await link.reset();   /* one session epoch for both lenses; the fixtures' own reset step is skipped */
   if(idleSeconds>0){console.log(`idling ${idleSeconds}s with heartbeat and lease renewals before playback`);await sleep(idleSeconds*1000);}
   let leaseError:unknown;
   renew=setInterval(()=>void lease(5).catch(e=>{leaseError=e;}),30000);
   let sent=0,skipped=0,worst=0;const start=performance.now();
   for(let i=0;i<steps.length;i++) {
     if(leaseError)throw leaseError;
+    if(steps[i].name==="reset")continue;
     if(video && i>0 && steps[i].name!=="release") {
       const due=Math.min(steps.length-2,Math.floor((performance.now()-start)/frameMs));
       if(due>i){skipped+=due-i;i=due;}
@@ -100,7 +101,7 @@ try {
   console.log(`${sent} payloads ACKed, ${skipped} video frames skipped; worst ACK ${worst.toFixed(0)} ms`);
 } finally {
   if(renew)clearInterval(renew);
-  if(acquired){await send(Uint8Array.from([38,2])).catch(()=>{});await lease(6).catch(()=>{});}
+  if(acquired){await lease(6).catch(()=>{});}
   heartbeat?.stop();transport.close();await session.close();
 }
 // Noble's macOS adapter keeps native handles alive after the lenses disconnect.

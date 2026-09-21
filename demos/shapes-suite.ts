@@ -3,7 +3,7 @@
 // glasses over BLE. Every case is the same data as the miniapp's
 // src/shared/shapesSuite.ts; what the phone does between render() and the
 // radio (anchor resolution, validate / clamp / budget, frame diffing, the
-// mode-37 retained-scene encoder from G2CfwScene.swift) is ported below, so
+// object-cache encoder from G2CfwScene.swift) is ported below, so
 // the verdicts mean the same thing here as in the tester page.
 //
 // What differs from the phone: default-font text is not wrapped or measured
@@ -27,10 +27,9 @@
 //     G2_DRY_RUN=1 bun shapes-suite.ts       # host pipeline only, no glasses
 //     G2_HOLD_SCALE=0.5 G2_OUT=results.json bun shapes-suite.ts
 //
-// Needs the glassly-cfw firmware, revision 31 or later (SID-0xf0 transport).
+// Needs the glassly-cfw firmware, revision 38 or later (object cache).
 
 import { G2Session, buildCreateStartUpPageContainer, querySettings } from "g2-kit/ble";
-import { CfwTransport } from "./cfw-transport";
 import { describeCfw, queryGlasslyCfw, REQUIRED_REVISION } from "./glassly-cfw";
 import { startHeartbeat } from "g2-kit/ui";
 
@@ -1201,22 +1200,18 @@ function diffScene(prev: FrameElement[], next: Diffable[], nextSyntheticId: () =
 }
 
 // ============================================================================
-// Mode-37 retained-scene encoder — G2CfwScene.swift
+// Object-cache encoder — G2CfwScene.swift
 // ============================================================================
 
-const T = {
-  LINE: 1, RECT: 2, RECT_FILL: 3, CIRCLE: 4, CIRCLE_FILL: 5, TRI: 6, TRI_FILL: 7, QUAD: 8, QUAD_FILL: 9,
-  BEZIER2: 10, BEZIER3: 11, ARC: 12, PIE: 13, IMAGE: 14, TEXT: 15, TEXT_CACHED: 16, TEXT_INLINE: 17,
-} as const;
-const MAX_SLOTS = 128;
-const FRAME_PERIOD_MS = 33;
+import { control, EASE as CURVES, FRAME_PERIOD_MS, hash31, hide, inlineText, MAX_INLINE_BYTES, MAX_OBJECTS, ops, putObject, record as geometricRecord, show, T, textBytes, type Ref } from "./object-cache";
+import { CacheLink, CfwTransport, StaleEpochError } from "./cfw-transport";
 const TEXT_LINE_HEIGHT = 27;
 const TEXT_INSET = 2;
-const MAX_INLINE_BYTES = 128;
 
 /** The 576×288 canvas sits in the 640×480 panel at the default height level (4) and the pinned middle depth (1), same on both lenses. */
 const ORIGIN = { x: 32, y: 128 };
 
+/** One drawable of an element: the record the glasses store, kept in decoded form for diffing. */
 interface Slot { type: number; color: number; width: number; params: number[]; text: number[] }
 
 const slot = (type: number, color: number, width: number, params: number[], text: number[] = []): Slot => {
@@ -1230,8 +1225,8 @@ const slotsEqual = (a: Slot, b: Slot) =>
 const clampCoord = (v: number) => Math.max(-1024, Math.min(1023, Math.trunc(v)));
 const clampDim = (v: number) => Math.max(0, Math.min(2047, Math.trunc(v)));
 const idiv = (a: number, b: number) => Math.trunc(a / b);
-const i16 = (v: number) => { const u = v < 0 ? v + 0x10000 : v; return [u & 0xff, (u >> 8) & 0xff]; };
 
+/** Parameters a TWEEN may target per type, as the firmware enforces (shapes.c cfw_shape_tween_mask without color/width). */
 function tweenableMask(type: number): number {
   switch (type) {
     case T.LINE: return 0x0f;
@@ -1247,30 +1242,17 @@ function tweenableMask(type: number): number {
 
 function easingCurve(easing: string | undefined): number[] {
   switch (easing) {
-    case "linear": return [0, 0, 255, 255];
-    case "ease-in": return [107, 0, 255, 255];
-    case "ease-out": return [0, 0, 148, 255];
-    case "ease-in-out": return [107, 0, 148, 255];
-    default: return [64, 26, 64, 255]; // CSS "ease"
+    case "linear": return [...CURVES.linear];
+    case "ease-in": return [...CURVES.in];
+    case "ease-out": return [...CURVES.out];
+    case "ease-in-out": return [...CURVES.inOut];
+    default: return [...CURVES.ease];
   }
 }
 
 function transitionFrames(ms: number): number {
   if (ms <= 0) return 0;
   return Math.max(2, Math.min(255, Math.round(ms / FRAME_PERIOD_MS)));
-}
-
-/** UTF-8 bytes of a line without firmware control bytes (1..31), cut at a codepoint boundary. */
-function textBytes(line: string, limit = MAX_INLINE_BYTES): number[] {
-  const out: number[] = [];
-  const enc = new TextEncoder();
-  for (const ch of line) {
-    if (ch.codePointAt(0)! < 32) continue;
-    const bytes = enc.encode(ch);
-    if (out.length + bytes.length > limit) break;
-    out.push(...bytes);
-  }
-  return out;
 }
 
 function slotsFor(el: FrameElement): Slot[] {
@@ -1330,7 +1312,7 @@ function slotsFor(el: FrameElement): Slot[] {
       return [slot(n === 3 ? T.BEZIER2 : T.BEZIER3, gray, stroke, params)];
     }
     case "text": {
-      // One TEXT_INLINE slot per line, drawn by the glasses' font at a 2 px inset, clipped to the box.
+      // One TEXT_INLINE object per line, drawn by the glasses' font at a 2 px inset, clipped to the box.
       const out: Slot[] = [];
       if (border > 0) out.push(slot(T.RECT, gray, stroke, [x, y, w, h, radius]));
       const options = 0x10 | gray;
@@ -1351,31 +1333,26 @@ function slotsFor(el: FrameElement): Slot[] {
   }
 }
 
-/** `[0][slot][type][flags=visible][color][width][p0..p7 LE]`, or for TEXT_INLINE `[0][slot][17][1][color][width][x][y][w][h][len][bytes]`. */
-function setRecord(s: Slot, index: number): number[] {
-  const out = [0, index, s.type, 1, s.color, s.width];
-  const count = s.type === T.TEXT_INLINE ? 4 : 8;
-  for (const v of s.params.slice(0, count)) out.push(...i16(v));
-  if (s.type === T.TEXT_INLINE) {
-    out.push(Math.min(s.text.length, MAX_INLINE_BYTES));
-    out.push(...s.text.slice(0, MAX_INLINE_BYTES));
-  }
-  return out;
+/** The shape record the object cache stores for a slot (shapes.h layouts). */
+function slotRecord(s: Slot): number[] {
+  if (s.type === T.TEXT_INLINE) return inlineText(s.color, s.params[0], s.params[1], s.params[2], s.params[3], s.text.slice(0, MAX_INLINE_BYTES));
+  return geometricRecord(s.type, s.color, s.width, ...s.params);
 }
+/** Content version: a hash of everything the record carries. */
+const slotVersion = (s: Slot) => hash31(`${s.type}/${s.color}/${s.width}/${s.params.join(",")}/${s.text.join(",")}`);
+/** Object id of the k-th slot of an element: stable across frames and reopenings. */
+const objectId = (elementId: string, k: number) => hash31(`${elementId}#${k}`);
 
 /**
- * `[5][slot][mask:u16][frames][curve x4][value:i16 per set bit]`, or null when
- * the change is not a pure geometry/stroke change of the same shape type.
+ * A TWEEN op from `old` (what the glasses currently show) to `next`, or null when
+ * the change is not a pure geometry/stroke change of the same type.
  *
  * The mask always covers every tweenable parameter (plus color and width where
- * the type allows), not just the ones that changed. The firmware takes an
- * unmasked parameter's end value from the slot's CURRENT value, which is
- * mid-flight when a previous tween is still running; a partial mask would then
- * freeze that parameter wherever the earlier tween had got to. The phone's
- * G2CfwScene.swift sends changed parameters only, so its composed glides land
- * off-target on this firmware.
+ * the type allows), not just the ones that changed: the firmware takes an
+ * unmasked parameter's end value from the object's CURRENT value, which is
+ * mid-flight when a previous tween is still running.
  */
-function tweenRecord(old: Slot, next: Slot, index: number, frames: number, curve: number[]): number[] | null {
+function tweenOp(id: number, old: Slot, next: Slot, frames: number, curve: number[]): number[] | null {
   if (old.type !== next.type || old.text.length !== next.text.length || old.text.some((v, i) => v !== next.text[i])) return null;
   const tweenable = tweenableMask(next.type);
   for (let k = 0; k < 8; k++) {
@@ -1391,99 +1368,92 @@ function tweenRecord(old: Slot, next: Slot, index: number, frames: number, curve
   if (!isTexture || inlineFade) { mask |= 0x100; values.push(next.color); }
   if (!isTexture) { mask |= 0x200; values.push(next.width); }
   if (mask === 0) return null;
-  return [5, index, mask & 0xff, mask >> 8, frames, ...curve.slice(0, 4), ...values.flatMap(i16)];
+  return ops.tween(id, mask, frames, curve, values);
 }
 
-interface ElementState { id: string; slots: Slot[]; indices: number[] }
+/** What the phone knows the glasses hold for one object. */
+interface Known {
+  version: number;          /* the definition version resident on the glasses */
+  definition: Slot;         /* the content that version defines */
+  state: Slot | undefined;  /* the geometry the glasses currently show; undefined after a hide mid-flight */
+  animEndsAt: number;       /* performance.now() when its last tween ends */
+}
+interface Encoded { payload: Uint8Array; sets: number; deletes: number; tweens: number; refs: number; animMs: number }
 
-class CfwScene {
-  private elements: ElementState[] = [];
-  private needsRepack = true;
+/**
+ * Mirror of the object cache for one session: every element slot is an object
+ * with a stable id; a frame is one SHOW of references plus the PUTs it needs
+ * (new or changed definitions) and the TWEENs for animated changes. Objects
+ * that leave a frame stay cached; when they come back they are pure references.
+ */
+class ObjectScene {
+  private known = new Map<number, Known>();
+  private ids: number[][] = [];
+  private activeIds: number[] = [];
 
-  invalidate() { this.needsRepack = true; }
-  indices(): number[][] { return this.elements.map((e) => e.indices); }
+  /** Forget everything (a failed send, a stale epoch): the next frame redefines what it shows. */
+  invalidate() { this.known.clear(); this.ids = []; this.activeIds = []; }
+  indices(): number[][] { return this.ids; }
+  resident(): number { return this.known.size; }
 
-  /** One mode-37 patch (COMMIT, plus CLEAR on a repack), or null when the frame does not fit the slot table. */
-  encode(frame: FrameElement[], replay = false): { payload: Uint8Array; sets: number; deletes: number; tweens: number; repack: boolean; animMs: number } | null {
-    const desired = frame.map((el) => ({
-      id: el.id,
-      slots: slotsFor(el),
-      frames: transitionFrames(el.transition?.durationMs ?? 0),
-      curve: easingCurve(el.transition?.easing),
-    }));
-    const total = desired.reduce((n, d) => n + d.slots.length, 0);
-    if (total > MAX_SLOTS) return null;
-
-    const previous = new Map(this.elements.map((s) => [s.id, s]));
-    let repack = this.needsRepack || replay;
-    let assigned: number[][] = [];
-    if (!repack) {
-      const used = new Set<number>();
-      for (const item of desired) {
-        const prev = previous.get(item.id);
-        if (prev && prev.slots.length === item.slots.length) prev.indices.forEach((i) => used.add(i));
-      }
-      let next = (used.size ? Math.max(...used) : -1) + 1;
-      let lastIndex = -1;
-      for (const item of desired) {
-        const prev = previous.get(item.id);
-        let indices: number[];
-        if (prev && prev.slots.length === item.slots.length) {
-          indices = prev.indices;
-        } else {
-          indices = item.slots.map((_, k) => next + k);
-          next += item.slots.length;
+  /** One SHOW for the frame, or null when it does not fit the object table. */
+  encode(frame: FrameElement[]): Encoded | null {
+    const now = performance.now();
+    const puts: number[][] = [], refs: Ref[] = [], opList: number[][] = [];
+    let sets = 0, tweens = 0, animFrames = 0;
+    const ids: number[][] = [];
+    const seen = new Set<number>();
+    for (const el of frame) {
+      const slots = slotsFor(el);
+      const frames = transitionFrames(el.transition?.durationMs ?? 0);
+      const curve = easingCurve(el.transition?.easing);
+      const mine: number[] = [];
+      slots.forEach((s, k) => {
+        const id = objectId(el.id, k);
+        if (seen.has(id)) return;                     /* a synthetic id collision: draw it once */
+        seen.add(id);
+        mine.push(id);
+        const version = slotVersion(s);
+        const k0 = this.known.get(id);
+        const put = () => {
+          puts.push(putObject(id, version, slotRecord(s)));
+          sets++;
+          this.known.set(id, { version, definition: s, state: s, animEndsAt: 0 });
+          refs.push({ id, version });
+        };
+        if (!k0) { put(); return; }
+        const current = k0.state;
+        if (current && slotsEqual(current, s)) { refs.push({ id, version: k0.version }); return; }
+        const base = current ?? k0.definition;
+        const tw = frames >= 2 || !current ? tweenOp(id, base, s, current ? frames : 0, curve) : null;
+        if (tw) {
+          opList.push(tw);
+          if (current) { tweens++; animFrames = Math.max(animFrames, frames); k0.animEndsAt = now + frames * FRAME_PERIOD_MS; }
+          k0.state = s;
+          refs.push({ id, version: k0.version });
+          return;
         }
-        if (indices.length && indices[0] <= lastIndex) { repack = true; break; }
-        lastIndex = indices.length ? indices[indices.length - 1] : lastIndex;
-        assigned.push(indices);
-      }
-      if (next > MAX_SLOTS) repack = true;
-    }
-    if (repack) {
-      assigned = [];
-      let next = 0;
-      for (const item of desired) {
-        assigned.push(item.slots.map((_, k) => next + k));
-        next += item.slots.length;
-      }
-    }
-
-    const ops: number[] = [];
-    let sets = 0;
-    let deletes = 0;
-    let tweens = 0;
-    let animFrames = 0;
-    if (!repack) {
-      const kept = new Set(desired.map((d) => d.id));
-      for (const state of this.elements) {
-        if (kept.has(state.id)) continue;
-        for (const index of state.indices) { ops.push(1, index); deletes++; }
-      }
-    }
-    const committed: ElementState[] = [];
-    desired.forEach((item, di) => {
-      const indices = assigned[di];
-      const prev = repack ? undefined : previous.get(item.id);
-      item.slots.forEach((s, k) => {
-        const index = indices[k];
-        if (prev && prev.slots.length === item.slots.length) {
-          const old = prev.slots[k];
-          if (slotsEqual(old, s)) return;
-          if (item.frames >= 2) {
-            const tween = tweenRecord(old, s, index, item.frames, item.curve);
-            if (tween) { ops.push(...tween); tweens++; animFrames = Math.max(animFrames, item.frames); return; }
-          }
-        }
-        ops.push(...setRecord(s, index));
-        sets++;
+        put();
       });
-      committed.push({ id: item.id, slots: item.slots, indices });
-    });
+      ids.push(mine);
+    }
+    if (refs.length > MAX_OBJECTS) return null;
+    const deletes = this.activeIds.filter((id) => !seen.has(id)).length;
+    this.ids = ids;
+    this.activeIds = refs.map((r) => r.id);
+    return { payload: show({ puts, refs, ops: opList, present: true, bg: 0 }), sets, deletes, tweens, refs: refs.length - sets, animMs: animFrames * FRAME_PERIOD_MS };
+  }
 
-    this.elements = committed;
-    this.needsRepack = false;
-    return { payload: Uint8Array.from([37, repack ? 0x03 : 0x01, 0, ...ops]), sets, deletes, tweens, repack, animMs: animFrames * FRAME_PERIOD_MS };
+  /** The panel goes blank; objects animating right now freeze where they are, so they are re-snapped when shown again. */
+  hide(): Uint8Array {
+    const now = performance.now();
+    for (const id of this.activeIds) {
+      const k = this.known.get(id);
+      if (k && k.animEndsAt > now) k.state = undefined;
+    }
+    this.activeIds = [];
+    this.ids = [];
+    return hide({ present: true, bg: 0 });
   }
 }
 
@@ -1508,7 +1478,7 @@ interface CaseResult {
   steps?: number;
   /** Renders per second over the whole case, holds included. */
   stepsPerSecond?: number;
-  /** Total mode-37 bytes the case put on the air. */
+  /** Total cache-message bytes the case put on the air. */
   bytes?: number;
 }
 
@@ -1524,7 +1494,7 @@ const scaled = (ms: number) => Math.round(ms * HOLD_SCALE);
 
 // ── self-test: the encoder vectors from G2CfwSceneTests.swift, byte for byte ──
 // One deliberate difference: TWEEN masks here cover every tweenable parameter
-// (see tweenRecord), where the Swift encoder masks only the changed ones.
+// (see tweenOp), where the Swift encoder masks only the changed ones.
 async function selfTest(): Promise<void> {
   const failures: string[] = [];
   let checks = 0;
@@ -1533,12 +1503,15 @@ async function selfTest(): Promise<void> {
     const g = JSON.stringify(Array.from(got as ArrayLike<number>)), w = JSON.stringify(Array.from(want as ArrayLike<number>));
     if (g !== w) failures.push(`${name}: got ${g}, want ${w}`);
   };
+  const i16 = (v: number) => { const u = v < 0 ? v + 0x10000 : v; return [u & 0xff, (u >> 8) & 0xff]; };
+  const u32 = (v: number) => [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
   const le = (...values: number[]) => values.flatMap(i16);
   ORIGIN.y = 96; // the Swift tests place the canvas at (32, 96)
   const fresh = () => new Renderer(null);
   const sub = (b: Uint8Array, from: number, to: number) => b.subarray(from, to);
+  const HDR = 8; // [38][epoch u16][request u16][flags][bg][puts]
 
-  // shapes become SET records with offset geometry
+  // shapes become PUT records with offset geometry, referenced in order
   let r = fresh();
   await r.render([
     { type: "line", id: "l", points: [{ x: 10, y: 20 }, { x: 30, y: 40 }], style: { width: 3, color: 12 } },
@@ -1547,69 +1520,94 @@ async function selfTest(): Promise<void> {
     { type: "rect", id: "r", box: { x: 1, y: 2, w: 30, h: 20 }, style: { border: 2, radius: 6, fill: true } },
   ]);
   let b = r.lastPayload;
-  eq("shapes header", sub(b, 0, 3), [37, 0x03, 0]);
-  eq("line record", sub(b, 3, 9), [0, 0, 1, 1, 12, 3]);
-  eq("line points", sub(b, 9, 17), le(42, 116, 62, 136));
-  eq("circle record", sub(b, 25, 31), [0, 1, 5, 1, 15, 0]);
-  eq("circle geometry", sub(b, 31, 37), le(152, 216, 20));
-  eq("arc record", sub(b, 47, 53), [0, 2, 12, 1, 15, 4]);
-  eq("arc angles", sub(b, 59, 63), le(-90, 180));
-  eq("rect fill", sub(b, 69, 75), [0, 3, 3, 1, 15, 0]);
-  eq("rect stroke", sub(b, 91, 97), [0, 4, 2, 1, 15, 2]);
-  eq("shapes length", [b.length], [113]);
-  eq("shapes indices", r.slotIndices(), [[0], [1], [2], [3, 4]]);
+  const lineId = objectId("l", 0), circleId = objectId("c", 0);
+  eq("show header", sub(b, 0, HDR), [38, 0, 0, 0, 0, 0x01, 0, 5]);            // PRESENT, bg 0, five puts
+  eq("line put", sub(b, HDR, HDR + 5), [1, ...u32(lineId)]);
+  eq("line record", sub(b, HDR + 9, HDR + 13), [1, 1, 12, 3]);                 // type flags color width
+  eq("line points", sub(b, HDR + 13, HDR + 21), le(42, 116, 62, 136));
+  const put2 = HDR + 29;
+  eq("circle put", sub(b, put2, put2 + 5), [1, ...u32(circleId)]);
+  eq("circle record", sub(b, put2 + 9, put2 + 13), [5, 1, 15, 0]);
+  eq("circle geometry", sub(b, put2 + 13, put2 + 19), le(152, 216, 20));
+  const put3 = put2 + 29;
+  eq("arc record", sub(b, put3 + 9, put3 + 13), [12, 1, 15, 4]);
+  eq("arc angles", sub(b, put3 + 19, put3 + 23), le(-90, 180));
+  const put4 = put3 + 29, put5 = put4 + 29;
+  eq("rect fill", sub(b, put4 + 9, put4 + 13), [3, 1, 15, 0]);
+  eq("rect stroke", sub(b, put5 + 9, put5 + 13), [2, 1, 15, 2]);
+  const refs = put5 + 29;
+  eq("five references", sub(b, refs, refs + 2), [5, 0]);
+  eq("first reference", sub(b, refs + 2, refs + 6), u32(lineId));
+  eq("shapes length", [b.length], [refs + 2 + 5 * 8]);
+  eq("shapes ids", r.slotIndices(), [[lineId], [circleId], [objectId("a", 0)], [objectId("r", 0), objectId("r", 1)]]);
+  eq("resident", [r.resident()], [5]);
 
-  // a moved element with a transition becomes a TWEEN
+  // a moved element with a transition becomes a TWEEN op on a pure reference
   r = fresh();
   await r.render([{ type: "circle", id: "ball", box: { x: 0, y: 0, w: 21, h: 21 }, style: { fill: true } }]);
   await r.render([{ type: "circle", id: "ball", box: { x: 200, y: 0, w: 21, h: 21 }, style: { fill: true }, transition: { durationMs: 330, easing: "linear" } }]);
   b = r.lastPayload;
-  eq("tween header", sub(b, 0, 3), [37, 0x01, 0]);
-  eq("tween record", sub(b, 3, 12), [5, 0, 0x07, 0x03, 10, 0, 0, 255, 255]);
-  eq("tween target", sub(b, 12, 22), le(242, 106, 10, 15, 0)); // cx cy r color width: the unchanged ones ride along
-  eq("tween length", [b.length], [22]);
+  const ball = objectId("ball", 0);
+  eq("tween header", sub(b, 0, HDR), [38, 0, 0, 0, 0, 0x01, 0, 0]);
+  eq("tween reference", sub(b, HDR, HDR + 6), [1, 0, ...u32(ball)]);
+  eq("tween op", sub(b, HDR + 10, HDR + 22), [5, ...u32(ball), 0x07, 0x03, 10, 0, 0, 255, 255]);
+  eq("tween target", sub(b, HDR + 22, HDR + 32), le(242, 106, 10, 15, 0)); // cx cy r color width: the unchanged ones ride along
+  eq("tween length", [b.length], [HDR + 32]);
+  eq("tween hits", [r.lastHits], [1]);
 
-  // a geometry change without a transition, and a type change, re-SET
+  // a geometry change without a transition is a new version (one PUT, no op); a type change too
   r = fresh();
   await r.render([{ type: "circle", id: "s", box: { x: 0, y: 0, w: 11, h: 11 } }]);
   await r.render([{ type: "circle", id: "s", box: { x: 5, y: 0, w: 11, h: 11 } }]);
-  eq("moved without transition", sub(r.lastPayload, 3, 5), [0, 0]);
+  eq("moved without transition re-PUTs", sub(r.lastPayload, 7, HDR + 5), [1, 1, ...u32(objectId("s", 0))]);
+  eq("moved without transition has no ops", [r.lastPayload.length], [HDR + 29 + 10]);
   await r.render([{ type: "circle", id: "s", box: { x: 5, y: 0, w: 11, h: 11 }, style: { fill: true }, transition: { durationMs: 500 } }]);
-  eq("retyped", sub(r.lastPayload, 3, 6), [0, 0, 5]);
+  eq("retyped", sub(r.lastPayload, HDR + 9, HDR + 10), [5]);
+  eq("retyped puts", [r.lastPayload[7]], [1]);
 
-  // removal DELETEs slots; a reorder repacks
+  // removal drops the object from the list; when it comes back it is a cache hit, not a redefinition
   r = fresh();
   await r.render([{ type: "circle", id: "a", box: { x: 0, y: 0, w: 11, h: 11 } }, { type: "circle", id: "b", box: { x: 0, y: 0, w: 11, h: 11 } }]);
   await r.render([{ type: "circle", id: "b", box: { x: 0, y: 0, w: 11, h: 11 } }]);
-  eq("delete", r.lastPayload, [37, 0x01, 0, 1, 0]);
-  eq("delete indices", r.slotIndices(), [[1]]);
+  eq("only b listed", sub(r.lastPayload, 0, HDR + 6), [38, 0, 0, 0, 0, 0x01, 0, 0, 1, 0, ...u32(objectId("b", 0))]);
+  eq("only b length", [r.lastPayload.length], [HDR + 10]);
+  eq("a still resident", [r.resident()], [2]);
   await r.render([{ type: "circle", id: "a", box: { x: 0, y: 0, w: 11, h: 11 } }, { type: "circle", id: "b", box: { x: 0, y: 0, w: 11, h: 11 } }]);
-  eq("reorder repacks", [r.lastPayload[1]], [0x03]);
-  eq("reorder indices", r.slotIndices(), [[0], [1]]);
+  eq("reappearance is two references and no puts", sub(r.lastPayload, 5, HDR + 2), [0x01, 0, 0, 2, 0]);
+  eq("reappearance hits", [r.lastHits], [2]);
+  // a blank frame hides; the next frame is again pure references
+  await r.render([]);
+  eq("blank hides", r.lastPayload, [39, 0, 0, 0, 0, 0x01, 0]);
+  await r.render([{ type: "circle", id: "a", box: { x: 0, y: 0, w: 11, h: 11 } }]);
+  eq("reopen from cache", [r.lastPayload[7], r.lastHits], [0, 1]);
 
   // inline text records carry their bytes and animate
   r = fresh();
   const t = (y: number, text: string, color: number, transition?: Transition): RenderElement => ({ type: "text", id: "t", box: { x: 10, y, w: 200, h: 60 }, text, style: { color }, ...(transition ? { transition } : {}) });
   await r.render([t(10, "hi\nthere", 9)]);
   b = r.lastPayload;
-  eq("text indices", r.slotIndices(), [[0, 1]]);
-  eq("text record", sub(b, 3, 9), [0, 0, 17, 1, 0x19, 0]);
-  eq("text box", sub(b, 9, 17), le(44, 108, 198, 58));
-  eq("text bytes", sub(b, 17, 20), [2, 0x68, 0x69]);
-  eq("text line 2", sub(b, 20, 23), [0, 1, 17]);
-  eq("text line 2 box", sub(b, 26, 34), le(44, 135, 198, 31));
-  eq("text line 2 bytes", sub(b, 35, 40), Array.from(new TextEncoder().encode("there")));
+  const t0 = objectId("t", 0), t1 = objectId("t", 1);
+  eq("text ids", r.slotIndices(), [[t0, t1]]);
+  eq("text record", sub(b, HDR + 9, HDR + 13), [17, 1, 0x19, 0]);
+  eq("text box", sub(b, HDR + 13, HDR + 21), le(44, 108, 198, 58));
+  eq("text bytes", sub(b, HDR + 21, HDR + 24), [2, 0x68, 0x69]);
+  const line2 = HDR + 24;
+  eq("text line 2", sub(b, line2 + 9, line2 + 10), [17]);
+  eq("text line 2 box", sub(b, line2 + 13, line2 + 21), le(44, 135, 198, 31));
+  eq("text line 2 bytes", sub(b, line2 + 22, line2 + 27), Array.from(new TextEncoder().encode("there")));
   await r.render([t(40, "hi\nthere", 9, { durationMs: 330 })]);
-  eq("text move tweens", sub(r.lastPayload, 3, 8), [5, 0, 0x0f, 0x01, 10]);
-  eq("text move targets", sub(r.lastPayload, 12, 22), le(44, 138, 198, 58, 0x19));
+  eq("text move tweens", sub(r.lastPayload, HDR + 18, HDR + 26), [5, ...u32(t0), 0x0f, 0x01, 10]);
+  eq("text move targets", sub(r.lastPayload, HDR + 30, HDR + 40), le(44, 138, 198, 58, 0x19));
   await r.render([t(40, "ho\nthere", 9, { durationMs: 330 })]);
-  eq("text change re-SETs", sub(r.lastPayload, 3, 6), [0, 0, 17]);
+  eq("text change re-PUTs", sub(r.lastPayload, HDR + 9, HDR + 10), [17]);
+  eq("text change puts one", [r.lastPayload[7], r.lastHits], [1, 1]);
   await r.render([t(40, "ho\nthere", 3, { durationMs: 330 })]);
-  eq("text fade tweens", sub(r.lastPayload, 3, 8), [5, 0, 0x0f, 0x01, 10]);
-  eq("text fade target", sub(r.lastPayload, 20, 22), le(0x13));
+  eq("text fade tweens", sub(r.lastPayload, HDR + 18, HDR + 26), [5, ...u32(t0), 0x0f, 0x01, 10]);
+  eq("text fade target", sub(r.lastPayload, HDR + 38, HDR + 40), le(0x13));
 
   eq("easing", easingCurve("ease-in-out"), [107, 0, 148, 255]);
-  eq("text bytes strip controls", textBytes("a\u0001b\u00e9", 3), [0x61, 0x62]);
+  eq("text bytes strip controls", textBytes("a\u0001bé", 3), [0x61, 0x62]);
+  eq("warm-up", sub(WARM_UP, 0, HDR), [38, 0, 0, 0, 0, 0x01, 0, 1]);
 
   ORIGIN.y = 128;
   for (const f of failures) console.log(`  FAIL ${f}`);
@@ -1639,20 +1637,22 @@ function leasePb(op: number): { pb: Uint8Array; magic: number } {
   return { pb: Uint8Array.from([0x08, 2, 0x10, ...varint(m), 0xaa, 0x06, ctl.length, ...ctl]), magic: m };
 }
 
-interface Link { send(payload: Uint8Array): Promise<void>; close(): Promise<void>; firmware: string; cfw: string }
+interface Link { send(payload: Uint8Array): Promise<void>; reset(): Promise<void>; close(): Promise<void>; firmware: string; cfw: string }
 
 /**
  * A hidden 2-frame tween before the first case: creates the firmware's
  * animation timer and runs one tick while nothing is on screen, so the first
- * visible transition is not also the first animation of the session.
+ * visible transition is not also the first animation of the session. One SHOW
+ * defines a black 1 px dot and tweens it; the first case's frame replaces the list.
  */
-const WARM_UP = Uint8Array.from([
-  37, 0x03, 0,
-  0, 0, T.CIRCLE_FILL, 0, 0, 0, ...i16(0), ...i16(0), ...i16(1), ...i16(0), ...i16(0), ...i16(0), ...i16(0), ...i16(0),
-  5, 0, 0x01, 0x00, 2, 0, 0, 255, 255, ...i16(1),
-]);
+const WARM_UP_ID = hash31("warm-up");
+const WARM_UP = show({
+  puts: [putObject(WARM_UP_ID, 1, geometricRecord(T.CIRCLE_FILL, 0, 0, 0, 0, 1))],
+  refs: [{ id: WARM_UP_ID, version: 1 }],
+  ops: [ops.tween(WARM_UP_ID, 0x01, 2, CURVES.linear, [1])],
+});
 
-/** `--dump`: the payload stream for patches/host/scene_replay_host.c — [1][len:u16][bytes], [2][ms:u32] wait, [3][len:u8][label]. */
+/** `--dump`: the payload stream for patches/host/vector_host_test.c — [1][len:u16][bytes], [2][ms:u32] wait, [3][len:u8][label]. */
 const dump: number[] = [];
 const dumpMessage = (payload: Uint8Array) => { if (DUMP) dump.push(1, payload.length & 0xff, payload.length >> 8, ...payload); };
 const dumpWait = (ms: number) => { if (DUMP && ms > 0) dump.push(2, ms & 0xff, (ms >> 8) & 0xff, (ms >> 16) & 0xff, (ms >> 24) & 0xff); };
@@ -1686,22 +1686,23 @@ async function openLink(): Promise<Link> {
   await lease(5); // FB_ACQUIRE (90 s, fail-open)
   const renew = setInterval(() => void lease(5), 30_000);
 
-  // GLASSLYCFW/31: custom payloads ride the SID-0xf0 message transport (no image container).
+  // GLASSLYCFW/38: custom payloads ride the SID-0xf0 message transport; the
+  // object cache shares one session epoch across both lenses.
   const transport = new CfwTransport(session, ACK_MS);
-  const send = async (payload: Uint8Array) => {
-    if (!(await transport.send(payload))) throw new Error(`message (mode ${payload[0]}, ${payload.length} B): ${transport.lastOutcome}`);
-  };
-  await send(WARM_UP);
-  await sleep(150);
+  const cache = new CacheLink(transport);
+  const send = async (payload: Uint8Array) => { await cache.send(payload); };
+  const reset = async () => { await cache.reset(); await send(WARM_UP); await sleep(150); };
+  await reset();
   return {
     firmware,
     cfw: cfw.raw,
     send,
+    reset,
     async close() {
       clearInterval(renew);
+      try { await send(hide()); } catch {}                 // blank; the cache itself goes with the lease
       transport.close();
-      try { await send(Uint8Array.from([38, 2])); } catch {} // release the retained scene
-      await lease(6).catch(() => {}); // FB_RELEASE
+      await lease(6).catch(() => {});                       // FB_RELEASE
       hb.stop();
       await session.close();
     },
@@ -1712,48 +1713,72 @@ async function openLink(): Promise<Link> {
 class Renderer {
   private prev: FrameElement[] = [];
   private synthetic = 0;
-  private scene = new CfwScene();
+  private scene = new ObjectScene();
   lastAckMs = 0;
   lastBytes = 0;
   lastPayload: Uint8Array = new Uint8Array();
   /** Longest tween the last frame started on the glasses (frames × 33 ms). */
   lastSettleMs = 0;
+  /** Objects the last frame referenced without redefining them (cache hits). */
+  lastHits = 0;
 
   constructor(private readonly link: Link | null) {}
 
   slotIndices(): number[][] { return this.scene.indices(); }
+  resident(): number { return this.scene.resident(); }
+
+  private async transmit(payload: Uint8Array): Promise<void> {
+    if (!this.link) return;
+    try {
+      await this.link.send(payload);
+    } catch (err) {
+      if (err instanceof StaleEpochError) {
+        // a lens lost its cache (lease lapse, reboot): start a fresh epoch and redefine everything
+        console.log(`      ${err.message}; resetting the cache`);
+        this.scene.invalidate();
+        await this.link.reset();
+        this.prev = [];
+        throw new Error(`cache lost: ${err.message}`);
+      }
+      this.scene.invalidate();
+      this.prev = [];
+      throw err;
+    }
+  }
 
   async render(elements: RenderElement[]): Promise<RenderResult> {
     const resolved = resolveAnchors(elements, CANVAS.width, CANVAS.height);
     const processed = processScene(resolved, CANVAS);
     const { elements: diffed } = diffScene(this.prev, processed.elements, () => `~${++this.synthetic}`);
     this.prev = diffed;
-    const encoded = this.scene.encode(diffed);
     const base = { status: "displayed" as const, degraded: processed.degraded, dropped: processed.dropped };
+    if (diffed.length === 0) {
+      const blank = this.scene.hide();
+      this.lastBytes = blank.length; this.lastPayload = blank; this.lastSettleMs = 0; this.lastHits = 0;
+      dumpMessage(blank);
+      const t0 = performance.now();
+      await this.transmit(blank);
+      this.lastAckMs = this.link ? performance.now() - t0 : 0;
+      return { ...base, presented: true };
+    }
+    const encoded = this.scene.encode(diffed);
     if (!encoded) {
       // The phone falls back to its raster path here; this port has none.
       this.scene.invalidate();
       this.prev = [];
-      return { ...base, presented: false, reason: "frame does not fit the 128-slot table" };
+      return { ...base, presented: false, reason: `frame does not fit the ${MAX_OBJECTS}-object table` };
     }
     this.lastBytes = encoded.payload.length;
     this.lastPayload = encoded.payload;
     this.lastSettleMs = encoded.animMs;
+    this.lastHits = encoded.refs;
     dumpMessage(encoded.payload);
     const t0 = performance.now();
-    if (this.link) {
-      try {
-        await this.link.send(encoded.payload);
-      } catch (err) {
-        this.scene.invalidate();
-        this.prev = [];
-        throw err;
-      }
-    }
+    await this.transmit(encoded.payload);
     this.lastAckMs = this.link ? performance.now() - t0 : 0;
     if (TRACE) {
-      const ops = [encoded.repack ? "repack" : "", encoded.sets ? `${encoded.sets} set` : "", encoded.tweens ? `${encoded.tweens} tween` : "", encoded.deletes ? `${encoded.deletes} delete` : ""].filter(Boolean).join(", ");
-      console.log(`      ${String(encoded.payload.length).padStart(5)} B  ${String(Math.round(this.lastAckMs)).padStart(4)} ms ack  settle ${this.lastSettleMs} ms  ${ops || "no change"}${processed.dropped.length ? `  dropped ${processed.dropped.join(",")}` : ""}`);
+      const parts = [encoded.sets ? `${encoded.sets} put` : "", encoded.refs ? `${encoded.refs} cached` : "", encoded.tweens ? `${encoded.tweens} tween` : "", encoded.deletes ? `${encoded.deletes} left` : ""].filter(Boolean).join(", ");
+      console.log(`      ${String(encoded.payload.length).padStart(5)} B  ${String(Math.round(this.lastAckMs)).padStart(4)} ms ack  settle ${this.lastSettleMs} ms  ${parts || "no change"}${processed.dropped.length ? `  dropped ${processed.dropped.join(",")}` : ""}`);
     }
     return { ...base, presented: true };
   }
@@ -1820,14 +1845,14 @@ if (args.includes("--self-test")) await selfTest();
 const link = DRY_RUN ? null : await openLink();
 const renderer = new Renderer(link);
 const results: CaseResult[] = [];
-if (DUMP) { dumpLabel("warm-up"); dumpMessage(WARM_UP); dumpWait(150); }
+if (DUMP) { dumpLabel("warm-up"); dumpMessage(control.reset()); dumpMessage(WARM_UP); dumpWait(150); }
 console.log(`${DRY_RUN ? "dry run: " : ""}${selected.length} case${selected.length === 1 ? "" : "s"}, canvas ${CANVAS.width}×${CANVAS.height}, budget ${CANVAS.maxTextElements}`);
 try {
   for (let i = 0; i < selected.length; i++) {
     const c = selected[i];
     const r = await runCase(c, renderer);
     results.push(r);
-    const timing = r.state === "error" ? "" : `  ${String(r.ackMs).padStart(4)} ms ack, ${String(r.settleMs).padStart(4)} ms anim, ${r.steps} step${r.steps === 1 ? "" : "s"} @ ${r.stepsPerSecond}/s, ${r.bytes} B`;
+    const timing = r.state === "error" ? "" : `  ${String(r.ackMs).padStart(4)} ms ack, ${String(r.settleMs).padStart(4)} ms anim, ${r.steps} step${r.steps === 1 ? "" : "s"} @ ${r.stepsPerSecond}/s, ${r.bytes} B, ${renderer.resident()} cached`;
     console.log(`[${String(i + 1).padStart(2)}/${selected.length}] ${r.state.toUpperCase().padEnd(5)} ${r.id.padEnd(26)} ${r.reason}${timing}`);
   }
 } finally {
@@ -1837,7 +1862,6 @@ try {
   } else if (DUMP) {
     dumpLabel("teardown");
     await renderer.render([]);
-    dumpMessage(Uint8Array.from([38, 2]));
   }
 }
 

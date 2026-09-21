@@ -102,9 +102,9 @@ typedef struct {
     uint8_t direct_failed;
     uint8_t direct_active;                    /* physical framebuffer currently owns the image */
     uint32_t direct_lease_deadline;            /* fail-open repaint-guard deadline */
-    /* Phone-owned texture data (256 KiB, EvenHub heap), allocated lazily on the first mode-18
-     * write and released with the Faceclaw framebuffer lease. Protocol references
-     * into this block are uint32 offsets (modes 18/19/20). */
+    /* Asset store of the object cache (256 KiB, EvenHub heap; scene.c), allocated
+     * lazily by the first PUT_ASSET and released with the framebuffer lease.
+     * Only the cache's allocator addresses it; the wire carries asset ids. */
     uint8_t *texture_cache;
     /* --- Microphone control + multi-channel routing (SybilSight "glasses ->
      * microphones"). See the contract comment in mic_control.c; the stock-entry
@@ -133,10 +133,10 @@ typedef struct {
     uint8_t  mic_settle_stage;              /* 2.2.10.37: 0 idle, 1 = waiting for chip boot, 2 = I2S
                                              * deinit issued, waiting to re-init on the ready chip */
     uint8_t  mic_notify_buf[32];            /* stable storage for the field-104 sid-0x09 notify */
-    /* --- Retained shape scene + animation (scene.c, modes 36-38). The scene
-     * body and its 640x480 frame are lazily allocated from heap 13; the frame
-     * timer is created on first use and deleted by mode 11 cleanup. --- */
-    struct cfw_scene_s *scene;
+    /* --- Retained object cache + animation (scene.c, modes 37-41). The
+     * descriptor block is lazily allocated from heap 13; the frame timer is
+     * created on first use and deleted by mode 11 cleanup. --- */
+    struct cfw_cache_s *scene;
     uint32_t scene_timer;                   /* osTimer pacing animation frames (0 = none) */
     /* --- ANCS relay (ancs_relay.c, sid-0x09 fields 125/126). The stock ANCC
      * profile callbacks (BLE stack task) append records to a single-producer,
@@ -300,6 +300,18 @@ typedef struct {
     /* Upstream Faceclaw/19: timestamped R1 (ring) SysEvent, sent before stock filtering. */
     uint8_t  ring_notify_buf[25];
     uint8_t  ring_pad0[3];
+    /* --- Revision 38: object cache session state (scene.c). The epoch outlives
+     * the cache memory so a lost or reset cache is never mistaken for the old
+     * one; cache_lost defers the release to a context that owns the display
+     * gate. A handler leaves its reply (transport kind 5) in cache_reply; the
+     * transport sets cache_reply_cap to what one notification can carry. --- */
+    uint16_t cache_epoch;
+    uint8_t  cache_lost;
+    uint8_t  cache_reply_len;
+    uint8_t  cache_reply_cap;
+    uint8_t  cache_pad0[3];
+    uint32_t texture_cache_size;            /* bytes the store allocation actually got (<= 256 KiB) */
+    uint8_t  cache_reply[256];
 } customCfwContext;
 
 
@@ -314,7 +326,7 @@ typedef struct {
 #define CFW_ALLOC_DIAG_MAGIC 0xA110CA7EU
 
 // Marker used to validate that the CFW context pointer hasn't been clobbered.
-#define CFW_CTX_MAGIC 0xC0FFEE70U    /* revision 36: hand-off fields replaced by the shape text scratch */
+#define CFW_CTX_MAGIC 0xC0FFEE72U    /* revision 38: object cache session fields appended */
 
 #define FW_MS_TICK  (*(volatile uint32_t *)0x20077e4cU)  /* firmware 1 ms OS tick (SysTick chain) */
 

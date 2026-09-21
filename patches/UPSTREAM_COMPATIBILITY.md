@@ -6,8 +6,7 @@ unchanged. There are no length-based overloads or aliases.
 | Extension | Old | Revision 24 |
 | --- | --- | --- |
 | Immediate shapes | Mode 16, `shapes16` | Mode 36, `shapes36` |
-| Retained scenes, SVG paths and rotation | Mode 17, `scene17` | Mode 37, `scene37` |
-| Animation control | Mode 18, `anim18` | Mode 38, `anim38` |
+| Retained object cache (revision 38: PUT/SHOW/HIDE/STATE/CONTROL), SVG paths and rotation | Mode 17, `scene17` | Modes 37–41 |
 | ANCS reports/status, glasses → phone | Settings field 105 | Settings field 125 |
 | ANCS control, phone → glasses | Settings field 106 | Settings field 126 |
 

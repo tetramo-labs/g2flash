@@ -142,8 +142,7 @@ __attribute__((used, noinline)) int cfw_fb_lease_active(void) {
     if ((int32_t)(ctx->direct_lease_deadline - FW_MS_TICK) <= 0) {
         ctx->direct_lease_deadline = 0;
         ctx->direct_active = 0;
-        cfw_scene_stop(ctx);
-        cfw_texture_cache_release(ctx);
+        cfw_cache_lose(ctx);
         return 0;
     }
     return 1;
@@ -196,8 +195,8 @@ static void faceclaw_send_wake_event(customCfwContext *ctx, unsigned event) {
     ((send_fn)FW_SEND)(1, 9, p, 13);
 }
 
-/* Revision 27: a tagged scene commit (mode-37 op 10) reports field 129 =
- * [tagLo][tagHi] once the scene has settled. Tag 129/wire2 = 1034 = 8a 08.
+/* Revision 27: a tagged scene commit (revision 38: a SHOW with the TAG flag)
+ * reports field 129 = [tagLo][tagHi] once the scene has settled. Tag 129/wire2 = 1034 = 8a 08.
  * Called from the EvenHub task and the animation timer thread, like the
  * ANCS relay's sends. Only the right/master lens notifies the phone. */
 static void cfw_scene_notify_settled(customCfwContext *ctx, uint16_t tag) {
@@ -367,15 +366,13 @@ static void faceclaw_apply_control(const uint8_t *data, uint32_t len) {
         if (ctx->direct_lease_deadline == 0 ||
             (int32_t)(ctx->direct_lease_deadline - FW_MS_TICK) <= 0) {
             ctx->direct_active = 0;
-            cfw_scene_stop(ctx);
-            cfw_texture_cache_release(ctx);
+            cfw_cache_lose(ctx);
         }
         ctx->direct_lease_deadline = FW_MS_TICK + FACECLAW_LEASE_MS;
     } else if (op == FACECLAW_OP_FB_RELEASE) {
         ctx->direct_lease_deadline = 0;
         ctx->direct_active = 0;
-        cfw_scene_stop(ctx);
-        cfw_texture_cache_release(ctx);
+        cfw_cache_lose(ctx);
     } else if (op == FACECLAW_OP_WEAR_QUERY) {
         unsigned status = FW_WEAR_STATUS();
         if (status == 1u || status == 2u)
@@ -457,6 +454,14 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   38 -> retained object cache (scene.c): modes 37-41 replace the slot scene
+//         (37/38) and the raw texture writes (18). Objects and assets carry
+//         32-bit ids and versions, survive their view being hidden, and are
+//         evicted least-recently-used; the 256 KiB store is fully addressable
+//         through the firmware's allocator. Cache replies ride the SID-0xf0
+//         transport as reply kind 5. Modes 19/20 and mode-36 IMAGE/TEXT records
+//         reference assets by id. Lease loss defers the release to the display
+//         gate instead of freeing from the settings thread.
 //   37 -> rebased onto stock G2 2.3.0.24 (upstream jimrandomh/g2flash main, which
 //         also brings ring touch-down forwarding as SysEvent 14). Every stock
 //         address was re-derived for 2.3.0.24; the fork keeps its own ANCS relay
@@ -567,7 +572,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/37";
+        static const char caps[] = "GLASSLYCFW/38";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

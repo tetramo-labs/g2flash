@@ -1,6 +1,20 @@
 # Retained object cache and fast dashboard reopening
 
-Status: proposed implementation plan; no firmware or Glassly behavior changed.
+Status: implemented in g2flash as GLASSLYCFW/38 and verified on hardware
+(2026-09-20: vector suite 23/23 payloads, shapes suite 43/43, staged demo with a
+blank-to-scene reopen of 47 ms and no definitions sent; both lenses acknowledge).
+Hardware findings: the right lens processes messages on a task with far less
+stack than the left lens's BLE task and reboots on any heap allocation taken
+while the display gate is held, so the firmware allocates everything before the
+gate and keeps handler state in the heap; its EvenHub heap may not fit 256 KiB,
+so the store falls back to 192/128/96/64 KiB and the RESET reply reports the size.
+Implementation: `patches/scene.c`
+(object cache, modes 37-41), `patches/texture_cache.c` (region-based asset
+renderers), `patches/shapes.c` (asset-id records), transport reply kind 5,
+host tests in `patches/host/shapes_host_test.c` / `vector_host_test.c`, demos
+on `demos/object-cache.ts`. Wire codes and budgets chosen in implementation are
+documented at the top of `patches/scene.c`; deviations from this plan are noted
+inline below as "Implemented:" paragraphs where they matter.
 
 ## Goal
 
@@ -72,6 +86,12 @@ Use current constants and executable code when specifying the new protocol.
 
 ### 32-bit asset storage offsets
 
+Implemented: asset-bearing records carry 32-bit asset ids (IMAGE/TEXT 12 bytes,
+TEXT_CACHED 16 bytes); firmware resolves ids to store regions through a
+16-byte-granule bitmap allocator over the 256 KiB store. Fonts are
+self-contained assets (96 relative glyph offsets + glyph images). Inline text
+and path commands become private assets owned by their object.
+
 Include removal of the 64 KiB scene addressing limit in this change, using the
 new object protocol rather than introducing an intermediate scene record format.
 
@@ -123,6 +143,12 @@ new object protocol rather than introducing an intermediate scene record format.
   promotes pending state to confirmed state after the relevant lens acknowledges.
 
 ## Protocol design
+
+Implemented wire codes: 37 PUT, 38 SHOW (embedded PUTs, references, ops,
+flags PRESENT/KEEP/TAG/FREEZE), 39 HIDE, 40 STATE, 41 CONTROL (reset with a
+phone-chosen epoch, drop, period); replies as transport kind 5 with statuses
+applied/stale/missing/capacity/refused/unchanged/delta/snapshot/reset. Modes
+19/20/36 reference assets by id; mode 18 is retired. See `patches/scene.c`.
 
 Assign wire codes and a new protocol revision during implementation. Replace
 existing scene/cache commands, including the old modes 37/38 layouts; retaining

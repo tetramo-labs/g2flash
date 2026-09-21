@@ -42,6 +42,8 @@ import {
   type ImageContainerSpec,
 } from "g2-kit/ble";
 import { describeCfw, queryGlasslyCfw, REQUIRED_REVISION } from "./glassly-cfw";
+import { CacheLink, CfwTransport } from "./cfw-transport";
+import { EASE, hash31, hide, ops, putObject, record as geometricRecord, show, T as SHAPES, type Ref } from "./object-cache";
 import { startHeartbeat } from "g2-kit/ui";
 import { deflateSync } from "node:zlib";
 import { GifReader } from "omggif";
@@ -253,84 +255,69 @@ class RectTracker {
   }
 }
 
-// ---- wire: mode-37 scene patches for filled rects ------------------------------------
-const i16 = (v: number) => { const u = v < 0 ? v + 0x10000 : v; return [u & 0xff, (u >> 8) & 0xff]; };
-const T = { RECT_FILL: 3, CIRCLE_FILL: 5 } as const;
-const COMMIT = 0x01, CLEAR = 0x02;
-const LINEAR = [0, 0, 255, 255];
+// ---- wire: object-cache frames for filled rects -------------------------------------
 const FRAME_PERIOD_MS = 33;
-const MAX_SLOTS = 128;
 /** Every tweenable rect parameter (x y w h r) plus color and width, as the suite sends. */
 const RECT_TWEEN_MASK = 0x1f | 0x100 | 0x200;
 
 const clampCoord = (v: number) => Math.max(-32768, Math.min(32767, Math.trunc(v)));
 const rectParams = (r: Rect) => [clampCoord(r.x + ORIGIN.x), clampCoord(r.y + ORIGIN.y), clampCoord(r.w), clampCoord(r.h), 0];
-const setRect = (slot: number, r: Rect) => [0, slot, T.RECT_FILL, 1, 15, 0, ...rectParams(r).flatMap(i16), ...i16(0), ...i16(0), ...i16(0)];
-const deleteSlot = (slot: number) => [1, slot];
-const tweenRect = (slot: number, r: Rect, frames: number) =>
-  [5, slot, RECT_TWEEN_MASK & 0xff, RECT_TWEEN_MASK >> 8, frames, ...LINEAR, ...rectParams(r).flatMap(i16), ...i16(15), ...i16(0)];
+const rectRecord = (r: Rect) => geometricRecord(SHAPES.RECT_FILL, 15, 0, ...rectParams(r));
+const rectVersion = (r: Rect) => hash31(rectParams(r).join(","));
 
 /**
  * A hidden two-frame tween before the first frame: the firmware creates its
  * animation timer on the first tween, so the first visible transition of a
  * lease should not also be its first animation.
  */
-const WARM_UP = Uint8Array.from([
-  37, COMMIT | CLEAR, 0,
-  0, 0, T.CIRCLE_FILL, 0, 0, 0, ...i16(0), ...i16(0), ...i16(1), ...i16(0), ...i16(0), ...i16(0), ...i16(0), ...i16(0),
-  5, 0, 0x01, 0x00, 2, 0, 0, 255, 255, ...i16(1),
-]);
+const WARM_UP_ID = hash31("warm-up");
+const WARM_UP = show({
+  puts: [putObject(WARM_UP_ID, 1, geometricRecord(SHAPES.CIRCLE_FILL, 0, 0, 0, 0, 1))],
+  refs: [{ id: WARM_UP_ID, version: 1 }],
+  ops: [ops.tween(WARM_UP_ID, 0x01, 2, EASE.linear, [1])],
+});
 
 /**
- * The retained scene for the shapes test: one slot per tracked rect id, held
- * for as long as the id lives. A continuing rect that moved becomes a TWEEN
- * over the frame period, a new one a SET, a vanished one a DELETE; a slot
- * freed by a DELETE rests a frame before it is handed to a new id, so a SET
- * never lands on a slot the glasses may still be tweening.
+ * The retained scene for the shapes test: one object per tracked rect id, on
+ * the active list for as long as the id lives. A continuing rect that moved
+ * becomes a TWEEN over the frame period, a new one an embedded PUT, a
+ * vanished one leaves the list (it stays cached until the LRU needs the room;
+ * an id the tracker hands out again is redefined, never tweened from a stale
+ * position).
  */
 class RectScene {
-  private slotOf = new Map<string, number>();
-  private last = new Map<string, Rect>();
-  private cooling: number[] = [];
-  private free: number[] = [];
-  private nextSlot = 0;
-  private first = true;
+  private known = new Map<string, { version: number; state: Rect }>();
+  private active = new Set<string>();
 
   encode(rects: TrackedRect[], transitionMs: number): { payload: Uint8Array; sets: number; tweens: number; deletes: number } {
     const frames = transitionMs > 0 ? Math.max(2, Math.min(255, Math.round(transitionMs / FRAME_PERIOD_MS))) : 0;
-    const ops: number[] = [];
-    let sets = 0, tweens = 0, deletes = 0;
-    const live = new Set(rects.map((r) => r.id));
-    const released: number[] = [];
-    for (const [id, slot] of this.slotOf) {
-      if (live.has(id)) continue;
-      ops.push(...deleteSlot(slot));
-      deletes++;
-      released.push(slot);
-      this.slotOf.delete(id);
-      this.last.delete(id);
-    }
+    const puts: number[][] = [], refs: Ref[] = [], opList: number[][] = [];
+    let sets = 0, tweens = 0;
+    const next = new Set<string>();
     for (const r of rects) {
-      const slot = this.slotOf.get(r.id);
-      if (slot === undefined) {
-        const s = this.free.pop() ?? this.nextSlot++;
-        if (s >= MAX_SLOTS) throw new Error(`scene needs more than ${MAX_SLOTS} slots`);
-        this.slotOf.set(r.id, s);
-        ops.push(...setRect(s, r));
-        sets++;
-      } else {
-        const prev = this.last.get(r.id)!;
-        if (prev.x === r.x && prev.y === r.y && prev.w === r.w && prev.h === r.h) continue;
-        if (frames >= 2) { ops.push(...tweenRect(slot, r, frames)); tweens++; }
-        else { ops.push(...setRect(slot, r)); sets++; }
+      const id = hash31(r.id);
+      next.add(r.id);
+      const k = this.known.get(r.id);
+      const geometry = { x: r.x, y: r.y, w: r.w, h: r.h };
+      if (k && this.active.has(r.id)) {
+        const prev = k.state;
+        if (prev.x !== r.x || prev.y !== r.y || prev.w !== r.w || prev.h !== r.h) {
+          if (frames >= 2) { opList.push(ops.tween(id, RECT_TWEEN_MASK, frames, EASE.linear, [...rectParams(r), 15, 0])); tweens++; k.state = geometry; }
+          else { k.version = rectVersion(r); k.state = geometry; puts.push(putObject(id, k.version, rectRecord(r))); sets++; }
+        }
+        refs.push({ id, version: k.version });
+        continue;
       }
-      this.last.set(r.id, { x: r.x, y: r.y, w: r.w, h: r.h });
+      const version = rectVersion(r);
+      if (k && k.version === version) { k.state = geometry; refs.push({ id, version }); continue; }   /* a cache hit */
+      this.known.set(r.id, { version, state: geometry });
+      puts.push(putObject(id, version, rectRecord(r)));
+      sets++;
+      refs.push({ id, version });
     }
-    this.free.push(...this.cooling);
-    this.cooling = released;
-    const flags = this.first ? COMMIT | CLEAR : COMMIT;
-    this.first = false;
-    return { payload: Uint8Array.from([37, flags, 0, ...ops]), sets, tweens, deletes };
+    const deletes = [...this.active].filter((id) => !next.has(id)).length;
+    this.active = next;
+    return { payload: show({ puts, refs, ops: opList }), sets, tweens, deletes };
   }
 }
 
@@ -499,12 +486,8 @@ async function openLink(): Promise<Link> {
 
   const hb = startHeartbeat({ session, nextMagic });
   const suffix = String(Date.now() % 10_000).padStart(4, "0");
-  let sid = 1;
-  const create = buildCreateStartUpPageContainer({ name: `b${suffix}`, items: ["."], containerId: 1, captureEvents: false, magic: nextMagic(), extraContainerNames: [`c${suffix}`] });
+  const create = buildCreateStartUpPageContainer({ name: `b${suffix}`, items: ["."], containerId: 1, captureEvents: false, magic: nextMagic() });
   if (!(await session.sendPb(0xe0, create.pb, create.magic, { ackTimeoutMs: ACK_MS }))) throw new Error("CREATE did not ack");
-  const container: ImageContainerSpec = { name: `c${suffix}`, containerId: 2, x: 0, y: 0, width: CANVAS_W, height: CANVAS_H };
-  const rebuild = buildImageContainers({ containers: [container], magic: nextMagic() });
-  if (!(await session.sendPb(0xe0, rebuild.pb, rebuild.magic, { ackTimeoutMs: ACK_MS }))) throw new Error("REBUILD did not ack");
   await sleep(300);
 
   const lease = async (op: number) => {
@@ -514,22 +497,18 @@ async function openLink(): Promise<Link> {
   await lease(5); // FB_ACQUIRE (90 s, fail-open)
   const renew = setInterval(() => void lease(5), 30_000);
 
-  const send = async (payload: Uint8Array) => {
-    for (const frag of planImageFragments(payload, 4000)) {
-      const raw = buildImageRawData({
-        containerId: container.containerId, containerName: container.name, mapSessionId: sid,
-        mapTotalSize: payload.length, mapFragmentIndex: frag.index, mapRawData: frag.data,
-        magic: nextMagic(), compressMode: 0,
-      });
-      if (!(await session.sendPb(0xe0, raw.pb, raw.magic, { ackTimeoutMs: ACK_MS }))) throw new Error(`image message (mode ${payload[0]}) did not ack`);
-    }
-    sid++;
-  };
+  // GLASSLYCFW/38: every payload rides the SID-0xf0 transport; cache messages share one session epoch.
+  const transport = new CfwTransport(session, ACK_MS);
+  const cache = new CacheLink(transport);
+  await cache.reset();
+  const send = async (payload: Uint8Array) => { await cache.send(payload); };
   return {
     send,
     async close() {
       clearInterval(renew);
-      await lease(6).catch(() => {}); // FB_RELEASE
+      try { await send(hide()); } catch {}
+      transport.close();
+      await lease(6).catch(() => {});                  // FB_RELEASE
       hb.stop();
       await session.close();
     },
@@ -614,7 +593,7 @@ async function runShapes(clip: Clip, link: Link | null): Promise<Stats> {
     // ~20 B per rect element across the bridge: id, box, style, transition.
     return { payload: encoded.payload, bridge: rects.length * 20, detail: `${rects.length} rects: ${encoded.sets} set, ${encoded.tweens} tween, ${encoded.deletes} delete` };
   });
-  return { ...stats, note: `≤${MAX_SHAPE_RECTS} filled rects with stable ids and a ${transitionMs} ms linear transition: mode-37 patches, moving parts as TWEENs` };
+  return { ...stats, note: `≤${MAX_SHAPE_RECTS} filled rects with stable ids and a ${transitionMs} ms linear transition: one SHOW per frame, moving parts as TWEENs, new parts as embedded PUTs` };
 }
 
 // ---- main ------------------------------------------------------------------------------------
@@ -632,7 +611,7 @@ try {
     results.push(stats);
     if (link) {
       // Blank between tests, and hand the panel back from the scene to the shadow.
-      if (mode === "shapes") await link.send(Uint8Array.from([38, 2]));
+      if (mode === "shapes") await link.send(hide());
       else await link.send(keyframe(new Uint8Array(PANEL_W * PANEL_H)));
       await sleep(800);
     }

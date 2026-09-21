@@ -13,6 +13,7 @@
 import { deflateSync, constants } from "node:zlib";
 import type { G2Session } from "g2-kit/ble";
 import { sendFrames } from "g2-kit/ble";
+import { control, describeReply, isCacheMessage, parseReply, REPLY, withEpoch, type Reply } from "./object-cache";
 
 export const CFW_SID = 0xf0;
 const LENS_BOTH = 3;
@@ -68,8 +69,10 @@ export function packets(stream: Uint8Array, sequence: number, targets = LENS_BOT
 }
 
 export interface Ack { success: boolean; streamId: number; ordinal: number; lens: number; size: number; crc: number }
+/** Kind-5 object-cache reply (GLASSLYCFW/38): sent by each lens before its ACK. */
+export interface CacheReplyFrame { streamId: number; ordinal: number; lens: number; reply: Reply }
 
-/** Parse a raw notify frame into the reply it carries, or null. */
+/** Parse a raw notify frame into the ACK/NACK it carries, or null. */
 export function parseAckFrame(raw: Uint8Array): Ack | null {
   if (raw.length < 19 || raw[0] !== 0xaa || raw[3] + 8 !== raw.length || raw[6] !== CFW_SID) return null;
   const body = raw.subarray(8, raw.length - 2);
@@ -78,6 +81,17 @@ export function parseAckFrame(raw: Uint8Array): Ack | null {
   if ((body[0] !== 1 && body[0] !== 3) || (body[4] !== 1 && body[4] !== 2)) return null;
   return { success: body[0] === 1, streamId: body[1], ordinal: body[2] | (body[3] << 8), lens: body[4],
     size: body[5] | (body[6] << 8), crc: body[7] | (body[8] << 8) };
+}
+
+/** Parse a raw notify frame into the cache reply it carries, or null. */
+export function parseReplyFrame(raw: Uint8Array): CacheReplyFrame | null {
+  if (raw.length < 15 || raw[0] !== 0xaa || raw[3] + 8 !== raw.length || raw[6] !== CFW_SID) return null;
+  const body = raw.subarray(8, raw.length - 2);
+  const crc = crc16(body);
+  if (raw[raw.length - 2] !== (crc & 0xff) || raw[raw.length - 1] !== crc >> 8) return null;
+  if (body[0] !== 5 || (body[4] !== 1 && body[4] !== 2)) return null;
+  const reply = parseReply(body.subarray(5));
+  return reply ? { streamId: body[1], ordinal: body[2] | (body[3] << 8), lens: body[4], reply } : null;
 }
 
 /** ACK-gated sender: one stream per payload, both lenses must ack. */
@@ -89,18 +103,25 @@ export class CfwTransport {
   constructor(private readonly session: G2Session, private readonly ackTimeoutMs = 8000) {
     this.off = session.onRawFrame((_frame, raw) => {
       const ack = parseAckFrame(raw);
-      if (ack) this.waiter?.(ack);
+      if (ack) { this.waiter?.(ack); return; }
+      const reply = parseReplyFrame(raw);
+      if (reply && reply.streamId === this.currentStream && reply.ordinal === 0) this.lastReplies.set(reply.lens, reply.reply);
     });
   }
 
   /** Outcome of the last send: which lenses acked, which NACKed, or a timeout. */
   lastOutcome = "";
+  /** Cache replies (kind 5) of the last send, by lens (1 = left, 2 = right). */
+  lastReplies = new Map<number, Reply>();
+  private currentStream = -1;
 
-  /** Resolves true when both lenses acked, false on NACK or timeout (see lastOutcome). */
-  async send(payload: Uint8Array): Promise<boolean> {
+  /** Resolves true when every targeted lens acked, false on NACK or timeout (see lastOutcome). */
+  async send(payload: Uint8Array, targets = LENS_BOTH): Promise<boolean> {
     const streamId = this.sequence;
-    const frames = packets(record(payload), streamId);
+    const frames = packets(record(payload, targets), streamId, targets);
     this.sequence = (this.sequence + frames.length) & 0xff;
+    this.currentStream = streamId;
+    this.lastReplies = new Map();
     let acked = 0;
     const name = (lens: number) => (lens === 1 ? "L" : "R");
     const done = new Promise<boolean>((resolve) => {
@@ -115,7 +136,7 @@ export class CfwTransport {
         if (ack.streamId !== streamId || ack.ordinal !== 0) return;
         if (!ack.success) { clearTimeout(timer); this.waiter = undefined; this.lastOutcome = `NACK from ${name(ack.lens)}`; resolve(false); return; }
         acked |= ack.lens;
-        if (acked === LENS_BOTH) { clearTimeout(timer); this.waiter = undefined; this.lastOutcome = "acked by both"; resolve(true); }
+        if ((acked & targets) === targets) { clearTimeout(timer); this.waiter = undefined; this.lastOutcome = targets === LENS_BOTH ? "acked by both" : `acked by ${name(targets)}`; resolve(true); }
       };
     });
     await sendFrames(this.session.left, frames);
@@ -123,4 +144,55 @@ export class CfwTransport {
   }
 
   close(): void { this.off(); }
+}
+
+export class StaleEpochError extends Error {
+  constructor(public readonly lens: number, public readonly epoch: number) { super(`lens ${lens === 1 ? "L" : "R"} is at cache epoch ${epoch}`); }
+}
+
+/**
+ * Object-cache session over the transport: owns the epoch both lenses share,
+ * fills it into every cache message and turns replies into results. A RESET
+ * hands the phone-chosen epoch to both lenses; any lens that later answers
+ * STALE (its cache was lost with the lease or rebooted) raises StaleEpochError
+ * so the caller can reset and rebuild.
+ */
+export class CacheLink {
+  epoch = 0;
+  /** Smallest asset store among the lenses, in KiB, learned from the RESET replies. */
+  storeKiB = 0;
+  private request = 1;
+  constructor(private readonly transport: CfwTransport, public targets = LENS_BOTH) {}
+
+  nextRequest(): number { const r = this.request; this.request = this.request >= 0xffff ? 1 : this.request + 1; return r; }
+
+  /** Empty both caches and adopt one fresh session epoch. */
+  async reset(): Promise<void> {
+    this.epoch = 1 + Math.floor(Math.random() * 0xfffe);
+    const replies = await this.send(control.reset(this.nextRequest(), CHUNK + 10), { expectEpoch: false });
+    for (const [lens, r] of replies) if (r.epoch !== this.epoch) throw new Error(`lens ${lens} kept epoch ${r.epoch} after a reset to ${this.epoch}`);
+    this.storeKiB = Math.min(...[...replies.values()].map((r) => r.storeKiB ?? 0));
+  }
+
+  /**
+   * Send one message. Cache messages get the session epoch and must be answered
+   * APPLIED/UNCHANGED/DELTA/SNAPSHOT by both lenses; a STALE reply throws
+   * StaleEpochError, any other status throws with the reply text. Non-cache
+   * messages are passed through.
+   */
+  async send(message: Uint8Array, o: { expectEpoch?: boolean; allow?: number[] } = {}): Promise<Map<number, Reply>> {
+    const cache = isCacheMessage(message);
+    const wire = cache ? withEpoch(message, this.epoch, this.nextRequest()) : message;
+    if (!(await this.transport.send(wire, this.targets))) throw new Error(`message (mode ${message[0]}, ${message.length} B): ${this.transport.lastOutcome}`);
+    if (!cache) return new Map();
+    const replies = this.transport.lastReplies;
+    const ok = new Set(o.allow ?? [REPLY.APPLIED, REPLY.UNCHANGED, REPLY.DELTA, REPLY.SNAPSHOT]);
+    for (const [lens, r] of replies) {
+      if (r.status === REPLY.STALE && o.expectEpoch !== false) throw new StaleEpochError(lens, r.epoch);
+      if (!ok.has(r.status)) throw new Error(`mode ${message[0]} refused by lens ${lens === 1 ? "L" : "R"}: ${describeReply(r)}`);
+    }
+    const expected = this.targets === LENS_BOTH ? 2 : 1;
+    if (replies.size < expected && !(o.allow && o.allow.length === 0)) throw new Error(`mode ${message[0]}: cache reply missing from ${replies.size ? (replies.has(1) ? "R" : "L") : "both lenses"}`);
+    return replies;
+  }
 }

@@ -1,11 +1,10 @@
-/** Revision 21 helpers. No mobile dependencies; mirrors patches/VECTOR_PROTOCOL.md. */
-export const u16 = (v: number) => [v & 255, (v >>> 8) & 255];
-export const i32 = (v: number) => [...u16(v), ...u16(v >>> 16)];
+/** Revision 38 path/rotation helpers on the object cache. No mobile dependencies; mirrors patches/VECTOR_PROTOCOL.md. */
+import { EASE, hash31, ops, pathRecord, putObject, record as geometricRecord, show, type Ref } from "./object-cache";
+export { u16, i16, u32 } from "./object-cache";
 function integer(v: number, min: number, max: number, name: string): number {
   if (!Number.isInteger(v) || v < min || v > max) throw new Error(`${name} outside ${min}..${max}: ${v}`);
   return v;
 }
-const slotId = (n: number) => integer(n, 0, 127, "slot");
 /** sid 0x09 field 101 framebuffer control, paired with a basic-settings read.
  * The firmware applies control before decoding the stock message. The read
  * body (field 4) makes it send the reply that the demo waits for; field 101
@@ -16,32 +15,40 @@ export function framebufferLease(op: 5 | 6, magic: number): Uint8Array {
   const id = magic < 128 ? [magic] : [(magic & 127) | 128, 1];
   return Uint8Array.from([8, 2, 16, ...id, 0x22, 2, 8, 1, 0xaa, 6, 6, 70, 67, 1, op, 1, 0]);
 }
-export const scene = (ops: number[][], clear = false, bg = 0) =>
-  Uint8Array.from([37, clear ? 3 : 1, integer(bg, 0, 15, "background"), ...ops.flat()]);
-export function shape(slot: number, type: number, params: number[], color = 15, width = 1): number[] {
-  if (params.length > 8) throw new Error("At most eight shape parameters");
-  return [0, slotId(slot), integer(type, 1, 13, "geometric shape"), 1,
-    integer(color, 0, 15, "color"), integer(width, 0, 255, "width"),
-    ...Array.from({length: 8}, (_, i) => u16(integer(params[i] ?? 0, -32768, 32767, "parameter"))).flat()];
-}
-export function rotate(slot: number, degrees: number, px: number, py: number, durationMs = 0,
-  curve = [0, 0, 255, 255]): number[] {
-  if (curve.length !== 4) throw new Error("Four easing bytes required");
-  return [9, slotId(slot), ...i32(integer(Math.round(degrees * 256), -9216000, 9216000, "angle")),
-    ...u16(integer(px, -32768, 32767, "pivot x")), ...u16(integer(py, -32768, 32767, "pivot y")),
-    ...u16(integer(durationMs, 0, 65535, "duration")), ...curve.map(v => integer(v, 0, 255, "curve"))];
-}
-export function path(slot: number, data: number[], rule: "nonzero" | "evenodd" = "nonzero",
-  x = 0, y = 0, scale = 1, color = 15): number[] {
-  integer(data.length, 1, 8192, "path bytes");
-  return [8, slotId(slot), 1, integer(color, 0, 15, "color"), rule === "evenodd" ? 1 : 0,
-    ...u16(integer(x, -32768, 32767, "x")), ...u16(integer(y, -32768, 32767, "y")),
-    ...u16(integer(Math.round(scale * 256), 0, 2048, "scale")), ...u16(data.length), ...data];
+
+/** A scene slot as the fixtures address it: slot n is object id n + 1. */
+export const slotId = (n: number) => integer(n, 0, 255, "slot") + 1;
+/** An object definition for `scene()`: slot + record; the version is the record's content hash. */
+export interface SlotDef { slot: number; record: number[] }
+export const shape = (slot: number, type: number, params: number[], color = 15, width = 1): SlotDef =>
+  ({ slot, record: geometricRecord(type, color, width, ...params) });
+export const path = (slot: number, data: number[], rule: "nonzero" | "evenodd" = "nonzero", x = 0, y = 0, scale = 1, color = 15): SlotDef =>
+  ({ slot, record: pathRecord(data, rule, x, y, scale, color) });
+export const rotate = (slot: number, degrees: number, px: number, py: number, durationMs = 0, curve: readonly number[] = EASE.linear) =>
+  ops.rotate(slotId(slot), degrees, px, py, durationMs, curve);
+export const glide = (slot: number, dx: number, dy: number, frames: number, curve: readonly number[] = EASE.linear) => ops.glide(slotId(slot), dx, dy, frames, curve);
+export const tween = (slot: number, mask: number, frames: number, curve: readonly number[], values: number[]) => ops.tween(slotId(slot), mask, frames, curve, values);
+export const freeze = (slot: number) => ops.freeze(slotId(slot));
+export const finish = (slot: number) => ops.finish(slotId(slot));
+
+/**
+ * One SHOW: the definitions become embedded PUTs and the active list (in slot
+ * order, each version = content hash), `keep` continues the current list with
+ * ops only, and `refs` names previously defined slots to keep on the list.
+ */
+export function scene(defs: SlotDef[], o: { ops?: number[][]; keep?: boolean; refs?: SlotDef[]; bg?: number; request?: number } = {}): Uint8Array {
+  if (o.keep && (defs.length || o.refs?.length)) throw new Error("a KEEP scene carries only ops");
+  const all = [...(o.refs ?? []), ...defs].sort((a, b) => a.slot - b.slot);
+  const versionOf = (d: SlotDef) => hash31(d.record.join(","));
+  const refs: Ref[] = all.map((d) => ({ id: slotId(d.slot), version: versionOf(d) }));
+  const puts = defs.map((d) => putObject(slotId(d.slot), versionOf(d), d.record));
+  return show({ request: o.request ?? 0, bg: o.bg ?? 0, puts, refs: o.keep ? [] : refs, keep: o.keep, ops: o.ops });
 }
 
 /** SVG d subset: absolute/relative M L H V Q C S T Z; implicit repetitions.
  * Unsupported syntax is rejected. Each filled contour must explicitly close. */
 export function svgPath(d: string): number[] {
+  const u16 = (v: number) => [v & 255, (v >>> 8) & 255];
   const tokens = d.match(/[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:[eE][-+]?\d+)?/g) ?? [];
   const residue = d.replace(/[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+\.?\d*)(?:[eE][-+]?\d+)?/g, "");
   if (/[^\s,]/.test(residue)) throw new Error("Invalid SVG path syntax");

@@ -121,7 +121,7 @@ static void routing(void) {
         p[0] = mode;
         for (unsigned len = 1; len <= sizeof(p); len++) assert(!is_shadow_message(p, len));
     }
-    const uint8_t modes[] = {3,6,8,9,11,15,19,20,36,37,38};
+    const uint8_t modes[] = {3,6,8,9,11,15,19,20,36,37,38,39,40,41};
     for (unsigned i = 0; i < sizeof(modes); i++) {
         p[0] = modes[i]; assert(is_shadow_message(p, 3));
         p[0] |= 0x80; assert(is_shadow_message(p, 3));
@@ -161,7 +161,7 @@ static void settings(void) {
     sends = 0;
     assert(settings_send_wrapper(1,9,buf,44) == 0 && sends == 2);
     const uint8_t *caps = field(sent[0],sent_len[0],100,&n);
-    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/37",13) == 0);
+    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/38",13) == 0);
     assert(sent_len[0] == 44 + 16 + 27 + 24 + 20); /* revision string, diagnostics, microphone and BLE status */
     assert(field(sent[0],sent_len[0],107,&n) && n == 24);
     assert(sent_len[0] + 2 <= 232); /* payload plus CRC stays in one BLE frame */

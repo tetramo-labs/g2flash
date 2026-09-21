@@ -1,5 +1,6 @@
 import {mkdir} from "node:fs/promises";
 import {path, scene, svgPath, u16} from "./vector-protocol";
+import {control, hide} from "./object-cache";
 import type {VectorStep} from "./vector-cases";
 
 export interface SvgVideo {
@@ -46,12 +47,13 @@ export function svgVideoSteps(video: SvgVideo, limit = video.frames.length): Vec
         frame.paths.reduce((n, p) => n + p.edges, 0) > 4096) throw new Error(`Frame ${i} exceeds the path budget`);
     // CLEAR and all new tiles commit in one scene transaction, including blank
     // frames and frames that now need fewer tiles than their predecessor.
-    const payload = scene(frame.paths.map((p, slot) => path(slot, svgPath(p.d), "evenodd", x + p.x, y + p.y)), true);
+    const payload = scene(frame.paths.map((p, slot) => path(slot, svgPath(p.d), "evenodd", x + p.x, y + p.y)));
     if (payload.length > 65535) throw new Error(`Frame ${i} exceeds the transfer size`);
     return {name: `svg-video-${i}`, payload, waitMs: 1000 / video.fps, probes: frame.probes,
       snapshot: [30, 60, 120, 180, 240, 299].includes(i)};
   });
-  steps.push({name: "release", payload: Uint8Array.from([38, 2]), waitMs: 0});
+  steps.unshift({name: "reset", payload: control.reset(), waitMs: 0});
+  steps.push({name: "release", payload: hide(), waitMs: 0});
   return steps;
 }
 
@@ -60,12 +62,12 @@ export async function loadSvgVideo(file: string, limit: number, svgOut?: string)
   const steps = svgVideoSteps(video, limit);
   if (svgOut) {
     await mkdir(svgOut, {recursive: true});
-    for (let i = 0; i < steps.length - 1; i++) {
+    for (let i = 0; i < steps.length - 2; i++) {          /* steps[0] is the reset, the last the hide */
       const paths = video.frames[i].paths.map(p => `<path fill="white" fill-rule="evenodd" transform="translate(${p.x} ${p.y})" d="${p.d}"/>`).join("");
       await Bun.write(`${svgOut}/${String(i).padStart(4, "0")}.svg`, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${video.width} ${video.height}"><rect width="100%" height="100%" fill="black"/>${paths}</svg>\n`);
     }
   }
-  const sizes = steps.slice(0, -1).map(s => s.payload.length).sort((a, b) => a - b);
+  const sizes = steps.slice(1, -1).map(s => s.payload.length).sort((a, b) => a - b);
   console.log(`[svg video] ${sizes.length} frames, ${video.width}×${video.height}, ${video.fps} fps; mean ${Math.round(sizes.reduce((a,b)=>a+b,0)/sizes.length)} B, p95 ${sizes[Math.floor(sizes.length*.95)]} B, max ${sizes.at(-1)} B`);
   return steps;
 }
