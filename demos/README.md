@@ -7,6 +7,15 @@ G2 glasses over Bluetooth and show off the [custom firmware](../) built by
 - **`detect-cfw.ts`** — reads the glasses' settings and reports whether they're
   running the custom firmware, and which extensions it advertises. Works on
   stock firmware too (it just reports "no CFW").
+- **`ring-touch-test.ts`** — live ring touch-down acceptance test. Run
+  `bun ring-touch-test.ts --timeout 120 --count 3`, wait for `READY`, then
+  touch and release the ring three times about two seconds apart. It connects
+  to both lenses, opens an EvenHub page, acquires both framebuffer leases, and
+  prints decoded input plus raw protobuf and timestamped `RI` ring reports.
+  Only ring touch-down (SysEvent 14, raw wire type 10 when present) counts as
+  success; taps, long presses and releases are logged separately. Exits 1 on
+  timeout and releases the leases, dismisses the page and disconnects on exit
+  or Ctrl-C. Requires existing CFW; does not build or flash firmware.
 - **`video-bench.ts`** — streams a video (as a GIF) to the lens as fast as it
   acks and benchmarks the achieved framerate / byte count. Streams via the
   CFW's compressed packed-4bpp keyframe and delta modes.
