@@ -82,6 +82,9 @@ void ancs_apply_control(const uint8_t *data, uint32_t len);
 /* BLE link speed (ble_link.c, same translation unit). Field 127 selects the
  * stock or the 7.5 ms fast connection profile; field 128 reports the state on
  * every settings READ. */
+#define KEYBOARD_CONTROL_FIELD 130u
+void keyboard_apply_control(const uint8_t *data, uint32_t len);
+
 #define BLE_CONTROL_FIELD 127u
 void ble_apply_control(const uint8_t *data, uint32_t len);
 unsigned ble_append_status(unsigned char *buf, unsigned len, unsigned capacity);
@@ -406,6 +409,8 @@ static void faceclaw_scan_settings_control(const uint8_t *buf, uint32_t len) {
                 ancs_apply_control(p, item_len);
             else if (field == BLE_CONTROL_FIELD)
                 ble_apply_control(p, item_len);
+            else if (field == KEYBOARD_CONTROL_FIELD)
+                keyboard_apply_control(p, item_len);
             p += item_len;
         } else if (wire == 5) {
             if ((uint32_t)(end - p) < 4) return;
@@ -454,6 +459,8 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   39 -> experimental BLE keyboard bridge (fields 130/131): one explicitly
+//         enabled right-lens HOGP connection alongside the ring.
 //   38 -> retained object cache (scene.c): modes 37-41 replace the slot scene
 //         (37/38) and the raw texture writes (18). Objects and assets carry
 //         32-bit ids and versions, survive their view being hidden, and are
@@ -572,7 +579,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/38";
+        static const char caps[] = "GLASSLYCFW/39";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

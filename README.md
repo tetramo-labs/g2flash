@@ -515,3 +515,12 @@ read-only image-handler query `[17,0]`. The firmware also sends this report
 after a settings read, as a separate notification rather than inside the
 settings reply. Detect support by revision 24 or later, or by the `RB` report.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
+
+### Experimental BLE keyboard bridge
+
+The `keyboard` branch adds `GLASSLYCFW/39`: an explicitly enabled right-lens
+BLE keyboard connection with HID reports relayed to the phone alongside ring
+input. The companion driver and CLI are in `demos/keyboard*.ts`. See
+[setup, protocol and validation limits](docs/keyboard.md) and the
+[donor ABI review](docs/keyboard-abi.md). Offline tests pass; this feature has
+not been flashed or validated on hardware or in a native iOS app.

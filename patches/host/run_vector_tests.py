@@ -42,9 +42,17 @@ def main():
             raise RuntimeError(f"Cannot find production function {name}")
         functions.append(match[0])
     settings = (ROOT / "patches/settings_ext.c").read_text()
-    fields = re.findall(r"^#define (?:FACECLAW|MIC|ANCS|BLE)_CONTROL_FIELD .*", settings, re.M)
+    fields = re.findall(r"^#define (?:FACECLAW|MIC|ANCS|BLE|KEYBOARD)_CONTROL_FIELD .*", settings, re.M)
     (out / "upstream_functions.inc").write_text("\n\n".join(fields + functions) + "\n")
-    for test in ("ancs_relay", "upstream"):
+    keyboard = (ROOT / "patches/keyboard.c").read_text()
+    timers = []
+    for name in ("kb_kick", "kb_schedule", "kb_tick"):
+        match = re.search(r"static void " + name + r"\([^;{]*\) \{\n.*?^\}", keyboard, re.M | re.S)
+        if not match:
+            raise RuntimeError(f"Cannot find keyboard timer function {name}")
+        timers.append(match[0])
+    (out / "keyboard_timer_functions.inc").write_text("\n\n".join(timers) + "\n")
+    for test in ("ancs_relay", "upstream", "keyboard"):
         binary = out / f"{test}_host_test"
         run("cc", "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Wno-unused-function", *flags,
             "-Ipatches", "-I" + str(out), "-o", binary, f"patches/host/{test}_host_test.c")
@@ -53,8 +61,9 @@ def main():
         "-Ipatches", "-o", host, "patches/host/vector_host_test.c")
     run(host, out)
     demos = ROOT / "demos"
-    run("bun", "test", "vector-protocol.test.ts", "svg-video.test.ts", cwd=demos)
+    run("bun", "test", "vector-protocol.test.ts", "svg-video.test.ts", "keyboard.test.ts", cwd=demos)
     run("bun", "node_modules/typescript/bin/tsc", "-p", "tsconfig.vector.json", cwd=demos)
+    run("bun", "node_modules/typescript/bin/tsc", "-p", "tsconfig.keyboard.json", cwd=demos)
     run("bun", "vector-suite.ts", "--dump", out / "suite.bin", cwd=demos)
     run(host, out, out / "suite.bin")
     run("bun", "vector-suite.ts", "--bad-apple", "--gif", "bad_apple_quarter.gif", "--dump", out / "bad-apple.bin",

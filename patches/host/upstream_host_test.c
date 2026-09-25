@@ -52,7 +52,10 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
     const unsigned char d[24] = {1};                 /* revision 36 field 107 (all counters zero) */
     return pb_append_bytes_field(buf, len, capacity, 107, d, sizeof(d));
 }
-static int ancs_controls;
+static int ancs_controls, keyboard_controls;
+static void keyboard_apply_control(const uint8_t *p, uint32_t n) {
+    assert(n == 8 && p[0] == 'K' && p[1] == 'B' && p[2] == 1); keyboard_controls++;
+}
 static void faceclaw_apply_control(const uint8_t *p, uint32_t n) { (void)p; (void)n; }
 static void mic_apply_control(const uint8_t *p, uint32_t n) { (void)p; (void)n; }
 static void ancs_apply_control(const uint8_t *p, uint32_t n) {
@@ -113,6 +116,11 @@ static int compass_side(void) { return side; }
 #include "compass.c"
 
 static void routing(void) {
+    const uint8_t keyboard[] = {0x92,8,8,'K','B',1,1,1,0,0,0};
+    faceclaw_scan_settings_control(keyboard, sizeof keyboard);
+    assert(keyboard_controls == 1);
+    faceclaw_scan_settings_control(keyboard, sizeof keyboard - 1);
+    assert(keyboard_controls == 1);
     uint8_t p[64] = {0};
     assert(!is_shadow_message(0, 2) && !is_shadow_message(p, 0));
     /* Upstream sensor/cache modes (16 ALS, 17 ring, 18 texture upload) never
@@ -161,7 +169,7 @@ static void settings(void) {
     sends = 0;
     assert(settings_send_wrapper(1,9,buf,44) == 0 && sends == 2);
     const uint8_t *caps = field(sent[0],sent_len[0],100,&n);
-    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/38",13) == 0);
+    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/39",13) == 0);
     assert(sent_len[0] == 44 + 16 + 27 + 24 + 20); /* revision string, diagnostics, microphone and BLE status */
     assert(field(sent[0],sent_len[0],107,&n) && n == 24);
     assert(sent_len[0] + 2 <= 232); /* payload plus CRC stays in one BLE frame */

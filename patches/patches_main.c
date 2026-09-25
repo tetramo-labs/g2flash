@@ -37,6 +37,7 @@
 #include "ring_battery.c"
 #include "ble_link.c"
 #include "settings_ext.c"
+#include "keyboard.c"
 #include "mic_control.c"
 #include "ancs_relay.c"
 #include "als_sensor.c"

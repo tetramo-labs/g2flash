@@ -23,6 +23,7 @@
     "ble": "bun ble-mode.ts",
     "test:vectors": "python3 ../patches/host/run_vector_tests.py",
     "bad-apple:svg": "bun vector-suite.ts --bad-apple",
-    "prepare:bad-apple": "bun prepare-bad-apple.ts"
+    "prepare:bad-apple": "bun prepare-bad-apple.ts",
+    "keyboard": "bun keyboard.ts"
   }
 }

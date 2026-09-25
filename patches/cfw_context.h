@@ -263,6 +263,7 @@ typedef struct {
     uint32_t mic_layout_rev26;              /* 2.2.10.72: layout bump (fresh context) */
     /* --- BLE link speed (ble_link.c, sid-0x09 fields 127/128). Stock behaviour
      * unless the phone asks for the 7.5 ms fast profile. Appended at the tail. --- */
+    void *keyboard;                        /* lazy, reboot-volatile BLE keyboard bridge */
     uint8_t  ble_fast;                      /* 1 = fast profile requested by the phone */
     uint8_t  ble_pad0[3];
     uint8_t  ble_fast_profile[16];          /* RAM copy of the stock fast entry, min = max = 7.5 ms */
