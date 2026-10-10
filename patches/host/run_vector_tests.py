@@ -42,7 +42,7 @@ def main():
             raise RuntimeError(f"Cannot find production function {name}")
         functions.append(match[0])
     settings = (ROOT / "patches/settings_ext.c").read_text()
-    fields = re.findall(r"^#define (?:FACECLAW|MIC|ANCS|BLE|KEYBOARD)_CONTROL_FIELD .*", settings, re.M)
+    fields = re.findall(r"^#define (?:FACECLAW|MIC|ANCS|BLE|KEYBOARD|VOLUME_GATE)_CONTROL_FIELD .*", settings, re.M)
     (out / "upstream_functions.inc").write_text("\n\n".join(fields + functions) + "\n")
     keyboard = (ROOT / "patches/keyboard.c").read_text()
     timers = []
@@ -52,7 +52,7 @@ def main():
             raise RuntimeError(f"Cannot find keyboard timer function {name}")
         timers.append(match[0])
     (out / "keyboard_timer_functions.inc").write_text("\n\n".join(timers) + "\n")
-    for test in ("ancs_relay", "upstream", "keyboard"):
+    for test in ("ancs_relay", "upstream", "keyboard", "volume_gate"):
         binary = out / f"{test}_host_test"
         run("cc", "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Wno-unused-function", *flags,
             "-Ipatches", "-I" + str(out), "-o", binary, f"patches/host/{test}_host_test.c")

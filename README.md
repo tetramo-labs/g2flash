@@ -516,6 +516,26 @@ after a settings read, as a separate notification rather than inside the
 settings reply. Detect support by revision 24 or later, or by the `RB` report.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
 
+### Microphone volume gate
+
+Revision 40 (`GLASSLYCFW/40`) adds a phone-configured volume gate ahead of the
+stock PCM dispatcher (`patches/volume_gate.c`): thread.audio's two
+`bl SVC_PcmAppProcessData` sites are retargeted at `mic_gate_process`, which
+measures each 50 ms chunk's RMS and only forwards it while the gate is open.
+A closed gate drops the chunk before any LC3 encode, so neither the encoder
+nor the radio runs through silence; because every stream (the stock mono
+voice path and the four-microphone array tap) sits behind that dispatcher,
+one gate covers them all. Settings field 132 configures it (`['V','G',1,1,
+enabled, thr16, hold16, open16]`: a linear RMS floor, the quiet time before
+closing, and the minimum open time once a loud chunk opens it; op 2 queries),
+field 133 reports it on every settings read, and gate transitions plus a 2 s
+heartbeat while closed travel on the audio characteristic from both temples
+(12-byte `'V','G'` records) so a phone-side mic watchdog can tell a gated mic
+from a dead one. The gate is lease-held (10 minutes, renewed by CONFIGURE) and
+fails open, and every capture session starts open so the codec driver's
+frame check is never starved. `patches/host/volume_gate_host_test.c` covers
+the state machine; the hook sites are not yet validated on hardware.
+
 ### Experimental BLE keyboard bridge
 
 The `keyboard` branch adds `GLASSLYCFW/39`: an explicitly enabled right-lens

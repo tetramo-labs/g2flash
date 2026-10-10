@@ -103,6 +103,16 @@ BLE_CLASSIFY_BL_SITE = (0x47c1e4, "fff754fb")  # bl 0x47b890 link classifier
 # mic_peer_sync_hook, which passes everything through to stock except the relay
 # peer-sync messages. 2.3.0.24: unique occurrence of the entry at 0x6c6268.
 AUDM_PEER_SYNC_TABLE_SITE = (0x6c626c, "ebe65600")  # 0x0056e6eb = stock AUDM handler
+# Microphone volume gate (this fork's volume_gate.c): thread.audio hands every
+# captured PCM chunk to SVC_PcmAppProcessData (0x599780) from two `bl` sites, one
+# per capture front end (0x5596fe codec source 0, 0x55973a PDM source 1). Both are
+# retargeted at mic_gate_process, which tail-calls the stock dispatcher while the
+# gate is open and drops the chunk otherwise. Decoded 2026-10-10 from 2.3.0.24: the
+# only two BL encodings in the image that land on 0x599780.
+VOLUME_GATE_BL_SITES = {
+    0x5596fe: "40f03ff8",   # codec DMIC/I2S chunk: movs r0,#0 ; bl SVC_PcmAppProcessData
+    0x55973a: "40f021f8",   # PDM chunk:           movs r0,#1 ; bl SVC_PcmAppProcessData
+}
 
 # ANCS relay (this fork). Stock ANCC profile object on 2.3.0.24 (profile_ancc.c,
 # 0x4d750e..0x4d8ea0). Located from the 2.2.10.10 sites by masked instruction-window
@@ -469,6 +479,7 @@ def layout(img):
     ble_request_addr = base + _fn(built, "ble_hook_request")["offset"]
     ble_classify_addr = base + _fn(built, "ble_hook_classify")["offset"]
     peer_sync_addr   = base + _fn(built, "mic_peer_sync_hook")["offset"]
+    volume_gate_addr = base + _fn(built, "mic_gate_process")["offset"]
     display_copy_addr = base + _fn(built, "display_copy_hook")["offset"]
     wear_notify_addr = base + _fn(built, "faceclaw_send_wear_event")["offset"]
     compass_decode_addr = base + _fn(built, "compass_decode_capture")["offset"]
@@ -555,6 +566,9 @@ def layout(img):
         (g2f(AUDM_PEER_SYNC_TABLE_SITE[0]), AUDM_PEER_SYNC_TABLE_SITE[1],
          struct.pack("<I", peer_sync_addr | 1).hex(),
          f"common-data 0x010C handler -> mic_peer_sync_hook @ {AUDM_PEER_SYNC_TABLE_SITE[0]:#x}"),
+        *[(g2f(site), orig, enc_bl(site, volume_gate_addr),
+           f"bl mic_gate_process @ {site:#x} (volume gate before SVC_PcmAppProcessData)")
+          for site, orig in VOLUME_GATE_BL_SITES.items()],
         # redirect the settings responder send -> settings_send_wrapper (caps field 100)
         (g2f(SETTINGS_BL_SITE[0]), SETTINGS_BL_SITE[1], enc_bl(SETTINGS_BL_SITE[0], settings_addr),
          "bl settings_send_wrapper (append caps field 100)"),

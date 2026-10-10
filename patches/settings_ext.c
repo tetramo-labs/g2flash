@@ -88,6 +88,12 @@ void keyboard_apply_control(const uint8_t *data, uint32_t len);
 #define BLE_CONTROL_FIELD 127u
 void ble_apply_control(const uint8_t *data, uint32_t len);
 unsigned ble_append_status(unsigned char *buf, unsigned len, unsigned capacity);
+/* Microphone volume gate (volume_gate.c, same translation unit). Field 132
+ * carries CONFIGURE/QUERY; field 133 reports the gate on every settings READ
+ * and as a notify after either op. */
+#define VOLUME_GATE_CONTROL_FIELD 132u
+void volume_gate_apply_control(const uint8_t *data, uint32_t len);
+unsigned volume_gate_append_status(unsigned char *buf, unsigned len, unsigned capacity);
 typedef void (*display_start_fn)(unsigned app_id, void *arg, unsigned arg_len, void *cb);
 
 #define FW_SEND 0x0047ef05 /* FUN_0047d808 | thumb bit */
@@ -411,6 +417,8 @@ static void faceclaw_scan_settings_control(const uint8_t *buf, uint32_t len) {
                 ble_apply_control(p, item_len);
             else if (field == KEYBOARD_CONTROL_FIELD)
                 keyboard_apply_control(p, item_len);
+            else if (field == VOLUME_GATE_CONTROL_FIELD)
+                volume_gate_apply_control(p, item_len);
             p += item_len;
         } else if (wire == 5) {
             if ((uint32_t)(end - p) < 4) return;
@@ -579,13 +587,14 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/39";
+        static const char caps[] = "GLASSLYCFW/40";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);
         len = diag_append_status(buf, len, SETTINGS_RESPONSE_CAPACITY);
         len = mic_append_status(buf, len, SETTINGS_RESPONSE_CAPACITY);
         len = ble_append_status(buf, len, SETTINGS_RESPONSE_CAPACITY);
+        len = volume_gate_append_status(buf, len, SETTINGS_RESPONSE_CAPACITY);
         /* Keep the settings reply inside one BLE frame. The ring report is
          * a separate notification, with the same field/body as upstream mode 17. */
         int result = ((send_fn)FW_SEND)(type, sid, buf, len);

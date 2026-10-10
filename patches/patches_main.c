@@ -39,6 +39,7 @@
 #include "settings_ext.c"
 #include "keyboard.c"
 #include "mic_control.c"
+#include "volume_gate.c"
 #include "ancs_relay.c"
 #include "als_sensor.c"
 #include "gesture_fwd.c"

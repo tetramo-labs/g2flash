@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "volume_gate_core.h"
 #include "message_transport.h"
 
 /* PC-relative address of one of this blob's own functions. clang -fropi emits
@@ -313,6 +314,11 @@ typedef struct {
     uint8_t  cache_pad0[3];
     uint32_t texture_cache_size;            /* bytes the store allocation actually got (<= 256 KiB) */
     uint8_t  cache_reply[256];
+    /* --- Revision 40: microphone volume gate (volume_gate.c, sid-0x09 fields
+     * 132/133). Phone-configured, lease-held; see volume_gate_core.h. --- */
+    vg_state volume_gate;
+    uint32_t vg_lease_deadline;             /* FW_MS_TICK deadline of the phone's lease; 0 = none */
+    uint8_t  vg_notify_buf[32];             /* stable storage for the field-133 sid-0x09 notify */
 } customCfwContext;
 
 
@@ -327,7 +333,7 @@ typedef struct {
 #define CFW_ALLOC_DIAG_MAGIC 0xA110CA7EU
 
 // Marker used to validate that the CFW context pointer hasn't been clobbered.
-#define CFW_CTX_MAGIC 0xC0FFEE72U    /* revision 38: object cache session fields appended */
+#define CFW_CTX_MAGIC 0xC0FFEE72U    /* revision 38: object cache session fields appended; 40: volume gate */
 
 #define FW_MS_TICK  (*(volatile uint32_t *)0x20077e4cU)  /* firmware 1 ms OS tick (SysTick chain) */
 

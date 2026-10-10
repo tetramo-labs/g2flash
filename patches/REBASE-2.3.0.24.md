@@ -55,6 +55,10 @@ work and re-derived every fork-specific address the same way upstream did.
   `0x6c626c` (handler `0x0056e6eb`). The codec request poster was restructured by stock
   (`0x47d6cd` now posts to the BLE task) but keeps the `uint32 auto_slow` ABI.
 * The appended blob ends at `0x007e5f74`, 40 KiB under the MRAM ceiling.
+* Revision 40 (volume gate) appends `volume_gate.c` and hooks the two thread.audio
+  `bl SVC_PcmAppProcessData` sites (`0x5596fe`, `0x55973a`; dispatcher `0x599780`,
+  located as SVC_PcmAppUnregister + 0x128 and confirmed by decoding both callers). The
+  blob now ends at `0x007ecf14`, 12 KiB under the ceiling.
 
 ## Build
 

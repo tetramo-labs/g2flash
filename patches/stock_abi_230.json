@@ -186,6 +186,12 @@
    "0x005dc0a5": 1,
    "0x007c5ee4": 1
   },
+  "volume_gate.c": {
+   "0x00465d4d": 1,
+   "0x0047ef05": 1,
+   "0x0047f17d": 1,
+   "0x00599781": 1
+  },
   "zlib_glue.c": {
    "0x00442389": 1,
    "0x00442b65": 1,
@@ -399,6 +405,11 @@
      "file": "zlib_glue.c",
      "address": "0x00465d4d",
      "count": 1
+    },
+    {
+     "file": "volume_gate.c",
+     "address": "0x00465d4d",
+     "count": 1
     }
    ],
    "stock_guard_size": 8
@@ -565,6 +576,11 @@
      "file": "settings_ext.c",
      "address": "0x0047ef05",
      "count": 1
+    },
+    {
+     "file": "volume_gate.c",
+     "address": "0x0047ef05",
+     "count": 1
     }
    ],
    "stock_guard_size": 262
@@ -599,6 +615,11 @@
    "uses": [
     {
      "file": "mic_control.c",
+     "address": "0x0047f17d",
+     "count": 1
+    },
+    {
+     "file": "volume_gate.c",
      "address": "0x0047f17d",
      "count": 1
     }
@@ -3801,6 +3822,20 @@
     }
    ],
    "review": "fork (GLASSLYCFW) dependency, migrated 2.2.10.10 -> 2.3.0.24"
+  },
+  {
+   "old": "0x00593670",
+   "new": "0x00599780",
+   "method": "callgraph(2): SVC_PcmAppUnregister (0x00599658, 296 B as in the 2.2.6.10 manifest) + 0x128; both BL callers in thread.audio decoded to it; body carries the fallback chain (service_algo_process 0x5b1580, SVC_Lc3EncodeMono 0x5992c8, streaming notify 0x47f17c)",
+   "uses": [
+    {
+     "file": "volume_gate.c",
+     "address": "0x00599781",
+     "count": 1
+    }
+   ],
+   "review": "fork (GLASSLYCFW) dependency, new in revision 40 (volume gate)",
+   "stock_guard_size": 16
   }
  ],
  "guards": [
@@ -4563,6 +4598,21 @@
    "address": "0x007c5184",
    "bytes": "090001000000",
    "label": "keyboard: unchanged application security flags/key distribution"
+  },
+  {
+   "address": "0x00599780",
+   "bytes": "f0b5c5b00d0014000100c9b2022903da",
+   "label": "stock dependency 00593670 -> 00599780 (fork): SVC_PcmAppProcessData prologue"
+  },
+  {
+   "address": "0x005596e8",
+   "bytes": "04a83ff03dfddff86c070168491c0160039a0499002040f03ff80db0",
+   "label": "volume gate: thread.audio codec chunk -> SVC_PcmAppProcessData(0, pcm, bytes)"
+  },
+  {
+   "address": "0x00559734",
+   "bytes": "009a0199012040f021f807bd",
+   "label": "volume gate: thread.audio PDM chunk -> SVC_PcmAppProcessData(1, pcm, bytes)"
   }
  ],
  "patch_sites": [
@@ -4669,6 +4719,16 @@
   {
    "address": "0x006c626c",
    "old": "ebe65600",
+   "write_size": 4
+  },
+  {
+   "address": "0x005596fe",
+   "old": "40f03ff8",
+   "write_size": 4
+  },
+  {
+   "address": "0x0055973a",
+   "old": "40f021f8",
    "write_size": 4
   },
   {
@@ -4987,5 +5047,10 @@
   "evidence": "docs/keyboard-abi.md",
   "scope": "Experimental keyboard bridge, dormant before private settings commands; five reviewed 4-byte hooks, no boot or capacity changes",
   "date": "2026-09-24"
+ },
+ "volume_gate_review": {
+  "evidence": "patches/volume_gate.c (contract comment)",
+  "scope": "Two reviewed 4-byte bl hooks in thread.audio ahead of the stock PCM dispatcher; dormant until a field-132 CONFIGURE, lease-held (10 min), no boot or capacity changes",
+  "date": "2026-10-10"
  }
 }
