@@ -929,6 +929,59 @@ static void test_hidden_animation(void) {
       CHECK(count_color(g_container_shadow, 15) > 0); }
 }
 
+/* Revision 41: tween progress is elapsed time. Two lenses whose ticks are
+ * skipped differently (the display task busy on one) show the same value at
+ * the same wall time, and both reach the end value on the same tick. */
+static void test_clock_tweens(void) {
+    fresh();
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    put_circle(1, 1, 100, 240, 15);
+    int16_t seen[2][12];
+    for (int lens = 0; lens < 2; lens++) {
+        uint32_t id = 1, ver = 1;
+        m_show((uint16_t)(20 + lens), 0x01, 0); m_refs(&id, &ver, 1);
+        { int16_t v[] = { 100 }; m_tween(1, 0x1, 0, LINEAR, v); }     /* snap back to x = 100 */
+        m_glide(1, 300, 0, 10, EASE);
+        uint32_t start = g_now;
+        CHECK(send(38) == 0 && obj(1)->frames == 10 && obj(1)->p[0] == 100 && obj(1)->duration == 330);
+        for (int f = 1; f <= 12; f++) {
+            g_now = start + 33u * (uint32_t)f;
+            g_ctx.direct_pending = (uint8_t)(lens == 1 && (f == 2 || f == 3 || f == 6 || f == 9));
+            scene_tick(&g_ctx);
+            if (sc->fb) cfw_scene_render_if_due(&g_ctx, sc->fb);
+            seen[lens][f - 1] = obj(1)->p[0];
+        }
+        g_ctx.direct_pending = 0;
+        CHECK(obj(1)->p[0] == 400 && obj(1)->frames == 0 && !sc->anim_active);
+    }
+    for (int f = 1; f <= 12; f++) {
+        int skipped = f == 2 || f == 3 || f == 6 || f == 9;
+        if (skipped) CHECK(seen[1][f - 1] == seen[1][f - 2]);    /* a missed tick holds the last value */
+        else CHECK(seen[1][f - 1] == seen[0][f - 1]);            /* a rendered tick agrees with the other lens */
+    }
+    CHECK(seen[0][3] > 100 && seen[0][3] < 400 && seen[0][3] > seen[0][0]);
+    CHECK(seen[0][9] == 400 && seen[1][9] == 400 && seen[0][8] < 400 && seen[1][8] < 400);   /* both end at 330 ms */
+
+    /* FREEZE between ticks stops at the value the clock has reached, not the last render */
+    { uint32_t id = 1, ver = 1; m_show(22, 0x01, 0); m_refs(&id, &ver, 1);
+      { int16_t v[] = { 100 }; m_tween(1, 0x1, 0, LINEAR, v); } m_glide(1, 300, 0, 10, LINEAR); }
+    uint32_t start = g_now;
+    CHECK(send(38) == 0);
+    g_now = start + 33; g_ctx.direct_pending = 0; scene_tick(&g_ctx); cfw_scene_render_if_due(&g_ctx, sc->fb);
+    int16_t at33 = obj(1)->p[0];
+    g_now = start + 165;
+    { uint32_t id = 1, ver = 1; m_show(23, 0x01, 0); m_refs(&id, &ver, 1); m_op1(6, 1); CHECK(send(38) == 0); }
+    CHECK(obj(1)->frames == 0 && obj(1)->p[0] == 250 && at33 < 250);
+    /* a glide composed mid-flight continues from the clock's value toward the old target plus the delta */
+    { uint32_t id = 1, ver = 1; m_show(24, 0x01, 0); m_refs(&id, &ver, 1);
+      { int16_t v[] = { 100 }; m_tween(1, 0x1, 0, LINEAR, v); } m_glide(1, 300, 0, 10, LINEAR); }
+    start = g_now;
+    CHECK(send(38) == 0);
+    g_now = start + 165;
+    { uint32_t id = 1, ver = 1; m_show(25, 0x01, 0); m_refs(&id, &ver, 1); m_glide(1, -100, 0, 10, LINEAR); CHECK(send(38) == 0); }
+    CHECK(obj(1)->frames == 10 && obj(1)->from[0] == 250 && obj(1)->to[0] == 300 && obj(1)->started == g_now);
+}
+
 /* STATE: unchanged, journal deltas, paginated snapshots, reset detection. */
 static void test_state(void) {
     fresh();
@@ -1037,6 +1090,7 @@ int main(int argc, char **argv) {
     test_offsets();
     test_transactions();
     test_hidden_animation();
+    test_clock_tweens();
     test_state();
     test_lifecycle();
     cfw_scene_release(&g_ctx);

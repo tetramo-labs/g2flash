@@ -20,7 +20,9 @@
 
 /* One ordered byte stream per BLE ingress lens. Payload is owned until the
  * handler returns, or a packet reset/error discards it. A record contains
- * clear flags, uint16 wire length, uint16 decoded CRC, then the body.
+ * clear flags, uint16 wire length, uint16 decoded CRC, then the body. Its lens
+ * bits may be any non-empty subset of the stream's (revision 41); a lens not
+ * addressed consumes the record silently and the ordinal still counts it.
  * Packet RESET/END affect reconstruction only; RESET_CONTEXT affects zlib. */
 typedef struct {
     uint8_t *buffer;

@@ -467,6 +467,14 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   41 -> stereo animation sync. The SID-0xf0 transport accepts a record whose
+//         lens bits are a subset of its stream's (message_transport.c), so a
+//         frame's left and right SHOWs arrive as the records of one stream and
+//         both lenses start their animations on the same packet. GLIDE/TWEEN
+//         progress is elapsed time (scene.c), like ROTATE, so a skipped tick
+//         no longer leaves one lens a frame behind the other.
+//   40 -> microphone volume gate (fields 132/133, volume_gate.c): the temples
+//         drop captured PCM below a phone-chosen RMS floor.
 //   39 -> experimental BLE keyboard bridge (fields 130/131): one explicitly
 //         enabled right-lens HOGP connection alongside the ring.
 //   38 -> retained object cache (scene.c): modes 37-41 replace the slot scene
@@ -587,7 +595,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/40";
+        static const char caps[] = "GLASSLYCFW/41";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

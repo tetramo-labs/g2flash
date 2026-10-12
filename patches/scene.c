@@ -50,6 +50,8 @@
  *     [3][id][dx:i16][dy:i16]                               MOVE
  *     [4][id][dx:i16][dy:i16][frames:u8][curve x4]          GLIDE
  *     [5][id][mask:u16][frames:u8][curve x4][value:i16 per set bit]  TWEEN
+ *       (`frames` x the frame period is the duration; since revision 41 the
+ *       progress is elapsed time, like ROTATE, not a count of rendered ticks)
  *     [6][id]  FREEZE      [7][id]  FINISH
  *     [9][id][angleQ8:i32][pivotX:i16][pivotY:i16][durationMs:u16][curve x4]  ROTATE
  *   A reference whose object is absent or at another version makes the SHOW
@@ -590,7 +592,22 @@ static void cfw_object_snap_end(cfw_object *o) {
     o->color = o->color_to;
     o->width = o->width_to;
     o->frames = 0;
-    o->frame = 0;
+    o->duration = 0;
+}
+
+/* Revision 41: tween progress is elapsed time, like rotation, so a lens whose
+ * tick was skipped (display task busy) catches up on its next render instead
+ * of drifting a period behind the other lens. Returns 1 while still moving. */
+static int cfw_object_advance(cfw_object *o, uint32_t now) {
+    if (o->frames == 0) return 0;
+    uint32_t elapsed = now - o->started;
+    if (elapsed >= o->duration) { cfw_object_snap_end(o); return 0; }
+    uint32_t prog = cfw_ease_progress(elapsed * 32768u / o->duration, o->curve);
+    for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++)
+        o->p[k] = cfw_sat16(cfw_lerp_q15(o->from[k], o->to[k], prog));
+    o->color = cfw_sat8(cfw_lerp_q15(o->color_from, o->color_to, prog));
+    o->width = cfw_sat8(cfw_lerp_q15(o->width_from, o->width_to, prog));
+    return 1;
 }
 
 static void cfw_rotation_advance(cfw_rotation *t, uint32_t now) {
@@ -606,14 +623,17 @@ static void cfw_object_finish(cfw_object *o) {
     if (o->rotation.duration) { o->rotation.angle = o->rotation.to; o->rotation.duration = 0; }
 }
 
+/* Stop at the value the clock has reached, not the last rendered frame. */
 static void cfw_object_freeze(cfw_object *o) {
+    uint32_t now = FW_MS_TICK;
+    cfw_object_advance(o, now);
     o->frames = 0;
-    o->frame = 0;
-    cfw_rotation_advance(&o->rotation, FW_MS_TICK);
+    o->duration = 0;
+    cfw_rotation_advance(&o->rotation, now);
     o->rotation.duration = 0;
 }
 
-/* Advance every animating active object by one frame. Returns 1 while any is still moving. */
+/* Advance every animating active object to now. Returns 1 while any is still moving. */
 static int cfw_scene_advance(cfw_cache *sc) {
     int moving = 0;
     uint32_t now = FW_MS_TICK;
@@ -622,34 +642,26 @@ static int cfw_scene_advance(cfw_cache *sc) {
         if (o->id == 0) continue;
         cfw_rotation_advance(&o->rotation, now);
         if (o->rotation.duration) moving = 1;
-        if (o->frames == 0) continue;
-        uint32_t frame = (uint32_t)o->frame + 1u;
-        if (frame >= o->frames) {
-            cfw_object_snap_end(o);
-            continue;
-        }
-        uint32_t prog = cfw_ease_progress(frame * 32768u / o->frames, o->curve);
-        for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++)
-            o->p[k] = cfw_sat16(cfw_lerp_q15(o->from[k], o->to[k], prog));
-        o->color = cfw_sat8(cfw_lerp_q15(o->color_from, o->color_to, prog));
-        o->width = cfw_sat8(cfw_lerp_q15(o->width_from, o->width_to, prog));
-        o->frame = (uint8_t)frame;
-        moving = 1;
+        if (cfw_object_advance(o, now)) moving = 1;
     }
     sc->anim_active = (uint8_t)moving;
     return moving;
 }
 
+/* When an op lands: the tick it starts from and the frame period it is timed with. */
+typedef struct { uint32_t now; uint32_t period; } cfw_op_clock;
+
 /* Begin an eased move from the current values to `to` (geometry), `color_to`
- * and `width_to` over `frames`. */
+ * and `width_to` over `frames` of the clock's period. */
 static void cfw_object_animate(cfw_object *o, const int16_t *to, uint8_t color_to,
-                               uint8_t width_to, uint8_t frames, const uint8_t *curve) {
+                               uint8_t width_to, uint8_t frames, const uint8_t *curve,
+                               const cfw_op_clock *clock) {
     if (frames <= 1u) {
         for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) o->p[k] = to[k];
         o->color = color_to;
         o->width = width_to;
         o->frames = 0;
-        o->frame = 0;
+        o->duration = 0;
         return;
     }
     for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) {
@@ -660,15 +672,18 @@ static void cfw_object_animate(cfw_object *o, const int16_t *to, uint8_t color_t
     o->color_to = color_to;
     o->width_from = o->width;
     o->width_to = width_to;
-    o->frame = 0;
     o->frames = frames;
+    o->started = clock->now;
+    o->duration = (uint16_t)(frames * clock->period);
     for (uint32_t k = 0; k < 4; k++) o->curve[k] = curve[k];
 }
 
-static void cfw_object_glide(cfw_object *o, int32_t dx, int32_t dy, uint8_t frames, const uint8_t *curve) {
+static void cfw_object_glide(cfw_object *o, int32_t dx, int32_t dy, uint8_t frames, const uint8_t *curve,
+                             const cfw_op_clock *clock) {
     uint8_t xm, ym;
     cfw_shape_masks(o->type, &xm, &ym);
     int16_t to[CFW_SHAPE_PARAMS];
+    cfw_object_advance(o, clock->now);          /* start from the value the clock has reached */
     for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) {
         /* compose with an in-flight glide: continue from the current value toward
          * the old target plus the new delta */
@@ -679,7 +694,7 @@ static void cfw_object_glide(cfw_object *o, int32_t dx, int32_t dy, uint8_t fram
     }
     uint8_t c = o->frames ? o->color_to : o->color;
     uint8_t w = o->frames ? o->width_to : o->width;
-    cfw_object_animate(o, to, c, w, frames, curve);
+    cfw_object_animate(o, to, c, w, frames, curve, clock);
 }
 
 static int cfw_scene_any_animating(const cfw_cache *sc) {
@@ -1177,17 +1192,17 @@ static int cfw_op_check(cfw_txn *t, const uint8_t *p) {
     return 1;
 }
 
-static void cfw_op_apply_one(cfw_object *o, const uint8_t *p) {
+static void cfw_op_apply_one(cfw_object *o, const uint8_t *p, const cfw_op_clock *clock) {
     switch (p[0]) {
     case CFW_OP_VISIBLE:
         if (p[5]) o->flags |= CFW_SHAPE_FLAG_VISIBLE;
         else      o->flags &= (uint8_t)~CFW_SHAPE_FLAG_VISIBLE;
         break;
     case CFW_OP_MOVE:
-        cfw_object_glide(o, (int16_t)rd16(p + 5), (int16_t)rd16(p + 7), 0, 0);
+        cfw_object_glide(o, (int16_t)rd16(p + 5), (int16_t)rd16(p + 7), 0, 0, clock);
         break;
     case CFW_OP_GLIDE:
-        cfw_object_glide(o, (int16_t)rd16(p + 5), (int16_t)rd16(p + 7), p[9], p + 10);
+        cfw_object_glide(o, (int16_t)rd16(p + 5), (int16_t)rd16(p + 7), p[9], p + 10, clock);
         break;
     case CFW_OP_TWEEN: {
         uint32_t mask = rd16(p + 5);
@@ -1195,6 +1210,7 @@ static void cfw_op_apply_one(cfw_object *o, const uint8_t *p) {
         const uint8_t *curve = p + 8;
         const uint8_t *v = p + 12;
         int16_t to[CFW_SHAPE_PARAMS];
+        cfw_object_advance(o, clock->now);      /* unlisted params hold the value the clock reached */
         for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) {
             to[k] = o->p[k];
             if (mask & (1u << k)) { to[k] = (int16_t)rd16(v); v += 2; }
@@ -1202,7 +1218,7 @@ static void cfw_op_apply_one(cfw_object *o, const uint8_t *p) {
         uint8_t c = o->color, w = o->width;
         if (mask & CFW_TWEEN_COLOR_BIT) { c = (uint8_t)rd16(v); v += 2; }
         if (mask & CFW_TWEEN_WIDTH_BIT) { w = (uint8_t)rd16(v); v += 2; }
-        cfw_object_animate(o, to, c, w, frames, curve);
+        cfw_object_animate(o, to, c, w, frames, curve, clock);
         break;
     }
     case CFW_OP_FREEZE:
@@ -1213,10 +1229,10 @@ static void cfw_op_apply_one(cfw_object *o, const uint8_t *p) {
         break;
     case CFW_OP_ROTATE: {
         cfw_rotation *t = &o->rotation;
-        cfw_rotation_advance(t, FW_MS_TICK);
+        cfw_rotation_advance(t, clock->now);
         t->from = t->angle; t->to = (int32_t)rd32(p + 5);
         t->px = (int16_t)rd16(p + 9); t->py = (int16_t)rd16(p + 11);
-        t->duration = (uint16_t)rd16(p + 13); t->started = FW_MS_TICK;
+        t->duration = (uint16_t)rd16(p + 13); t->started = clock->now;
         for (uint32_t k = 0; k < 4; k++) t->curve[k] = p[15 + k];
         if (!t->duration) t->angle = t->to;
         break;
@@ -1226,14 +1242,14 @@ static void cfw_op_apply_one(cfw_object *o, const uint8_t *p) {
     }
 }
 
-static void cfw_op_apply(cfw_cache *sc, const uint8_t *p) {
+static void cfw_op_apply(cfw_cache *sc, const uint8_t *p, const cfw_op_clock *clock) {
     uint32_t id = rd32(p + 1);
     if (id == CFW_CACHE_ALL_OBJECTS) {
-        for (uint32_t i = 0; i < sc->active_count; i++) cfw_op_apply_one(&sc->objects[sc->active[i]], p);
+        for (uint32_t i = 0; i < sc->active_count; i++) cfw_op_apply_one(&sc->objects[sc->active[i]], p, clock);
         return;
     }
     int idx = cfw_object_find(sc, id, 0);
-    if (idx >= 0) cfw_op_apply_one(&sc->objects[idx], p);
+    if (idx >= 0) cfw_op_apply_one(&sc->objects[idx], p, clock);
 }
 
 /* --- handlers ------------------------------------------------------------------------- */
@@ -1395,7 +1411,8 @@ static int cfw_cache_show(customCfwContext *ctx, const uint8_t *src, uint32_t sr
         sc->objects[i].state &= (uint8_t)~(CFW_CACHE_ST_PINNED | CFW_CACHE_ST_NEXT);
     if (flags & CFW_SHOW_FLAG_FREEZE)
         for (uint32_t i = 0; i < sc->active_count; i++) cfw_object_freeze(&sc->objects[sc->active[i]]);
-    for (pos = ops; pos < srclen; pos += cfw_op_len(src + pos, srclen - pos)) cfw_op_apply(sc, src + pos);
+    cfw_op_clock clock = { FW_MS_TICK, sc->period_ms };   /* every op of a SHOW starts on the same tick */
+    for (pos = ops; pos < srclen; pos += cfw_op_len(src + pos, srclen - pos)) cfw_op_apply(sc, src + pos, &clock);
     sc->bg = bg;
     sc->last_show_request = request;
     sc->last_show_valid = 1;

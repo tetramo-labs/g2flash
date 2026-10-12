@@ -52,10 +52,11 @@ def main():
             raise RuntimeError(f"Cannot find keyboard timer function {name}")
         timers.append(match[0])
     (out / "keyboard_timer_functions.inc").write_text("\n\n".join(timers) + "\n")
-    for test in ("ancs_relay", "upstream", "keyboard", "volume_gate"):
+    for test in ("ancs_relay", "upstream", "keyboard", "volume_gate", "transport"):
         binary = out / f"{test}_host_test"
+        libs = ["-lz"] if test == "transport" else []   # the host inflater stands in for the firmware's zlib
         run("cc", "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Wno-unused-function", *flags,
-            "-Ipatches", "-I" + str(out), "-o", binary, f"patches/host/{test}_host_test.c")
+            "-Ipatches", "-I" + str(out), "-o", binary, f"patches/host/{test}_host_test.c", *libs)
         run(binary)
     run("cc", "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Wno-unused-function", *flags,
         "-Ipatches", "-o", host, "patches/host/vector_host_test.c")

@@ -79,12 +79,13 @@ typedef struct {
     uint8_t  color;         /* current color / options byte */
     uint8_t  width;         /* current stroke width (fill rule for PATH) */
     uint8_t  state;
-    uint8_t  frame;         /* frames already advanced */
-    uint8_t  frames;        /* total frames, 0 = idle */
+    uint8_t  frames;        /* wire frame count of the running tween, 0 = idle */
     uint8_t  curve[4];      /* cubic-bezier easing x1 y1 x2 y2, each /255 */
     uint8_t  color_from, color_to;
     uint8_t  width_from, width_to;
-    uint8_t  pad[3];
+    uint32_t started;       /* FW_MS_TICK when the tween began (revision 41: clock-based) */
+    uint16_t duration;      /* frames * period at start, ms; 0 = idle */
+    uint8_t  pad[2];
     int16_t  p[8];          /* current geometry */
     int16_t  from[8];       /* tween start geometry */
     int16_t  to[8];         /* tween end geometry */

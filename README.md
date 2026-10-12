@@ -175,6 +175,20 @@ the cache lost and the memory is reclaimed under the display gate by the next
 handler or display refresh. `docs/retained-object-cache-plan.md` records the
 design; the acceptance tests live in `patches/host/shapes_host_test.c`.
 
+Revision 41 keeps the two lenses' animations in step. A record of a SID-0xf0
+stream may address a subset of the stream's lenses: the phone sends a frame's
+left and right SHOWs (which differ whenever the global depth setting or an
+element's depth offsets the lens windows) as the two records of one stream, so
+both lenses apply them on the same packet arrival instead of the right lens
+starting one ACK round trip after the left. A lens skips a record not
+addressed to it without touching its inflate context (the phone frames every
+exclusive record, and the one after it, with `RESET_CONTEXT`), and the ACK
+ordinal counts every record. GLIDE and TWEEN progress is now elapsed time
+(`frames` x the frame period), like ROTATE, so a lens that skipped a tick while
+its display task was busy catches up on the next render instead of staying a
+frame behind. The offline checks are in `patches/host/transport_host_test.c`
+and `test_clock_tweens` in `patches/host/shapes_host_test.c`.
+
 Run the complete offline suite with
 `python3 patches/host/run_vector_tests.py --out /tmp/g2-vector-tests`.
 It tests the firmware C under sanitizers and replays the standalone shape and

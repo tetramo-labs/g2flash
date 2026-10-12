@@ -169,8 +169,22 @@ static void cfw_message_abort(cfw_message_stream *stream, uint8_t here, uint8_t 
     cfw_message_discard(stream);
 }
 
+static void cfw_message_consumed(cfw_message_stream *stream) {
+    if (stream->buffer) CFW_MESSAGE_FREE(stream->buffer);
+    stream->buffer = 0;
+    stream->size = stream->used = stream->length_bytes = 0;
+    ++stream->message_id;
+}
+
 /* ACK identifies the stream and message ordinal, independent of packet splits.
- * Several messages ending in one packet must still have distinct ACKs. */
+ * Several messages ending in one packet must still have distinct ACKs.
+ *
+ * Revision 41: a record may address a subset of the stream's lenses, so a
+ * frame's left and right SHOWs travel as the records of one stream and both
+ * lenses apply them on the same packet arrival. A lens the record does not
+ * address consumes it without inflating, running or answering it; its
+ * inflate context is untouched (the phone brackets exclusive records with
+ * RESET_CONTEXT). The ordinal still counts every record of the stream. */
 static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
                                      uint8_t origin) {
     uint8_t empty = 0;
@@ -178,9 +192,14 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
     uint8_t *decoded = 0;
     uint32_t size = stream->size;
     uint8_t reason = 0;
+    uint8_t lenses = stream->flags & CFW_MESSAGE_BOTH;
     int valid = !(stream->flags & ~(CFW_MESSAGE_BOTH | CFW_MESSAGE_COMPRESSED | CFW_MESSAGE_RESET_CONTEXT))
-        && (stream->flags & CFW_MESSAGE_BOTH) == stream->options;
+        && lenses != 0 && (lenses & ~stream->options) == 0;
     if (!valid) reason = CFW_NACK_FLAGS;
+    if (valid && !(lenses & here)) {
+        cfw_message_consumed(stream);
+        return 0;
+    }
     if (stream->flags & CFW_MESSAGE_RESET_CONTEXT) {
         cfw_inflate_reset(stream);
         /* Also bounds history across reconnects, retries and target changes. */
@@ -215,10 +234,7 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
     int result = cfw_message_reply(stream, here, origin,
         valid ? CFW_MESSAGE_ACK : CFW_MESSAGE_NACK, (uint16_t)size);
     if (decoded) CFW_MESSAGE_FREE(decoded);
-    if (stream->buffer) CFW_MESSAGE_FREE(stream->buffer);
-    stream->buffer = 0;
-    stream->size = stream->used = stream->length_bytes = 0;
-    ++stream->message_id;
+    cfw_message_consumed(stream);
     return result == 0 ? 0 : 6;
 }
 
