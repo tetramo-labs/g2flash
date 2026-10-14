@@ -108,13 +108,20 @@ static int failures;
 
 static const uint8_t frame_hdr[6] = { 0x08, 0x03, 0x10, 0x00, 0xEA, 0x07 };
 
-/* Returns the field-125 payload of message i (after the 7-byte protobuf frame). */
+/* Returns the field-125 payload of message i (after the 7- or 8-byte protobuf
+ * frame: the length is a varint, so bodies of 128 bytes and up take two). */
 static const uint8_t *payload(int i, uint32_t *len) {
+    uint32_t hdr = 7, body;
     CHECK(h_memcmp(sent[i], frame_hdr, 6) == 0);
-    CHECK(sent[i][6] == sent_len[i] - 7);
-    CHECK(sent[i][7] == 'A' && sent[i][8] == 'N' && sent[i][9] == ANCS_PROTO_VERSION);
-    *len = sent_len[i] - 7;
-    return sent[i] + 7;
+    if (sent[i][6] & 0x80) {
+        hdr = 8;
+        body = (sent[i][6] & 0x7fu) | ((uint32_t)sent[i][7] << 7);
+    } else body = sent[i][6];
+    CHECK(body == sent_len[i] - hdr);
+    CHECK(body < 0x80 ? hdr == 7 : hdr == 8);
+    CHECK(sent[i][hdr] == 'A' && sent[i][hdr + 1] == 'N' && sent[i][hdr + 2] == ANCS_PROTO_VERSION);
+    *len = sent_len[i] - hdr;
+    return sent[i] + hdr;
 }
 
 static void control(uint8_t op, const uint8_t *extra, uint32_t extra_len) {

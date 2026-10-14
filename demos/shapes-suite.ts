@@ -1433,6 +1433,16 @@ class ObjectScene {
           refs.push({ id, version: k0.version });
           return;
         }
+        if (version === k0.version) {
+          /* Back to the resident definition after a tween moved it: a PUT with the
+           * same (id, version) is a firmware no-op and would leave the tweened
+           * geometry on the lens, so snap with a 0-frame TWEEN instead. */
+          const snap = tweenOp(id, base, s, 0, curve);
+          if (snap) opList.push(snap);
+          k0.state = s;
+          refs.push({ id, version: k0.version });
+          return;
+        }
         put();
       });
       ids.push(mine);
@@ -1484,9 +1494,15 @@ interface CaseResult {
 
 const args = process.argv.slice(2);
 const DUMP = args.includes("--dump") ? args[args.indexOf("--dump") + 1] : undefined;
+if (args.includes("--dump") && (DUMP === undefined || DUMP.startsWith("--"))) {
+  console.error("--dump needs a FILE argument");
+  process.exit(2);
+}
 const DRY_RUN = process.env.G2_DRY_RUN === "1" || DUMP !== undefined;
 const TRACE = process.env.G2_TRACE === "1";
-const HOLD_SCALE = DRY_RUN ? 0 : Math.max(0, Number(process.env.G2_HOLD_SCALE ?? "1"));
+const holdScale = Number(process.env.G2_HOLD_SCALE ?? "1");
+if (!Number.isFinite(holdScale) || holdScale < 0) throw new Error(`G2_HOLD_SCALE must be a non-negative number, got ${process.env.G2_HOLD_SCALE}`);
+const HOLD_SCALE = DRY_RUN ? 0 : holdScale;
 const ACK_MS = 8_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const sleepUntil = (t: number) => { const ms = t - performance.now(); return ms > 0 ? sleep(ms) : Promise.resolve(); };
@@ -1684,7 +1700,9 @@ async function openLink(): Promise<Link> {
     await session.sendPb(0x09, pb, m, { ackTimeoutMs: ACK_MS });
   };
   await lease(5); // FB_ACQUIRE (90 s, fail-open)
-  const renew = setInterval(() => void lease(5), 30_000);
+  // A renewal that fails (lens gone mid-run) must not become an unhandled
+  // rejection: Bun exits on those before the cleanup below runs.
+  const renew = setInterval(() => void lease(5).catch((e) => console.error(`lease renewal failed: ${e}`)), 30_000);
 
   // GLASSLYCFW/38: custom payloads ride the SID-0xf0 message transport; the
   // object cache shares one session epoch across both lenses.

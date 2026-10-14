@@ -47,7 +47,7 @@ PATCH_JSON="patches/cfw_patches.json"   # committed patch set (applied to produc
 GEN="patches/gen_patches.py"      # clang: (re)generate the patch set
 APPLY="patches/apply_patches.py"  # no clang: replay the patch set onto BASE
 BASE_SHA256="187ccf2bcc5c17a212106e8a376745511e8289c4232b634a7ea94b9bf25a0979"
-OUT_SHA256="47514fe9955c3427d581854ddaf1a3ea47b5fb2884daf663f8d43debdada40bc"
+OUT_SHA256="56db410fa0a7dec19103389f1bcaae4ed37b0ed6e5429da34de8dc5f78b5b0d2"
 
 SKIP_VENV=0
 FORCE_DOWNLOAD=0
@@ -178,8 +178,16 @@ fi
 # ---- 4b/5. apply committed patch set + verify ------------------------------
 say "applying committed patch set -> $OUT"
 python3 "$APPLY" "$BASE" "$PATCH_JSON" "$OUT"
-verify "$OUT" "$OUT_SHA256" "patched firmware"
-ok "patched image verified ($OUT)"
+if [ "$UPDATE_PATCHES" -eq 1 ] && [ "$(sha256 "$OUT")" != "$OUT_SHA256" ]; then
+  # A regenerated patch set changes the output by design; the pin is updated
+  # by hand so the diff that moves it is reviewed with the patch sources.
+  warn "patched image hash changed with the regenerated patch set:"
+  warn "  OUT_SHA256=\"$(sha256 "$OUT")\""
+  warn "update that line in $0 and commit it with $PATCH_JSON"
+else
+  verify "$OUT" "$OUT_SHA256" "patched firmware"
+  ok "patched image verified ($OUT)"
+fi
 
 echo
 say "done. Custom firmware: $OUT"

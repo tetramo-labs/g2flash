@@ -56,7 +56,16 @@ const argv = process.argv.slice(2);
 const flag = (name: string) => argv.includes(`--${name}`);
 const value = (name: string, fallback: string) => {
   const i = argv.indexOf(`--${name}`);
-  return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1]! : fallback;
+  if (i < 0) return fallback;
+  const v = argv[i + 1];
+  if (v === undefined || v.startsWith("--")) { console.error(`--${name} needs a value`); process.exit(2); }
+  return v;
+};
+/** A positive number flag; NaN would otherwise make the playback loop run forever. */
+const numeric = (name: string, fallback: string, min: number, max: number) => {
+  const n = Number(value(name, fallback));
+  if (!Number.isFinite(n)) { console.error(`--${name} must be a number, got ${value(name, fallback)}`); process.exit(2); }
+  return Math.max(min, Math.min(max, n));
 };
 if (flag("help") || flag("h")) {
   console.log(`usage: bun bad-apple-tests.ts [--text] [--bitmap] [--shapes] [options]
@@ -70,9 +79,9 @@ if (flag("help") || flag("h")) {
 }
 const modes = ALL_MODES.filter((m) => flag(m));
 const MODES: Mode[] = modes.length ? modes : ALL_MODES;
-const LOOPS = Math.max(1, Number(value("loops", "1")));
-const MAX_FRAMES = Math.max(1, Number(value("frames", "300")));
-const FPS = Math.max(1, Math.min(30, Number(value("fps", "10"))));
+const LOOPS = Math.floor(numeric("loops", "1", 1, 1000));
+const MAX_FRAMES = Math.floor(numeric("frames", "300", 1, 100_000));
+const FPS = numeric("fps", "10", 1, 30);
 const GIF = value("gif", new URL("./bad_apple_quarter.gif", import.meta.url).pathname);
 const DRY_RUN = flag("dry-run") || process.env.G2_DRY_RUN === "1";
 const TRACE = flag("trace") || process.env.G2_TRACE === "1";
@@ -495,7 +504,7 @@ async function openLink(): Promise<Link> {
     await session.sendPb(0x09, pb, m, { ackTimeoutMs: ACK_MS });
   };
   await lease(5); // FB_ACQUIRE (90 s, fail-open)
-  const renew = setInterval(() => void lease(5), 30_000);
+  const renew = setInterval(() => void lease(5).catch((e) => console.error(`lease renewal failed: ${e}`)), 30_000);
 
   // GLASSLYCFW/38: every payload rides the SID-0xf0 transport; cache messages share one session epoch.
   const transport = new CfwTransport(session, ACK_MS);

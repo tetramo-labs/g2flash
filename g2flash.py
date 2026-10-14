@@ -156,7 +156,12 @@ def auth_frames():
     stock app capture sent this DEVICE_SETTINGS/AUTHENTICATION(4) message after
     enabling CCCDs; its success response echoes the magic id.
     """
+    # The magic is written as a single protobuf varint byte, so it must stay in
+    # 1..127: a byte with bit 7 set is a continuation byte and the request is
+    # malformed (and the echoed id would be two bytes, never matching below).
     magic=_nextseq()
+    if magic==0 or magic>=0x80:
+        _reset_seq(); magic=_nextseq()
     pb=bytes([0x08,0x04,0x10,magic,0x1a,0x04,0x08,0x01,0x10,0x04])
     return magic, frames(0x80,pb,seq=magic)
 
@@ -383,7 +388,7 @@ class Bridge:
                     d=m['data']; self.notes.put((d.get('characteristic','').lower(), bytes.fromhex(d.get('data',''))))
             except Exception: pass
         hdr=['Authorization: Bearer '+self.token] if self.token else None
-        self.ws=websocket.WebSocketApp(self.base.replace('http','ws'),header=hdr,on_open=on_open,on_close=on_close,on_message=on_msg)
+        self.ws=websocket.WebSocketApp(re.sub(r'^http','ws',self.base),header=hdr,on_open=on_open,on_close=on_close,on_message=on_msg)
         threading.Thread(target=lambda: self.ws.run_forever(reconnect=3),daemon=True).start()
         def ka():
             while not self._stop:
@@ -516,7 +521,10 @@ class LocalBleTransport:
         failure to install the diagnostic must never prevent a flash.
         """
         self._remove_disconnect_error_hook()
-        manager=getattr(self.client, '_central_manager_delegate', None)
+        # bleak >= 3 wraps the backend: the CoreBluetooth delegate lives on
+        # client._backend, older versions keep it on the client itself.
+        backend=getattr(self.client, '_backend', self.client)
+        manager=getattr(backend, '_central_manager_delegate', None)
         if manager is None:
             return
         original=manager.did_disconnect_peripheral
@@ -793,6 +801,10 @@ def flash_lens(tp, img, segs, stop_before):
                     tp.set_notify(CTRL[0],CTRL[2],True)
                     time.sleep(2.5)
                     while not tp.notes.empty(): tp.notes.get()
+                    # Same order as flash_lens: the OTA block counter is wherever the
+                    # timeout left it, so reset it before the authentication request
+                    # borrows it as the single-byte magic, and again before BEGIN.
+                    _reset_seq()
                     authenticate(tp)
                     _reset_seq()
                     while not tp.notes.empty(): tp.notes.get()
@@ -883,8 +895,8 @@ def main(argv=None):
     args=p.parse_args(argv)
 
     DEBUG=args.debug
-    COMPONENT_RETRIES=args.component_retries
-    BLOCK_NAK_RETRIES=args.block_nak_retries
+    COMPONENT_RETRIES=max(1,args.component_retries)
+    BLOCK_NAK_RETRIES=max(1,args.block_nak_retries)
     RECONNECT_ATTEMPTS=max(1,args.reconnect_attempts)
     RECONNECT_DELAY=max(0,args.reconnect_delay)
 

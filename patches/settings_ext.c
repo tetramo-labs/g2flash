@@ -467,6 +467,14 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   42 -> object cache fixes (scene.c): a new asset version replaces the old
+//         one only once its last chunk is validated, found by id at commit
+//         rather than by an index that eviction could have reused (a PATH
+//         object could end up drawing an image as edges and overrun the vector
+//         workspace); kind-5 replies go in a per-stream buffer
+//         (message_transport.c); ANCS field-125 lengths >= 128 are two-byte
+//         varints (ancs_relay.c); the mic relay refuses an out-of-range frame
+//         size from the peer.
 //   41 -> stereo animation sync. The SID-0xf0 transport accepts a record whose
 //         lens bits are a subset of its stream's (message_transport.c), so a
 //         frame's left and right SHOWs arrive as the records of one stream and
@@ -595,7 +603,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/41";
+        static const char caps[] = "GLASSLYCFW/42";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

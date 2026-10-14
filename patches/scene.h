@@ -61,7 +61,7 @@ typedef struct {
     uint32_t filled;        /* upload progress; == length once complete */
     uint32_t last_use;
     uint16_t refs;          /* objects holding this asset */
-    uint16_t replaces;      /* staged: index + 1 of the descriptor it supersedes */
+    uint16_t replaces;      /* unused since revision 42 (older versions are found by id at commit) */
     uint8_t  kind;
     uint8_t  state;
     uint8_t  pad[2];

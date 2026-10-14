@@ -22,7 +22,9 @@
  *       offsets + glyph images), 2 string (1..128 bytes of UTF-8). Chunks of one
  *       asset arrive in order (offset = bytes already stored); an asset is not
  *       resident until its last chunk has been validated. A new version of an
- *       id replaces the old one in place for every object that references it.
+ *       id replaces the old one in place for every object that references it
+ *       once its last chunk has been validated; until then the objects keep
+ *       rendering the old version (revision 42).
  *   [1][object id:u32][version:u32][shape record]
  *       PUT_OBJECT. Record layouts are in shapes.h; IMAGE/TEXT/TEXT_CACHED
  *       reference assets by id (they must already be resident, or be uploaded
@@ -418,14 +420,21 @@ static void cfw_journal_note(cfw_cache *sc, uint8_t kind, uint32_t id, uint32_t 
     e->revision = sc->revision + 1u;                  /* recorded under the revision being built */
 }
 
-static int cfw_asset_find(const cfw_cache *sc, uint32_t id, int staged) {
+/* Find a public asset by id. `version` 0 matches any version; several resident
+ * versions of one id can coexist while a replacement is still uploading
+ * (revision 42), so an any-version lookup prefers the complete one. */
+static int cfw_asset_find(const cfw_cache *sc, uint32_t id, uint32_t version, int staged) {
+    int fallback = -1;
     if (id == 0) return -1;
     for (uint32_t i = 0; i < CFW_CACHE_ASSETS; i++) {
         const cfw_asset *a = &sc->assets[i];
         if (a->id != id || (a->state & CFW_CACHE_ST_PRIVATE)) continue;
-        if (((a->state & CFW_CACHE_ST_STAGED) != 0) == (staged != 0)) return (int)i;
+        if (((a->state & CFW_CACHE_ST_STAGED) != 0) != (staged != 0)) continue;
+        if (version != 0 && a->version != version) continue;
+        if (version != 0 || (a->state & CFW_CACHE_ST_COMPLETE)) return (int)i;
+        if (fallback < 0) fallback = (int)i;
     }
-    return -1;
+    return fallback;
 }
 
 static int cfw_object_find(const cfw_cache *sc, uint32_t id, int staged) {
@@ -548,6 +557,14 @@ static void cfw_object_shape(const cfw_cache *sc, const uint8_t *store, const cf
     }
 }
 
+/* The compiled edges of a PATH object, or 0 when its asset is not one. */
+static const cfw_path *cfw_object_path(const cfw_cache *sc, const uint8_t *store, const cfw_object *o) {
+    if (o->type != CFW_SHAPE_PATH || o->asset == 0 || store == 0) return 0;
+    const cfw_asset *a = &sc->assets[o->asset - 1u];
+    if (a->kind != CFW_ASSET_EDGES || a->length < sizeof(cfw_path)) return 0;
+    return (const cfw_path *)(const void *)(store + a->offset);
+}
+
 static void cfw_scene_render(customCfwContext *ctx, cfw_cache *sc, uint8_t *fb, cfw_rectlist *rl) {
     cfw_raster r = { fb, IMAGE_STRIDE, (int32_t)IMAGE_W, (int32_t)IMAGE_H };
     const uint8_t *store = ctx ? ctx->texture_cache : 0;
@@ -558,8 +575,9 @@ static void cfw_scene_render(customCfwContext *ctx, cfw_cache *sc, uint8_t *fb, 
         cfw_shape s;
         cfw_object_shape(sc, store, o, &s);
         if (o->type == CFW_SHAPE_PATH) {
-            if (s.asset && sc->vector_work)
-                cv_path_draw(&r, sc->vector_work, (const cfw_path *)(const void *)s.asset, o->p, &o->rotation, o->color);
+            const cfw_path *path = cfw_object_path(sc, store, o);
+            if (path && sc->vector_work)
+                cv_path_draw(&r, sc->vector_work, path, o->p, &o->rotation, o->color);
         } else if (sc->vector_work)
             cv_shape_draw(&r, sc->vector_work, &s, &o->rotation, rl);
         else cfw_shape_draw(&r, &s, rl);
@@ -850,7 +868,7 @@ static int cfw_asset_content_valid(const uint8_t *data, uint32_t len, uint8_t ki
 
 /* Allocate a fresh asset descriptor plus store space of `length` bytes. */
 static int cfw_txn_new_asset(cfw_txn *t, uint32_t id, uint32_t version, uint8_t kind,
-                             uint32_t length, uint8_t extra_state, uint16_t replaces) {
+                             uint32_t length, uint8_t extra_state) {
     cfw_cache *sc = t->sc;
     if (length == 0 || length > sc->store_bytes) { cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0); return -1; }
     if (t->staged_asset_count >= CFW_CACHE_ASSETS) { cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0); return -1; }
@@ -865,7 +883,6 @@ static int cfw_txn_new_asset(cfw_txn *t, uint32_t id, uint32_t version, uint8_t 
     a->kind = kind;
     a->offset = offset;
     a->length = length;
-    a->replaces = replaces;
     a->state = (uint8_t)(CFW_CACHE_ST_STAGED | extra_state);
     t->staged_assets[t->staged_asset_count++] = (uint16_t)(idx + 1);
     return idx;
@@ -884,23 +901,32 @@ static int cfw_txn_put_asset(cfw_txn *t, const uint8_t *p) {
         return cfw_txn_fail(t, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_UPLOAD);
     if (total > sc->store_bytes) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
     if (kind == CFW_ASSET_STRING && total > CFW_SHAPE_INLINE_MAX) return cfw_txn_fail(t, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_ASSET);
-    int staged = cfw_asset_find(sc, id, 1);
-    int resident = cfw_asset_find(sc, id, 0);
+    int staged = cfw_asset_find(sc, id, 0, 1);
+    int resident = cfw_asset_find(sc, id, version, 0);      /* this version, if resident */
     int idx;
     if (offset == 0) {
         if (staged >= 0) return cfw_txn_fail(t, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_DUPLICATE);
         if (resident >= 0) {
             cfw_asset *r = &sc->assets[resident];
-            if (r->version == version && r->length == total && (r->state & CFW_CACHE_ST_COMPLETE))
+            if (r->length == total && (r->state & CFW_CACHE_ST_COMPLETE))
                 return 1;                                   /* already resident: no-op */
-            if (r->version == version && !(r->state & CFW_CACHE_ST_COMPLETE) && r->kind == kind && r->length == total) {
-                /* restarting an interrupted upload: refill in place */
+            if (!(r->state & CFW_CACHE_ST_COMPLETE) && r->kind == kind && r->length == total) {
+                /* restarting an interrupted upload: refill in place. Not after a
+                 * chunk of it in this same message: the fill accounting would
+                 * mark bytes that were never written as complete (revision 42). */
+                if (cfw_txn_staged_fill(t, (uint16_t)(resident + 1)) != 0)
+                    return cfw_txn_fail(t, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_UPLOAD);
                 r->filled = 0;
                 idx = resident;
                 goto copy;
             }
+            return cfw_txn_fail(t, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_UPLOAD);
         }
-        idx = cfw_txn_new_asset(t, id, version, kind, total, 0, resident >= 0 ? (uint16_t)(resident + 1) : 0);
+        /* A new version must keep the kind every referencing object was created
+         * for: commit rebinds them to it (revision 42). */
+        int other = cfw_asset_find(sc, id, 0, 0);
+        if (other >= 0 && sc->assets[other].kind != kind) return cfw_txn_fail(t, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_KIND);
+        idx = cfw_txn_new_asset(t, id, version, kind, total, 0);
         if (idx < 0) return 0;
     } else {
         idx = staged >= 0 ? staged : resident;
@@ -932,12 +958,12 @@ copy:
  * missing (recorded), -1 when the kind is wrong. */
 static int cfw_txn_resolve(cfw_txn *t, uint32_t id, uint8_t kind) {
     cfw_cache *sc = t->sc;
-    int idx = cfw_asset_find(sc, id, 1);
+    int idx = cfw_asset_find(sc, id, 0, 1);
     if (idx >= 0) {
         const cfw_asset *a = &sc->assets[idx];
         if (a->filled + cfw_txn_staged_fill(t, (uint16_t)(idx + 1)) != a->length) { cfw_txn_missing(t, id); return 0; }
     } else {
-        idx = cfw_asset_find(sc, id, 0);
+        idx = cfw_asset_find(sc, id, 0, 0);
         if (idx < 0) { cfw_txn_missing(t, id); return 0; }
         const cfw_asset *a = &sc->assets[idx];
         if (!(a->state & CFW_CACHE_ST_COMPLETE) &&
@@ -995,7 +1021,7 @@ static int cfw_txn_put_object(cfw_txn *t, const uint8_t *p) {
 
     if (s.type == CFW_SHAPE_TEXT_INLINE) {
         uint32_t len = (uint16_t)s.p[4];
-        int pa = cfw_txn_new_asset(t, 0, 1, CFW_ASSET_STRING, len, CFW_CACHE_ST_PRIVATE | CFW_CACHE_ST_COMPLETE, 0);
+        int pa = cfw_txn_new_asset(t, 0, 1, CFW_ASSET_STRING, len, CFW_CACHE_ST_PRIVATE | CFW_CACHE_ST_COMPLETE);
         if (pa < 0) return 0;
         if (t->store == 0) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
         memcpy(t->store + sc->assets[pa].offset, s.text, len);
@@ -1008,7 +1034,7 @@ static int cfw_txn_put_object(cfw_txn *t, const uint8_t *p) {
         int n = cv_compile(w, s.text, (uint16_t)s.p[3]);
         if (n < 0) return cfw_txn_fail(t, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_ASSET);
         uint32_t bytes = (uint32_t)sizeof(cfw_path) + (uint32_t)n * (uint32_t)sizeof(cfw_edge);
-        int pa = cfw_txn_new_asset(t, 0, 1, CFW_ASSET_EDGES, bytes, CFW_CACHE_ST_PRIVATE | CFW_CACHE_ST_COMPLETE, 0);
+        int pa = cfw_txn_new_asset(t, 0, 1, CFW_ASSET_EDGES, bytes, CFW_CACHE_ST_PRIVATE | CFW_CACHE_ST_COMPLETE);
         if (pa < 0) return 0;
         if (t->store == 0) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
         cfw_path *path = (cfw_path *)(void *)(t->store + sc->assets[pa].offset);
@@ -1047,6 +1073,28 @@ static int cfw_txn_put_entry(cfw_txn *t, const uint8_t *p) {
     return p[0] == CFW_PUT_ASSET ? cfw_txn_put_asset(t, p) : cfw_txn_put_object(t, p);
 }
 
+/* A version of a public asset just became complete: every object bound to an
+ * older version of the id moves to it and the old versions go. Looked up by id
+ * at this moment, never by an index remembered earlier in the message: the old
+ * descriptor may have been evicted (refs 0) and its index reused meanwhile.
+ * Revision 41 remembered the index and could rebind a PATH object's private
+ * edges to an image. Replacement waits for the last chunk, so a multi-message
+ * upload keeps the objects on the old version until the new one is whole. */
+static void cfw_asset_supersede(cfw_cache *sc, uint32_t idx) {
+    cfw_asset *a = &sc->assets[idx];
+    if (a->id == 0 || (a->state & CFW_CACHE_ST_PRIVATE)) return;
+    for (uint32_t old = 0; old < CFW_CACHE_ASSETS; old++) {
+        cfw_asset *b = &sc->assets[old];
+        if (old == idx || b->id != a->id || (b->state & (CFW_CACHE_ST_PRIVATE | CFW_CACHE_ST_STAGED))) continue;
+        for (uint32_t k = 0; k < CFW_CACHE_OBJECTS; k++) {
+            cfw_object *o = &sc->objects[k];
+            if (o->asset == old + 1u) { o->asset = (uint16_t)(idx + 1); a->refs++; b->refs--; }
+            if (o->font == old + 1u)  { o->font = (uint16_t)(idx + 1);  a->refs++; b->refs--; }
+        }
+        cfw_asset_free(sc, old);
+    }
+}
+
 /* Make every staged descriptor resident. Cannot fail. */
 static void cfw_txn_commit(cfw_txn *t) {
     cfw_cache *sc = t->sc;
@@ -1056,27 +1104,23 @@ static void cfw_txn_commit(cfw_txn *t) {
     for (uint32_t i = 0; i < t->staged_asset_count; i++) {
         uint32_t idx = t->staged_assets[i] - 1u;
         cfw_asset *a = &sc->assets[idx];
-        if (a->replaces) {
-            uint32_t old = a->replaces - 1u;
-            for (uint32_t k = 0; k < CFW_CACHE_OBJECTS; k++) {
-                cfw_object *o = &sc->objects[k];
-                if (o->asset == old + 1u) { o->asset = (uint16_t)(idx + 1); a->refs++; sc->assets[old].refs--; }
-                if (o->font == old + 1u)  { o->font = (uint16_t)(idx + 1);  a->refs++; sc->assets[old].refs--; }
-            }
-            cfw_asset_free(sc, old);
-            a->replaces = 0;
-        }
         a->state &= (uint8_t)~CFW_CACHE_ST_STAGED;
         if (a->filled == a->length) a->state |= CFW_CACHE_ST_COMPLETE;
         a->last_use = sc->use_clock;
-        if (a->id && (a->state & CFW_CACHE_ST_COMPLETE)) cfw_journal_note(sc, CFW_JOURNAL_ASSET, a->id, a->version);
+        if (a->id && (a->state & CFW_CACHE_ST_COMPLETE)) {
+            cfw_asset_supersede(sc, idx);
+            cfw_journal_note(sc, CFW_JOURNAL_ASSET, a->id, a->version);
+        }
         mutated = 1;
     }
     for (uint32_t i = 0; i < t->chunk_count; i++) {
         cfw_asset *a = &sc->assets[t->chunks[i].asset - 1u];
         if (a->filled == a->length && !(a->state & CFW_CACHE_ST_COMPLETE)) {
             a->state |= CFW_CACHE_ST_COMPLETE;
-            if (a->id) cfw_journal_note(sc, CFW_JOURNAL_ASSET, a->id, a->version);
+            if (a->id) {
+                cfw_asset_supersede(sc, t->chunks[i].asset - 1u);
+                cfw_journal_note(sc, CFW_JOURNAL_ASSET, a->id, a->version);
+            }
         }
         mutated = 1;
     }
@@ -1360,15 +1404,13 @@ static int cfw_cache_show(customCfwContext *ctx, const uint8_t *src, uint32_t sr
             if (idx < 0 || sc->objects[idx].version != version) { cfw_txn_missing(tp, id); next[i] = 0; continue; }
             next[i] = (uint16_t)idx;
             sc->objects[idx].state |= CFW_CACHE_ST_NEXT;
-            if (sc->objects[idx].type == CFW_SHAPE_PATH && sc->objects[idx].asset)
-                edges += ((const cfw_path *)(const void *)(store + sc->assets[sc->objects[idx].asset - 1u].offset))->count;
+            { const cfw_path *path = cfw_object_path(sc, store, &sc->objects[idx]); if (path) edges += path->count; }
         }
         if (flags & CFW_SHOW_FLAG_KEEP)
             for (uint32_t i = 0; i < sc->active_count; i++) {
                 cfw_object *o = &sc->objects[sc->active[i]];
                 o->state |= CFW_CACHE_ST_NEXT;
-                if (o->type == CFW_SHAPE_PATH && o->asset)
-                    edges += ((const cfw_path *)(const void *)(store + sc->assets[o->asset - 1u].offset))->count;
+                { const cfw_path *path = cfw_object_path(sc, store, o); if (path) edges += path->count; }
             }
     }
     if (tp->status == CFW_CACHE_REPLY_APPLIED && edges > CFW_PATH_SCENE_EDGES) cfw_txn_fail(tp, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_EDGES);
@@ -1630,7 +1672,7 @@ static int cfw_scene_dispatch(customCfwContext *ctx, uint8_t mode,
 static const uint8_t *cfw_cache_asset_region(customCfwContext *ctx, uint32_t id, uint8_t kind, uint32_t *len) {
     cfw_cache *sc = cfw_cache_peek(ctx);
     if (sc == 0 || ctx->texture_cache == 0) return 0;
-    int idx = cfw_asset_find(sc, id, 0);
+    int idx = cfw_asset_find(sc, id, 0, 0);
     if (idx < 0) return 0;
     const cfw_asset *a = &sc->assets[idx];
     if (a->kind != kind || !(a->state & CFW_CACHE_ST_COMPLETE)) return 0;

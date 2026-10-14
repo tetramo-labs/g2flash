@@ -47,8 +47,8 @@ export async function badAppleVectors(gifFile: string, frames = 300, svgOut?: st
     if(svgOut)await Bun.write(`${svgOut}/${String(f).padStart(4,"0")}.svg`,
       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 288"><rect width="576" height="288" fill="black"/><path fill="white" fill-rule="evenodd" d="${d}"/></svg>\n`);
   }
-  const sizes=steps.slice(1,-1).map(s=>s.payload.length).sort((a,b)=>a-b);
-  console.log(`[vectors] ${count} frames; payload mean ${Math.round(sizes.reduce((a,b)=>a+b,0)/Math.max(1,count))} B, p95 ${sizes[Math.floor(count*0.95)]??0} B, max ${sizes.at(-1)??0} B`);
+  const sizes=steps.slice(1).map(s=>s.payload.length).sort((a,b)=>a-b);   /* every frame; "release" is pushed below */
+  console.log(`[vectors] ${count} frames; payload mean ${Math.round(sizes.reduce((a,b)=>a+b,0)/Math.max(1,sizes.length))} B, p95 ${sizes[Math.min(sizes.length-1,Math.floor(sizes.length*0.95))]??0} B, max ${sizes.at(-1)??0} B`);
   console.log(`[vectors] source-width/frame-count: ${[...histogram].map(([w,n])=>`${w}/${n}`).join(", ")}`);
   steps.push({name:"release",payload:hide(),waitMs:0});
   return steps;

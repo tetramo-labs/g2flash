@@ -272,11 +272,17 @@ __attribute__((used, noinline)) int ancs_hook_app(void) {
 
 /* ---- consumer (RTOS timer thread) ----------------------------------------- */
 
+/* Protobuf frame bytes ahead of a field-125 body: the length is a varint, two
+ * bytes from 128 up (bodies run to ANCS_MSG_MAX = 150). */
+static uint32_t ancs_frame_len(uint32_t body_len) { return body_len >= 0x80u ? 8u : 7u; }
+
 static void ancs_frame_notify(uint8_t *p, uint32_t body_len) {
     /* G2SettingPackage{commandId=3, magic=0, field 125}; tag 1002 = ea 07. */
     p[0] = 0x08; p[1] = 0x03;
     p[2] = 0x10; p[3] = 0x00;
-    p[4] = 0xEA; p[5] = 0x07; p[6] = (uint8_t)body_len;
+    p[4] = 0xEA; p[5] = 0x07;
+    if (body_len >= 0x80u) { p[6] = (uint8_t)(0x80u | (body_len & 0x7fu)); p[7] = (uint8_t)(body_len >> 7); }
+    else p[6] = (uint8_t)body_len;
 }
 
 void ancs_relay_tick(void *arg) {
@@ -304,11 +310,12 @@ void ancs_relay_tick(void *arg) {
         }
         uint8_t epoch = ring[(r + 1u) & ANCS_RING_MASK];
         uint8_t *p = ctx->ancs_notify_buf;
-        for (uint32_t i = 0; i < len; i++) p[7 + i] = ring[(r + 2u + i) & ANCS_RING_MASK];
+        uint32_t hdr = ancs_frame_len(len);
+        for (uint32_t i = 0; i < len; i++) p[hdr + i] = ring[(r + 2u + i) & ANCS_RING_MASK];
         ctx->ancs_tail = (uint16_t)(r + 2u + len);
         if (epoch != ctx->ancs_epoch) continue;   /* queued before the current ENABLE */
         ancs_frame_notify(p, len);
-        if (ANCS_SEND(p, 7 + len) != 0) {
+        if (ANCS_SEND(p, hdr + len) != 0) {
             if (ctx->ancs_send_errs != 0xffu) ctx->ancs_send_errs++;
             failed = 1;
         } else {

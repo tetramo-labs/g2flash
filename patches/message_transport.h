@@ -33,8 +33,15 @@ typedef struct {
     uint8_t ack_count, ack_capacity, packet_capacity;
     uint8_t reply_capacity; /* largest request packet body seen: a reply that size fits the link */
     uint8_t ack_history[CFW_ACK_HISTORY][CFW_ACK_ENTRY_SIZE];
+    /* Revision 42: the handler's kind-5 reply, per stream. The two ingress
+     * streams run on different tasks, so a buffer shared through the context
+     * lost or mixed replies when both lenses' links were busy at once. */
+    uint8_t reply[CFW_REPLY_MAX_SIZE]; /* [kind][stream][ordinal LE16][lens][payload] */
 } cfw_message_stream;
-int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum);
+/* Run the handler on one reconstructed record. It may leave up to `reply_cap`
+ * bytes of kind-5 reply payload in `reply` and set `*reply_len`. */
+int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum,
+                         uint8_t reply_cap, uint8_t *reply, uint8_t *reply_len);
 uint32_t cfw_receive_packet(uint8_t pipe, const uint8_t *packet, uint16_t length);
 uint32_t cfw_message_bridge_received(uint32_t app_id, const uint8_t *data,
                                      uint32_t length, uint16_t event);

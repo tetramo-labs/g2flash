@@ -48,7 +48,12 @@ function record(type: number, color: number, width: number, ...p: number[]): num
 }
 /** Inline built-in-font text: [17][flags][options][0][x][y][w][h][len][bytes], clipped to w/h when > 0. */
 function text(options: number, x: number, y: number, w: number, h: number, s: string): number[] {
-  const bytes = [...new TextEncoder().encode(s)].slice(0, 128);
+  // Trim by code point: a byte-level cut could split a UTF-8 sequence and the
+  // firmware refuses a record whose text is not valid UTF-8.
+  const enc = new TextEncoder();
+  let str = s;
+  while (enc.encode(str).length > 128) str = [...str].slice(0, -1).join("");
+  const bytes = [...enc.encode(str)];
   return [T.TEXT_INLINE, VISIBLE, options, 0, ...i16(x), ...i16(y), ...i16(w), ...i16(h), bytes.length, ...bytes];
 }
 // mode 36: immediate shapes into the shadow
@@ -138,7 +143,7 @@ try {
   const send = (p: Uint8Array) => sendImage(p);
 
   await lease(5);                                  // FB_ACQUIRE (90 s, fail-open)
-  renew = setInterval(() => void lease(5), 30_000);
+  renew = setInterval(() => void lease(5).catch((e) => console.error(`lease renewal failed: ${e}`)), 30_000);
   await cache.reset();
 
   // ---- stage runner ------------------------------------------------------------

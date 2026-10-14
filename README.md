@@ -530,6 +530,21 @@ after a settings read, as a separate notification rather than inside the
 settings reply. Detect support by revision 24 or later, or by the `RB` report.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
 
+### Object cache asset replacement (revision 42)
+
+Revision 42 (`GLASSLYCFW/42`) changes how a new version of a public asset
+takes over from the old one. Objects stay bound to the old version until the
+new one's last chunk has arrived and validated, so an image re-uploaded across
+several messages never renders half-filled, and the hand-over finds the old
+version by id at commit time instead of by a descriptor index remembered while
+the message was staged (an evicted descriptor's index could be reused by a
+later entry of the same message, which once rebound a path object's private
+edges to an image and overran the vector workspace on the display task). A
+new version must keep the old one's kind, and restarting an upload after a
+chunk of it in the same message is refused. Kind-5 replies travel in a
+per-stream buffer, and ANCS field-125 bodies of 128 bytes and more carry a
+two-byte varint length.
+
 ### Microphone volume gate
 
 Revision 40 (`GLASSLYCFW/40`) adds a phone-configured volume gate ahead of the

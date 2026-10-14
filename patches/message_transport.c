@@ -39,26 +39,11 @@ static void cfw_nack_note(uint8_t reason) {
 #define CFW_NACK_NOTE cfw_nack_note
 #endif
 
-/* Revision 38: a handler may leave an object-cache reply in the context. The
- * transport tells it beforehand how many payload bytes one notification can
- * carry on this link and sends the reply, kind 5, ahead of the ACK. */
-#ifndef CFW_REPLY_PREPARE
-static void cfw_reply_prepare(uint8_t capacity) {
-    customCfwContext *ctx = peekCustomCfwContext();
-    if (!ctx) return;
-    ctx->cache_reply_len = 0;
-    ctx->cache_reply_cap = capacity > CFW_REPLY_HDR_SIZE ? (uint8_t)(capacity - CFW_REPLY_HDR_SIZE) : 0;
-}
-static const uint8_t *cfw_reply_take(uint8_t *length) {
-    customCfwContext *ctx = peekCustomCfwContext();
-    if (!ctx || ctx->cache_reply_len == 0) { *length = 0; return 0; }
-    *length = ctx->cache_reply_len;
-    ctx->cache_reply_len = 0;
-    return ctx->cache_reply;
-}
-#define CFW_REPLY_PREPARE cfw_reply_prepare
-#define CFW_REPLY_TAKE cfw_reply_take
-#endif
+/* Revision 38: a handler may answer with an object-cache reply. The transport
+ * tells it how many payload bytes one notification can carry on this link and
+ * sends the reply, kind 5, ahead of the ACK. Revision 42: the reply lands in
+ * the stream's own buffer (cfw_message_received copies it out under the
+ * handler's lock), not in the context the two ingress tasks share. */
 
 static uint16_t cfw_message_crc(const uint8_t *data, uint16_t size) {
     uint16_t crc = 0xffffu;
@@ -142,17 +127,17 @@ static void cfw_message_reply_capacity_hint(uint8_t capacity) {
     }
 }
 
-/* Kind-5 reply: [5][stream][ordinal LE16][lens][payload]. Same route as the ACK. */
+/* Kind-5 reply: [5][stream][ordinal LE16][lens][payload], the payload already
+ * in place in stream->reply. Same route as the ACK. */
 static int cfw_message_send_reply(cfw_message_stream *stream, uint8_t here, uint8_t origin,
-                                  const uint8_t *payload, uint8_t length) {
-    uint8_t reply[CFW_REPLY_MAX_SIZE];
+                                  uint8_t length) {
+    uint8_t *reply = stream->reply;
     if (length == 0 || (unsigned)length + CFW_REPLY_HDR_SIZE > stream->reply_capacity) return -1;
     reply[0] = CFW_MESSAGE_REPLY;
     reply[1] = stream->stream_id;
     reply[2] = (uint8_t)stream->message_id;
     reply[3] = (uint8_t)(stream->message_id >> 8);
     reply[4] = here;
-    memcpy(reply + CFW_REPLY_HDR_SIZE, payload, length);
     uint16_t total = (uint16_t)(CFW_REPLY_HDR_SIZE + length);
     return here == origin ? CFW_BLE_SEND(1, CFW_MESSAGE_SID, reply, total) :
         cfw_message_bridge_send(CFW_BRIDGE_RETURN, origin, reply, total);
@@ -218,13 +203,12 @@ static uint32_t cfw_message_complete(cfw_message_stream *stream, uint8_t here,
     uint16_t crc = valid ? cfw_message_crc(data, (uint16_t)size) : 0;
     if (valid && crc != stream->checksum) { valid = 0; reason = CFW_NACK_CRC; }
     if (valid) {
-        CFW_REPLY_PREPARE(stream->reply_capacity);
-        if (cfw_message_received(data, (uint16_t)size, crc) != 0) { valid = 0; reason = CFW_NACK_HANDLER; }
-        else {
-            uint8_t reply_len;
-            const uint8_t *reply = CFW_REPLY_TAKE(&reply_len);
-            if (reply) cfw_message_send_reply(stream, here, origin, reply, reply_len);
-        }
+        uint8_t reply_len = 0;
+        uint8_t reply_cap = stream->reply_capacity > CFW_REPLY_HDR_SIZE ?
+            (uint8_t)(stream->reply_capacity - CFW_REPLY_HDR_SIZE) : 0;
+        if (cfw_message_received(data, (uint16_t)size, crc, reply_cap,
+                                 stream->reply + CFW_REPLY_HDR_SIZE, &reply_len) != 0) { valid = 0; reason = CFW_NACK_HANDLER; }
+        else if (reply_len) cfw_message_send_reply(stream, here, origin, reply_len);
     }
     if (!valid) {
         CFW_NACK_NOTE(reason);

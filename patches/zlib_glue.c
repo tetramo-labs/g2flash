@@ -7,14 +7,16 @@
 #include "shapes.h"
 #include "scene.h"
 
-static int image_worker(const uint8_t *src, uint32_t srclen);
+static int image_worker(const uint8_t *src, uint32_t srclen, uint8_t reply_cap, uint8_t *reply, uint8_t *reply_len);
 
 /* The stream parser owns data until this synchronous handler returns. */
-int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum) {
+int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum,
+                         uint8_t reply_cap, uint8_t *reply, uint8_t *reply_len) {
+    *reply_len = 0;
     customCfwContext *ctx = getCustomCfwContext();
     if (!ctx) return -1;
     ctx->message_probe.snapshot = (uint32_t)size | ((uint32_t)checksum << 16);
-    int r = image_worker(data, size);
+    int r = image_worker(data, size, reply_cap, reply, reply_len);
     if (r != 0) {
         ctx->worker_fail_count++;
         ctx->worker_fail_mode = size ? data[0] : 0;
@@ -305,7 +307,7 @@ static int is_shadow_message(const uint8_t *src, uint32_t srclen) {
 #define CFW_IMAGE_MUTEX_GIVE ((int (*)(uint32_t))0x00442ff7u)
 #define CFW_IMAGE_MUTEX_DELETE ((int (*)(uint32_t))0x00443049u)
 static int image_worker_locked(const uint8_t *src, uint32_t size, int *presented);
-static int image_worker(const uint8_t *src, uint32_t size) {
+static int image_worker(const uint8_t *src, uint32_t size, uint8_t reply_cap, uint8_t *reply, uint8_t *reply_len) {
     customCfwContext *ctx = getCustomCfwContext();
     if (!ctx) return -1;
     uint32_t mutex = __atomic_load_n(&ctx->image_mutex, __ATOMIC_ACQUIRE);
@@ -320,6 +322,10 @@ static int image_worker(const uint8_t *src, uint32_t size) {
         }
     }
     if (CFW_IMAGE_MUTEX_TAKE(mutex, 0xffffffffu) != 0) return -1;
+    /* Revision 42: the handlers' reply scratch in the context is only touched
+     * under this mutex; the caller gets its own copy before it is released. */
+    ctx->cache_reply_len = 0;
+    ctx->cache_reply_cap = reply_cap;
     /* Revision 36. Shadow messages run right here on the receiving task, as
      * upstream does (ble_msgrx and the bridge's manager task both have 16 KiB
      * stacks). Revision 35 handed them to the stock display task instead, whose
@@ -344,6 +350,15 @@ static int image_worker(const uint8_t *src, uint32_t size) {
     int presented = 0;
     int result = image_worker_locked(src, size, &presented);
     if (held && !presented) { ctx->gate_held = 0; FW_DISPLAY_SIGNAL(); }
+    {
+        /* A RESET may have raised cache_reply_cap (and the stream's capacity)
+         * past reply_cap meanwhile; the stream buffer holds any legal reply. */
+        uint32_t n = ctx->cache_reply_len;
+        if (n > CFW_REPLY_MAX_SIZE - CFW_REPLY_HDR_SIZE) n = 0;
+        for (uint32_t i = 0; i < n; i++) reply[i] = ctx->cache_reply[i];
+        *reply_len = (uint8_t)n;
+        ctx->cache_reply_len = 0;
+    }
     CFW_IMAGE_MUTEX_GIVE(mutex);
     return result;
 }

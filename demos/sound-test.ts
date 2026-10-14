@@ -64,7 +64,6 @@ async function playSound(
     mapSessionId: sid,
     mapTotalSize: payload.length,
     mapFragmentIndex: 0,
-    mapFragmentPacketSize: payload.length,
     mapRawData: payload,
     magic: nextMagic(),
     // compressMode defaults to 0 -> frag_write copies the bytes verbatim, so the
@@ -106,12 +105,12 @@ try {
   await sleep(500);
   await playSound(session, container, soundTone(150, 50, 40), `  150hz tick`);
   await sleep(40);
-  await soundStop();
+  await playSound(session, container, soundStop(), `  stop`);
 
   await sleep(500);
   await playSound(session, container, soundTone(200, 50, 40), `  200hz tick`);
   await sleep(40);
-  await soundStop();
+  await playSound(session, container, soundStop(), `  stop`);
   await sleep(500);
 
   console.log(`\n=== buzzer mode-5 sound test (arm ${ARM}) ===`);

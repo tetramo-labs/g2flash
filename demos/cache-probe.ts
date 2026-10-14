@@ -20,7 +20,12 @@ import { describeCfw, queryGlasslyCfw, REQUIRED_REVISION } from "./glassly-cfw";
 const args = process.argv.slice(2);
 const noReset = args.includes("--no-reset");
 const targets = args.includes("--targets") ? { left: 1, right: 2, both: 3 }[args[args.indexOf("--targets") + 1] ?? "both"] ?? 3 : 3;
-const messages = args.filter((a) => !a.startsWith("--")).map((h) => Uint8Array.from(Buffer.from(h.replace(/\s+/g, ""), "hex")));
+const valueOf = new Set<number>([args.indexOf("--targets") + 1].filter((i) => i > 0));
+const messages = args.filter((a, i) => !a.startsWith("--") && !valueOf.has(i)).map((h) => {
+  const hex = h.replace(/\s+/g, "");
+  if (!/^(?:[0-9a-fA-F]{2})+$/.test(hex)) { console.error(`not a hex message: ${h}`); process.exit(2); }
+  return Uint8Array.from(Buffer.from(hex, "hex"));
+});
 if (!messages.length) { console.log("usage: bun cache-probe.ts [--no-reset] <hex message>..."); process.exit(2); }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let magic = 100;

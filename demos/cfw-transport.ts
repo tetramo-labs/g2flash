@@ -124,8 +124,9 @@ export class CfwTransport {
     this.lastReplies = new Map();
     let acked = 0;
     const name = (lens: number) => (lens === 1 ? "L" : "R");
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const done = new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         this.waiter = undefined;
         this.lastOutcome = `timeout after ${this.ackTimeoutMs} ms, acked by ${acked ? name(acked & 1 || 2) : "neither lens"}${acked === 1 ? "" : acked === 2 ? "" : ""}`;
         if (acked === 1) this.lastOutcome = `timeout: L acked, R silent`;
@@ -139,7 +140,14 @@ export class CfwTransport {
         if ((acked & targets) === targets) { clearTimeout(timer); this.waiter = undefined; this.lastOutcome = targets === LENS_BOTH ? "acked by both" : `acked by ${name(targets)}`; resolve(true); }
       };
     });
-    await sendFrames(this.session.left, frames);
+    try {
+      await sendFrames(this.session.left, frames);
+    } catch (e) {
+      clearTimeout(timer);
+      this.waiter = undefined;
+      this.lastOutcome = `write failed: ${e}`;
+      throw e;
+    }
     return done;
   }
 

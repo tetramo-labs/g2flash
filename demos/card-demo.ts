@@ -58,7 +58,7 @@ if (!(await session.sendPb(0xe0, create.pb, create.magic, { ackTimeoutMs: 8000 }
 await sleep(300);
 const lease = async (op: 5 | 6) => { const m = nextMagic(); await session.sendPb(9, framebufferLease(op, m), m, { ackTimeoutMs: 8000 }); };
 await lease(5);
-const renew = setInterval(() => void lease(5), 30_000);
+const renew = setInterval(() => void lease(5).catch((e) => console.error(`lease renewal failed: ${e}`)), 30_000);
 const transport = new CfwTransport(session, 8000);
 const link = new CacheLink(transport);
 

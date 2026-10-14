@@ -863,6 +863,9 @@ static int relay_handle_peer(customCfwContext *ctx, const uint8_t *data, uint32_
     if (magic == RELAY_MAGIC_START && len >= 6u) {
         if (FW_MIC_SIDE() == 1u) {
             uint8_t fb = data[1]; uint32_t left_tick = relay_rd32(data + 2); uint32_t now = FW_MS_TICK;
+            /* The sender clamps to 20..RELAY_NOTIFY_MAX_FBYTES; relay_tap sizes its
+             * 2 x nf x fb output on this value, so never take one outside that. */
+            if (fb < 20u || fb > RELAY_NOTIFY_MAX_FBYTES) return 1;
             if (!ctx->relay_started) {                              /* first START of this session */
                 if (relay_alloc(ctx)) relay_enc_reset(ctx, fb);
                 ctx->relay_seq = 0u; ctx->relay_started = 1u;

@@ -170,14 +170,16 @@ static void cv_fill(const cfw_raster *r, cfw_vector_work *w, uint32_t n, uint8_t
 static void cv_path_draw(const cfw_raster *r, cfw_vector_work *w, const cfw_path *path,
                          const int16_t *p, const cfw_rotation *t, uint8_t color) {
     int32_t scale=cfw_clamp(p[2],0,2048); /* Q8, 0..8x */
-    for(uint32_t i=0;i<path->count;i++) {
+    uint32_t count=path->count;
+    if(count>CFW_PATH_MAX_EDGES)count=CFW_PATH_MAX_EDGES; /* the work buffer's size; cv_compile never exceeds it */
+    for(uint32_t i=0;i<count;i++) {
         cfw_edge e=path->edges[i];
         e.x0=e.x0*scale/256+(int32_t)p[0]*16;e.y0=e.y0*scale/256+(int32_t)p[1]*16;
         e.x1=e.x1*scale/256+(int32_t)p[0]*16;e.y1=e.y1*scale/256+(int32_t)p[1]*16;
         w->edges[i]=e;
     }
-    cv_transform(w,path->count,t);
-    cv_fill(r,w,path->count,path->rule,color);
+    cv_transform(w,count,t);
+    cv_fill(r,w,count,path->rule,color);
 }
 
 /* Rotated primitives become contours. Zero/full-turn angles keep the legacy

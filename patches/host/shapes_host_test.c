@@ -301,7 +301,7 @@ static void fresh(void) {
 }
 
 static cfw_object *obj(uint32_t id) { cfw_cache *sc = cfw_cache_peek(&g_ctx); int i = sc ? cfw_object_find(sc, id, 0) : -1; return i < 0 ? 0 : &sc->objects[i]; }
-static cfw_asset *asset(uint32_t id) { cfw_cache *sc = cfw_cache_peek(&g_ctx); int i = sc ? cfw_asset_find(sc, id, 0) : -1; return i < 0 ? 0 : &sc->assets[i]; }
+static cfw_asset *asset(uint32_t id) { cfw_cache *sc = cfw_cache_peek(&g_ctx); int i = sc ? cfw_asset_find(sc, id, 0, 0) : -1; return i < 0 ? 0 : &sc->assets[i]; }
 static uint32_t live_objects(void) { cfw_cache *sc = cfw_cache_peek(&g_ctx); uint32_t n = 0; for (uint32_t i = 0; sc && i < CFW_CACHE_OBJECTS; i++) if (sc->objects[i].id) n++; return n; }
 static uint32_t live_assets(void) { cfw_cache *sc = cfw_cache_peek(&g_ctx); uint32_t n = 0; for (uint32_t i = 0; sc && i < CFW_CACHE_ASSETS; i++) if (sc->assets[i].id || sc->assets[i].length) n++; return n; }
 static uint32_t store_used(void) { cfw_cache *sc = cfw_cache_peek(&g_ctx); uint32_t n = 0; for (uint32_t g = 0; sc && g < CFW_CACHE_GRANULES; g++) n += cfw_store_bit(sc, g); return n * CFW_CACHE_GRANULE; }
@@ -1079,6 +1079,86 @@ static void test_lifecycle(void) {
       cfw_scene_release(&g_ctx); CHECK(g_alloc_live == 0); }
 }
 
+/* Revision 42: replacing a public asset's version. The old version is found by
+ * id at commit, never by an index remembered while the message was staged (an
+ * evicted descriptor's index can be reused by a later entry of the same
+ * message), and a multi-message upload keeps the referencing objects on the old
+ * version until the new one is whole and validated. */
+static void test_asset_replacement(void) {
+    static uint8_t big[70000], cmds[64];
+    fresh();
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    uint8_t img[1024];
+    uint32_t il = mk_image(img, 4, 4, 15);
+    /* X = id 100 v1 at asset index 0, nothing references it */
+    m_begin(10); m_put_asset(100, 1, CFW_ASSET_IMAGE, il, 0, img, il);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && cfw_asset_find(sc, 100, 0, 0) == 0);
+    /* fill most of the store so the next big asset must evict X v1 */
+    uint32_t bl = mk_big_image(big, 240, 240, 1);
+    for (uint32_t i = 0; i < 4; i++) {
+        m_begin(11 + (uint16_t)i); m_put_asset(400 + i, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
+        CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    }
+    /* one message: X v2 (staged), a big image (evicts X v1: index 0 freed), a
+     * PATH object whose private edges take index 0 */
+    uint32_t n = 0;
+    cmds[n++] = 0; put16(cmds + n, 10 * 16); n += 2; put16(cmds + n, 10 * 16); n += 2;
+    cmds[n++] = 1; put16(cmds + n, 100 * 16); n += 2; put16(cmds + n, 10 * 16); n += 2;
+    cmds[n++] = 1; put16(cmds + n, 100 * 16); n += 2; put16(cmds + n, 100 * 16); n += 2;
+    cmds[n++] = 4;
+    uint8_t prec[128]; uint8_t *pe = rec_path(prec, 15, 0, 0, 0, 256, cmds, n);
+    m_begin(20);
+    m_put_asset(100, 2, CFW_ASSET_IMAGE, il, 0, img, il);
+    m_put_asset(500, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
+    m_put_object(7, 1, prec, (uint32_t)(pe - prec));
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(obj(7) && obj(7)->asset && sc->assets[obj(7)->asset - 1u].kind == CFW_ASSET_EDGES && sc->assets[obj(7)->asset - 1u].id == 0);
+    CHECK(asset(100) && asset(100)->version == 2 && asset(100)->refs == 0 && (asset(100)->state & CFW_CACHE_ST_COMPLETE));
+    { uint32_t id = 7, ver = 1; m_show(21, 1, 0); m_refs(&id, &ver, 1);
+      CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && count_color(sc->fb, 15) > 1000); }
+
+    /* a referenced image re-uploaded in two messages: the object keeps drawing
+     * v1 until v2's last chunk lands, then moves to v2 and v1 goes */
+    fresh(); sc = cfw_cache_peek(&g_ctx);
+    il = mk_image(img, 20, 20, 15);
+    m_begin(30); m_put_asset(100, 1, CFW_ASSET_IMAGE, il, 0, img, il);
+    uint8_t r[16]; rec_asset(r, CFW_SHAPE_IMAGE, 15, 10, 10, 100, 0);
+    m_put_object(1, 1, r, 12);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    uint32_t id = 1, ver = 1;
+    m_show(31, 1, 0); m_refs(&id, &ver, 1);
+    CHECK(send(38) == 0 && count_color(sc->fb, 15) == 400);
+    bl = mk_big_image(big, 100, 100, 3);
+    m_begin(32); m_put_asset(100, 2, CFW_ASSET_IMAGE, bl, 0, big, 5000);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(sc->assets[obj(1)->asset - 1u].version == 1 && asset(100)->version == 1 && asset(100)->refs == 1);   /* still on v1 */
+    CHECK(live_assets() == 2);
+    m_show(33, 1, 0); m_refs(&id, &ver, 1);
+    CHECK(send(38) == 0 && count_color(sc->fb, 15) == 400 && count_color(sc->fb, 3) == 0);
+    /* a new object referencing the id while v2 is half there resolves to complete v1 */
+    m_begin(34); rec_asset(r, CFW_SHAPE_IMAGE, 15, 200, 10, 100, 0); m_put_object(2, 1, r, 12);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && asset(100)->version == 1 && asset(100)->refs == 2);
+    /* a restart after a chunk of the same message is refused (bytes would be counted unwritten) */
+    m_begin(35);
+    m_put_asset(100, 2, CFW_ASSET_IMAGE, bl, 5000, big + 5000, 2);
+    m_put_asset(100, 2, CFW_ASSET_IMAGE, bl, 0, big, 5000);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED && reply_extra()[0] == CFW_CACHE_REFUSE_UPLOAD);
+    /* the last chunk: both objects move to v2, v1 is freed */
+    m_begin(36); m_put_asset(100, 2, CFW_ASSET_IMAGE, bl, 5000, big + 5000, bl - 5000);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(asset(100)->version == 2 && asset(100)->refs == 2 && (asset(100)->state & CFW_CACHE_ST_COMPLETE) && live_assets() == 1);
+    CHECK(sc->assets[obj(1)->asset - 1u].version == 2 && sc->assets[obj(2)->asset - 1u].version == 2);
+    m_show(37, 1, 0); m_refs(&id, &ver, 1);
+    CHECK(send(38) == 0 && count_color(sc->fb, 15) == 0 && count_color(sc->fb, 3) == 10000);
+    /* a new version of another kind is refused: the objects were made for an image */
+    uint8_t str[] = "hi";
+    m_begin(38); m_put_asset(100, 3, CFW_ASSET_STRING, 2, 0, str, 2);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED && reply_extra()[0] == CFW_CACHE_REFUSE_KIND);
+    /* same version, different content size: an upload error, not a silent no-op */
+    m_begin(39); m_put_asset(100, 2, CFW_ASSET_IMAGE, il, 0, img, il);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED && reply_extra()[0] == CFW_CACHE_REFUSE_UPLOAD);
+}
+
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : ".";
     test_immediate(dir);
@@ -1093,6 +1173,7 @@ int main(int argc, char **argv) {
     test_clock_tweens();
     test_state();
     test_lifecycle();
+    test_asset_replacement();
     cfw_scene_release(&g_ctx);
     CHECK(g_alloc_live == 0);
     printf("%s (%d failures)\n", g_fail ? "FAILED" : "OK", g_fail);

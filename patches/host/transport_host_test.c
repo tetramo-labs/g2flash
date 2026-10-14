@@ -74,8 +74,10 @@ typedef struct { uint8_t body[64]; uint16_t len; } handled;
 static handled g_handled[2][16];
 static unsigned g_handled_n[2];
 static int g_handler_result;
-int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum) {
-    (void)checksum;
+int cfw_message_received(const uint8_t *data, uint16_t size, uint16_t checksum,
+                         uint8_t reply_cap, uint8_t *reply, uint8_t *reply_len) {
+    (void)checksum; (void)reply_cap; (void)reply;
+    *reply_len = 0;
     unsigned lens = g_here - 1;
     assert(g_handled_n[lens] < 16 && size <= 64);
     memcpy(g_handled[lens][g_handled_n[lens]].body, data, size);

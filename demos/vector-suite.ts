@@ -95,7 +95,7 @@ try {
     const step:VectorStep=steps[i],before=performance.now();
     await send(step.payload);sent++;worst=Math.max(worst,performance.now()-before);
     if(!video)console.log(`${step.name}: ${step.payload.length} B; inspect expected display${step.probes?` (${step.probes.length} host pixel probes)`:""}`);
-    const wait=video?(i+1)*frameMs-(performance.now()-start):step.waitMs;
+    const wait=video?i*frameMs-(performance.now()-start):step.waitMs;   /* step i went out at (i-1)*frameMs; the next is due at i*frameMs */
     if(step.name!=="release" && wait>0)await sleep(wait);
   }
   console.log(`${sent} payloads ACKed, ${skipped} video frames skipped; worst ACK ${worst.toFixed(0)} ms`);
