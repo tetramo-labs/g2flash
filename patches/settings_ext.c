@@ -467,9 +467,13 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
-//   44 -> head-up diagnostics: every head-up record reaching headup_gate is
-//         echoed as sys event 127 with the gate bits in its source, and field
-//         107 bytes 9-14 carry the head-up counters (gesture_fwd.c).
+//   45 -> head-up forwarded from the foreground UI dispatcher: with an app on
+//         screen the IMU record never reaches the display thread's idle policy
+//         (verified on hardware with revision 44), it goes to the dispatcher
+//         whose mode lookup the ring-press hook already wraps. Field 107 grows
+//         to 32 bytes with that dispatcher's counters (gesture_fwd.c).
+//   44 -> head-up diagnostics in field 107 bytes 9-14 (the sys event 127 echo
+//         carried no bits: the stock sender only encodes source 0/1/4).
 //   43 -> head-up forwarding runs whether or not SVC_Settings_AppLaunchCheck
 //         passes (it passes in normal use, so revisions 38-42 never forwarded).
 //   42 -> object cache fixes (scene.c): a new asset version replaces the old
@@ -580,11 +584,12 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
  * Little-endian: [1][nack_count u16][nack_reason][worker_fail_mode]
  * [worker_fail_count u16][gate_timeouts u16][hu_type7][hu_sub6][hu_fwd][hu_gate][hu_mode][hu_last_subtype]
  * [direct_pending][direct_active][gate_held]
- * [alloc_fail_count u16][alloc_fail_heap][last_worker_us/100 u16][0]. */
+ * [alloc_fail_count u16][alloc_fail_heap][last_worker_us/100 u16][0]
+ * [ui_records][ui_sub6][ui_last_subtype][ui_last_source][ui_gate][ui_mode][0][0]. */
 static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned capacity) {
     customCfwContext *ctx = faceclaw_context_if_valid();
     if (!ctx) return len;
-    unsigned char d[24];
+    unsigned char d[32];
     uint32_t gt = ctx->gate_timeouts > 0xffffu ? 0xffffu : ctx->gate_timeouts;
     uint32_t af = ctx->alloc_fail_count > 0xffffu ? 0xffffu : ctx->alloc_fail_count;
     uint32_t wu = ctx->last_worker_us / 100u;
@@ -604,12 +609,15 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
     d[20] = ctx->alloc_fail_heap;
     d[21] = (unsigned char)wu; d[22] = (unsigned char)(wu >> 8);
     d[23] = 0;
+    d[24] = ctx->ui_records; d[25] = ctx->ui_sub6; d[26] = ctx->ui_last_subtype;   /* revision 45 */
+    d[27] = ctx->ui_last_source; d[28] = ctx->ui_gate; d[29] = ctx->ui_mode;
+    d[30] = d[31] = 0;
     return pb_append_bytes_field(buf, len, capacity, 107u, d, (unsigned)sizeof(d));
 }
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/44";
+        static const char caps[] = "GLASSLYCFW/45";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

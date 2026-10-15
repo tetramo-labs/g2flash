@@ -327,6 +327,14 @@ typedef struct {
     uint8_t  hu_gate;                       /* HEADUP_DIAG_* bits of the last head-up */
     uint8_t  hu_mode;                       /* low byte of the UI mode at the last head-up */
     uint8_t  hu_last_subtype;               /* subtype of the last type-7 record */
+    /* Revision 45: the same for the foreground UI dispatcher (0x44480a), which
+     * is where input records go while an app owns the screen. */
+    uint8_t  ui_records;                    /* records seen at the mode-lookup hook (wraps) */
+    uint8_t  ui_sub6;                       /* of those, head-up (sub-event 6) records */
+    uint8_t  ui_last_subtype;
+    uint8_t  ui_last_source;
+    uint8_t  ui_gate;                       /* HEADUP_DIAG_* bits of the last head-up there */
+    uint8_t  ui_mode;                       /* low byte of the UI mode at that head-up */
 } customCfwContext;
 
 

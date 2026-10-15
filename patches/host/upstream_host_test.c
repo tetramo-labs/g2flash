@@ -49,7 +49,7 @@ static unsigned mic_append_status(unsigned char *buf, unsigned len, unsigned cap
     return pb_append_bytes_field(buf, len, capacity, 104, mic, sizeof(mic));
 }
 static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned capacity) {
-    const unsigned char d[24] = {1};                 /* revision 36 field 107 (all counters zero) */
+    const unsigned char d[32] = {1};                 /* revision 45 field 107 (all counters zero) */
     return pb_append_bytes_field(buf, len, capacity, 107, d, sizeof(d));
 }
 static int ancs_controls, keyboard_controls;
@@ -174,9 +174,9 @@ static void settings(void) {
     sends = 0;
     assert(settings_send_wrapper(1,9,buf,44) == 0 && sends == 2);
     const uint8_t *caps = field(sent[0],sent_len[0],100,&n);
-    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/44",13) == 0);
-    assert(sent_len[0] == 44 + 16 + 27 + 24 + 20 + 27); /* revision string, diagnostics, microphone, BLE and volume gate status */
-    assert(field(sent[0],sent_len[0],107,&n) && n == 24);
+    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/45",13) == 0);
+    assert(sent_len[0] == 44 + 16 + 35 + 24 + 20 + 27); /* revision string, diagnostics, microphone, BLE and volume gate status */
+    assert(field(sent[0],sent_len[0],107,&n) && n == 32);
     assert(field(sent[0],sent_len[0],133,&n) && n == 24);
     assert(sent_len[0] + 2 <= 232); /* payload plus CRC stays in one BLE frame */
     assert(field(sent[0],sent_len[0],104,&n) && n == 21);

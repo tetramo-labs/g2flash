@@ -13,6 +13,18 @@ typedef int (*gesture_sysevt_t)(int, int, int, int, int, int);
 #define GESTURE_APP_EVENHUB 0xe0
 #define GESTURE_ET_HEAD_UP 12
 #define GESTURE_ET_RING_PRESS 14 /* 13 was used by an experimental temple edge */
+#define HEADUP_SUBEVENT_UP    6
+#define HEADUP_DIAG_SWITCH   0x01u
+#define HEADUP_DIAG_BUSY     0x02u
+#define HEADUP_DIAG_LEASE    0x04u
+#define HEADUP_DIAG_EVENHUB  0x08u
+#define HEADUP_DIAG_STOCK_OK 0x10u
+#define HEADUP_DIAG_RIGHT    0x20u
+#define HEADUP_DIAG_CTX      0x40u
+typedef unsigned (*headup_switch_t)(void);
+typedef int (*headup_busy_t)(void);
+#define HEADUP_FW_SWITCH ((headup_switch_t)0x00467291u) /* FUN_00467290: settings->head_up_switch */
+#define HEADUP_FW_BUSY   ((headup_busy_t)0x004447e9u)   /* FUN_004447e8: 1 while the stock idle path ignores head-up */
 
 /* Wrap the dispatcher's mode lookup at 0x44484a. r6 holds the full input
  * record, including its u16 source and unaligned u32 subtype. The return
@@ -27,6 +39,40 @@ int *gesture_ring_press_mode_impl(void *ctx, const unsigned char *event)
         event[2] == 0x0d && event[3] == 0 && event[4] == 0 && event[5] == 0 &&
         mode && *mode == GESTURE_APP_EVENHUB && cfw_fb_lease_active()) {
         GESTURE_FW_SYSEVT(0, 0, 0, GESTURE_ET_RING_PRESS, 0, 4);
+    }
+    /* Revision 45: while an app owns the screen the IMU head-up record comes
+     * through this dispatcher, not the display thread's idle policy (whose
+     * headup_gate never sees it with a page up). Forward sub-event 6 from
+     * here under the same switch, lease and EvenHub-foreground conditions,
+     * and count every record so settings field 107 shows what arrived. */
+    if (event) {
+        uint32_t subtype = (uint32_t)event[2] | ((uint32_t)event[3] << 8) |
+                           ((uint32_t)event[4] << 16) | ((uint32_t)event[5] << 24);
+        customCfwContext *cfw = faceclaw_context_if_valid();
+        if (cfw) {
+            cfw->ui_records++;
+            cfw->ui_last_subtype = (uint8_t)subtype;
+            cfw->ui_last_source = event[0];
+        }
+        if (subtype == HEADUP_SUBEVENT_UP) {
+            unsigned bits = 0;
+            if (HEADUP_FW_SWITCH() != 0) bits |= HEADUP_DIAG_SWITCH;
+            if (HEADUP_FW_BUSY() != 0) bits |= HEADUP_DIAG_BUSY;
+            if (cfw_fb_lease_active()) bits |= HEADUP_DIAG_LEASE;
+            if (mode && *mode == GESTURE_APP_EVENHUB) bits |= HEADUP_DIAG_EVENHUB;
+            if (FW_SIDE_ID() == 1) bits |= HEADUP_DIAG_RIGHT;
+            if (cfw) {
+                bits |= HEADUP_DIAG_CTX;
+                cfw->ui_sub6++;
+                cfw->ui_gate = (uint8_t)bits;
+                cfw->ui_mode = mode ? (uint8_t)*mode : 0xffu;
+            }
+            if ((bits & (HEADUP_DIAG_SWITCH | HEADUP_DIAG_LEASE | HEADUP_DIAG_EVENHUB)) ==
+                (HEADUP_DIAG_SWITCH | HEADUP_DIAG_LEASE | HEADUP_DIAG_EVENHUB)) {
+                GESTURE_FW_SYSEVT(0, 0, 0, GESTURE_ET_HEAD_UP, 0, 0);
+                if (cfw) cfw->hu_fwd++;
+            }
+        }
     }
     return mode;
 }
@@ -96,28 +142,13 @@ GESTURE_ENTRY(gesture_short_long, "11")
  * when the stock head-up switch is on and FUN_004447e8 == 0 (not in the
  * silent-mode UI or the other stock states that ignore head-up). Revision 43:
  * this used to run only when the check returned 0, i.e. never in normal use. */
-#define HEADUP_SUBEVENT_UP    6
-
-typedef unsigned (*headup_switch_t)(void);
-typedef int (*headup_busy_t)(void);
-#define HEADUP_FW_SWITCH ((headup_switch_t)0x00467291u) /* FUN_00467290: settings->head_up_switch */
-#define HEADUP_FW_BUSY   ((headup_busy_t)0x004447e9u)   /* FUN_004447e8: 1 while the stock idle path ignores head-up */
 
 int headup_gate_impl(int stock_result, const unsigned char *message);
 
-/* Revision 44 diagnostics: every head-up record that reaches this hook is
- * also reported as sys event 127 (the "unknown" id the phone logs but never
- * acts on) whose source byte carries the gate state, bypassing the lease and
- * foreground checks so the phone can see WHY a lift was dropped. The same
- * state is kept in the context for settings field 107 (diag_append_status). */
-#define HEADUP_DIAG_EVENT 127
-#define HEADUP_DIAG_SWITCH   0x01u
-#define HEADUP_DIAG_BUSY     0x02u
-#define HEADUP_DIAG_LEASE    0x04u
-#define HEADUP_DIAG_EVENHUB  0x08u
-#define HEADUP_DIAG_STOCK_OK 0x10u
-#define HEADUP_DIAG_RIGHT    0x20u
-#define HEADUP_DIAG_CTX      0x40u
+/* Revision 44 diagnostics: the gate state of every head-up record that
+ * reaches this hook is kept in the context for settings field 107
+ * (diag_append_status). Revision 44 also echoed it as sys event 127, but the
+ * stock sender only encodes source 0/1/4, so the bits never left the lens. */
 
 int headup_gate_impl(int stock_result, const unsigned char *message)
 {
@@ -148,7 +179,6 @@ int headup_gate_impl(int stock_result, const unsigned char *message)
                     ctx->hu_gate = (uint8_t)bits;
                     ctx->hu_mode = mode ? (uint8_t)*mode : 0xffu;
                 }
-                GESTURE_FW_SYSEVT(0, 0, 0, HEADUP_DIAG_EVENT, 0, (int)bits);
                 if ((bits & (HEADUP_DIAG_SWITCH | HEADUP_DIAG_BUSY)) == HEADUP_DIAG_SWITCH &&
                     faceclaw_gesture_event(headup_source, GESTURE_ET_HEAD_UP) && ctx) {
                     ctx->hu_fwd++;
