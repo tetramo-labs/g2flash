@@ -3,7 +3,7 @@
 // angle, opens an EvenHub page under both framebuffer leases (the same state
 // the phone keeps), then prints every sys event and, every 10 s, the head-up
 // counters the firmware keeps in settings field 107 for both input paths.
-// bun head-up-test.ts [--timeout 120] [--count 3] [--angle 10] [--no-page]
+// bun head-up-test.ts [--timeout 120] [--count 3] [--angle 10] [--no-page] [--diag-interval 10000]
 import { G2Session, buildCreateStartUpPageContainer, buildShutDown, querySettings, setHeadUp } from "g2-kit/ble";
 import { startHeartbeat } from "g2-kit/ui";
 import { findLenDelimField, queryGlasslyCfw } from "./glassly-cfw";
@@ -20,13 +20,14 @@ function option(name: string, fallback: number): number {
   return value;
 }
 if (args.includes("--help")) {
-  console.log("bun head-up-test.ts [--timeout 120] [--count 3] [--angle 10] [--no-page]\nWait for READY, then lift your head. Exit 0 requires head-up events (12).");
+  console.log("bun head-up-test.ts [--timeout 120] [--count 3] [--angle 10] [--no-page] [--diag-interval ms]\nWait for READY, then lift your head. Exit 0 requires head-up events (12).");
   process.exit(0);
 }
 const seconds = option("--timeout", 120);
 const required = option("--count", 3);
 const angle = option("--angle", 10);
 const withPage = !args.includes("--no-page");
+const diagEvery = option("--diag-interval", 10000);
 let magic = 100;
 const nextMagic = () => magic = magic >= 255 ? 100 : magic + 1;
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -99,11 +100,17 @@ async function main(): Promise<number> {
     ready = true;
     console.log(`READY (${withPage ? "page up, leases held" : "no page"}): lift your head ${required} times, a few seconds apart. Listening for ${seconds}s.`);
     const deadline = Date.now() + seconds * 1000;
-    let renewAt = Date.now() + 30000, diagAt = Date.now() + 10000;
+    let renewAt = Date.now() + 30000, diagAt = Date.now() + diagEvery, lastDiag = "";
     while (Date.now() < deadline && ups < required && !interrupted) {
       await sleep(100);
       if (leased && Date.now() >= renewAt) { await lease(5); renewAt = Date.now() + 30000; }
-      if (Date.now() >= diagAt) { console.log(`${new Date().toISOString()} ${await readDiag(session)}`); diagAt = Date.now() + 10000; }
+      if (Date.now() >= diagAt) {
+        const diag = await readDiag(session);
+        // Counters only change on input, so a fast poll stays quiet between lifts.
+        if (diag !== lastDiag || diagEvery >= 10000) console.log(`${new Date().toISOString()} ${diag}`);
+        lastDiag = diag;
+        diagAt = Date.now() + diagEvery;
+      }
     }
     console.log(await readDiag(session));
     console.log(`${ups >= required ? "PASS" : interrupted ? "INTERRUPTED" : "FAIL"}: ${ups}/${required} head-up events, ${diags} diagnostic echoes, ${events} input events total.`);
