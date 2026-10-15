@@ -105,17 +105,54 @@ typedef int (*headup_busy_t)(void);
 
 int headup_gate_impl(int stock_result, const unsigned char *message);
 
+/* Revision 44 diagnostics: every head-up record that reaches this hook is
+ * also reported as sys event 127 (the "unknown" id the phone logs but never
+ * acts on) whose source byte carries the gate state, bypassing the lease and
+ * foreground checks so the phone can see WHY a lift was dropped. The same
+ * state is kept in the context for settings field 107 (diag_append_status). */
+#define HEADUP_DIAG_EVENT 127
+#define HEADUP_DIAG_SWITCH   0x01u
+#define HEADUP_DIAG_BUSY     0x02u
+#define HEADUP_DIAG_LEASE    0x04u
+#define HEADUP_DIAG_EVENHUB  0x08u
+#define HEADUP_DIAG_STOCK_OK 0x10u
+#define HEADUP_DIAG_RIGHT    0x20u
+#define HEADUP_DIAG_CTX      0x40u
+
 int headup_gate_impl(int stock_result, const unsigned char *message)
 {
     static const unsigned char headup_source[1] = { 0 };
     if (message) {
         const unsigned char *payload = *(const unsigned char *const *)(message + 8);
+        customCfwContext *ctx = faceclaw_context_if_valid();
         if (stock_result == 1) faceclaw_idle_input_forward(payload);
         if (payload) {
             uint32_t subtype = (uint32_t)payload[4] | ((uint32_t)payload[5] << 8) |
                                ((uint32_t)payload[6] << 16) | ((uint32_t)payload[7] << 24);
-            if (subtype == HEADUP_SUBEVENT_UP && HEADUP_FW_SWITCH() != 0 && HEADUP_FW_BUSY() == 0) {
-                faceclaw_gesture_event(headup_source, GESTURE_ET_HEAD_UP);
+            if (ctx) {
+                ctx->hu_type7++;
+                ctx->hu_last_subtype = (uint8_t)subtype;
+            }
+            if (subtype == HEADUP_SUBEVENT_UP) {
+                unsigned bits = 0;
+                int *mode = GESTURE_FW_MODE(GESTURE_UI_CTX);
+                if (HEADUP_FW_SWITCH() != 0) bits |= HEADUP_DIAG_SWITCH;
+                if (HEADUP_FW_BUSY() != 0) bits |= HEADUP_DIAG_BUSY;
+                if (cfw_fb_lease_active()) bits |= HEADUP_DIAG_LEASE;
+                if (mode && *mode == GESTURE_APP_EVENHUB) bits |= HEADUP_DIAG_EVENHUB;
+                if (stock_result == 1) bits |= HEADUP_DIAG_STOCK_OK;
+                if (FW_SIDE_ID() == 1) bits |= HEADUP_DIAG_RIGHT;
+                if (ctx) {
+                    bits |= HEADUP_DIAG_CTX;
+                    ctx->hu_sub6++;
+                    ctx->hu_gate = (uint8_t)bits;
+                    ctx->hu_mode = mode ? (uint8_t)*mode : 0xffu;
+                }
+                GESTURE_FW_SYSEVT(0, 0, 0, HEADUP_DIAG_EVENT, 0, (int)bits);
+                if ((bits & (HEADUP_DIAG_SWITCH | HEADUP_DIAG_BUSY)) == HEADUP_DIAG_SWITCH &&
+                    faceclaw_gesture_event(headup_source, GESTURE_ET_HEAD_UP) && ctx) {
+                    ctx->hu_fwd++;
+                }
             }
         }
     }

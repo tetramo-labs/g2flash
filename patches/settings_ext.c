@@ -467,6 +467,11 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   44 -> head-up diagnostics: every head-up record reaching headup_gate is
+//         echoed as sys event 127 with the gate bits in its source, and field
+//         107 bytes 9-14 carry the head-up counters (gesture_fwd.c).
+//   43 -> head-up forwarding runs whether or not SVC_Settings_AppLaunchCheck
+//         passes (it passes in normal use, so revisions 38-42 never forwarded).
 //   42 -> object cache fixes (scene.c): a new asset version replaces the old
 //         one only once its last chunk is validated, found by id at commit
 //         rather than by an index that eviction could have reused (a PATH
@@ -573,7 +578,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 /* Revision 36: settings field 107 carries the failure diagnostics that the
  * debug overlay shows, so a phone or script can read them without a display.
  * Little-endian: [1][nack_count u16][nack_reason][worker_fail_mode]
- * [worker_fail_count u16][gate_timeouts u16][reserved 6 bytes, zero]
+ * [worker_fail_count u16][gate_timeouts u16][hu_type7][hu_sub6][hu_fwd][hu_gate][hu_mode][hu_last_subtype]
  * [direct_pending][direct_active][gate_held]
  * [alloc_fail_count u16][alloc_fail_heap][last_worker_us/100 u16][0]. */
 static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned capacity) {
@@ -590,7 +595,8 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
     d[4] = ctx->worker_fail_mode;
     d[5] = (unsigned char)ctx->worker_fail_count; d[6] = (unsigned char)(ctx->worker_fail_count >> 8);
     d[7] = (unsigned char)gt; d[8] = (unsigned char)(gt >> 8);
-    d[9] = d[10] = d[11] = d[12] = d[13] = d[14] = 0;   /* reserved */
+    d[9] = ctx->hu_type7;   d[10] = ctx->hu_sub6;  d[11] = ctx->hu_fwd;     /* revision 44 head-up diag */
+    d[12] = ctx->hu_gate;   d[13] = ctx->hu_mode;  d[14] = ctx->hu_last_subtype;
     d[15] = ctx->direct_pending;
     d[16] = ctx->direct_active;
     d[17] = ctx->gate_held;
@@ -603,7 +609,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/43";
+        static const char caps[] = "GLASSLYCFW/44";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

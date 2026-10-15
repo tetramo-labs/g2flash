@@ -319,6 +319,14 @@ typedef struct {
     vg_state volume_gate;
     uint32_t vg_lease_deadline;             /* FW_MS_TICK deadline of the phone's lease; 0 = none */
     uint8_t  vg_notify_buf[32];             /* stable storage for the field-133 sid-0x09 notify */
+    /* --- Revision 44: head-up diagnostics (gesture_fwd.c headup_gate_impl,
+     * reported in settings field 107 bytes 9-14). --- */
+    uint8_t  hu_type7;                      /* type-7 input records seen at the hook (wraps) */
+    uint8_t  hu_sub6;                       /* of those, head-up (sub-event 6) records */
+    uint8_t  hu_fwd;                        /* head-ups forwarded as sys event 12 */
+    uint8_t  hu_gate;                       /* HEADUP_DIAG_* bits of the last head-up */
+    uint8_t  hu_mode;                       /* low byte of the UI mode at the last head-up */
+    uint8_t  hu_last_subtype;               /* subtype of the last type-7 record */
 } customCfwContext;
 
 
