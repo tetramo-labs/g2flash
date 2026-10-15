@@ -31,7 +31,7 @@ const diagEvery = option("--diag-interval", 10000);
 let magic = 100;
 const nextMagic = () => magic = magic >= 255 ? 100 : magic + 1;
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
-const names: Record<number, string> = { 0: "tap", 1: "swipe-up", 2: "swipe-down", 3: "double-tap", 7: "system-exit", 9: "long-press", 10: "release", 11: "tap-then-hold", 12: "HEAD-UP", 14: "ring-touch-down", 127: "HEAD-UP-DIAG" };
+const names: Record<number, string> = { 0: "tap", 1: "swipe-up", 2: "swipe-down", 3: "double-tap", 7: "system-exit", 9: "long-press", 10: "release", 11: "tap-then-hold", 12: "HEAD-UP", 14: "ring-touch-down", 15: "HEAD-DOWN", 127: "unknown" };
 const BITS: Array<[number, string]> = [[0x01, "switch"], [0x02, "BUSY"], [0x04, "lease"], [0x08, "evenhub"], [0x10, "stock-ok"], [0x20, "right"], [0x40, "ctx"]];
 const decodeBits = (v: number) => BITS.map(([m, n]) => (v & m) ? n : `no-${n}`).join(" ");
 
@@ -45,7 +45,7 @@ async function readDiag(session: G2Session): Promise<string> {
   const d = ack && findLenDelimField(ack.pb, 107);
   if (!d || d.length < 24) return "diag: n/a";
   let out = `diag(R): idle-policy type7=${d[9]} head-up=${d[10]} gate=0x${d[12]!.toString(16)} [${decodeBits(d[12]!)}] mode=0x${d[13]!.toString(16)} last-subtype=${d[14]} | forwarded=${d[11]}`;
-  if (d.length >= 30) out += ` | ui-dispatcher records=${d[24]} head-up=${d[25]} last-subtype=${d[26]} last-source=${d[27]} gate=0x${d[28]!.toString(16)} [${decodeBits(d[28]!)}] mode=0x${d[29]!.toString(16)}`;
+  if (d.length >= 32) out += ` | ui-dispatcher records=${d[24]} head-up=${d[25]} head-down=${d[30]} (forwarded ${d[31]}) last-subtype=${d[26]} last-source=${d[27]} gate=0x${d[28]!.toString(16)} [${decodeBits(d[28]!)}] mode=0x${d[29]!.toString(16)}`;
   return out;
 }
 
