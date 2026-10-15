@@ -335,6 +335,8 @@ typedef struct {
     uint8_t  ui_last_source;
     uint8_t  ui_gate;                       /* HEADUP_DIAG_* bits of the last head-up there */
     uint8_t  ui_mode;                       /* low byte of the UI mode at that head-up */
+    uint8_t  ui_sub7;                       /* revision 46: head-down (sub-event 7) records */
+    uint8_t  hd_fwd;                        /* head-downs forwarded as sys event 15 */
 } customCfwContext;
 
 

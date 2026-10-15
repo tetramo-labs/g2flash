@@ -12,8 +12,10 @@ typedef int (*gesture_sysevt_t)(int, int, int, int, int, int);
 #define GESTURE_UI_CTX (*(void *volatile *)0x200777fcu)
 #define GESTURE_APP_EVENHUB 0xe0
 #define GESTURE_ET_HEAD_UP 12
+#define GESTURE_ET_HEAD_DOWN 15 /* revision 46: IMU sub-event 7, the head returning after a lift */
 #define GESTURE_ET_RING_PRESS 14 /* 13 was used by an experimental temple edge */
 #define HEADUP_SUBEVENT_UP    6
+#define HEADUP_SUBEVENT_DOWN  7
 #define HEADUP_DIAG_SWITCH   0x01u
 #define HEADUP_DIAG_BUSY     0x02u
 #define HEADUP_DIAG_LEASE    0x04u
@@ -44,7 +46,9 @@ int *gesture_ring_press_mode_impl(void *ctx, const unsigned char *event)
      * through this dispatcher, not the display thread's idle policy (whose
      * headup_gate never sees it with a page up). Forward sub-event 6 from
      * here under the same switch, lease and EvenHub-foreground conditions,
-     * and count every record so settings field 107 shows what arrived. */
+     * and count every record so settings field 107 shows what arrived.
+     * Revision 46: sub-event 7 (verified on hardware as the head coming back
+     * down after a lift) goes out the same way as sys event 15. */
     if (event) {
         uint32_t subtype = (uint32_t)event[2] | ((uint32_t)event[3] << 8) |
                            ((uint32_t)event[4] << 16) | ((uint32_t)event[5] << 24);
@@ -54,8 +58,9 @@ int *gesture_ring_press_mode_impl(void *ctx, const unsigned char *event)
             cfw->ui_last_subtype = (uint8_t)subtype;
             cfw->ui_last_source = event[0];
         }
-        if (subtype == HEADUP_SUBEVENT_UP) {
+        if (subtype == HEADUP_SUBEVENT_UP || subtype == HEADUP_SUBEVENT_DOWN) {
             unsigned bits = 0;
+            int up = subtype == HEADUP_SUBEVENT_UP;
             if (HEADUP_FW_SWITCH() != 0) bits |= HEADUP_DIAG_SWITCH;
             if (HEADUP_FW_BUSY() != 0) bits |= HEADUP_DIAG_BUSY;
             if (cfw_fb_lease_active()) bits |= HEADUP_DIAG_LEASE;
@@ -63,14 +68,14 @@ int *gesture_ring_press_mode_impl(void *ctx, const unsigned char *event)
             if (FW_SIDE_ID() == 1) bits |= HEADUP_DIAG_RIGHT;
             if (cfw) {
                 bits |= HEADUP_DIAG_CTX;
-                cfw->ui_sub6++;
+                if (up) cfw->ui_sub6++; else cfw->ui_sub7++;
                 cfw->ui_gate = (uint8_t)bits;
                 cfw->ui_mode = mode ? (uint8_t)*mode : 0xffu;
             }
             if ((bits & (HEADUP_DIAG_SWITCH | HEADUP_DIAG_LEASE | HEADUP_DIAG_EVENHUB)) ==
                 (HEADUP_DIAG_SWITCH | HEADUP_DIAG_LEASE | HEADUP_DIAG_EVENHUB)) {
-                GESTURE_FW_SYSEVT(0, 0, 0, GESTURE_ET_HEAD_UP, 0, 0);
-                if (cfw) cfw->hu_fwd++;
+                GESTURE_FW_SYSEVT(0, 0, 0, up ? GESTURE_ET_HEAD_UP : GESTURE_ET_HEAD_DOWN, 0, 0);
+                if (cfw) { if (up) cfw->hu_fwd++; else cfw->hd_fwd++; }
             }
         }
     }

@@ -174,7 +174,7 @@ static void settings(void) {
     sends = 0;
     assert(settings_send_wrapper(1,9,buf,44) == 0 && sends == 2);
     const uint8_t *caps = field(sent[0],sent_len[0],100,&n);
-    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/45",13) == 0);
+    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/46",13) == 0);
     assert(sent_len[0] == 44 + 16 + 35 + 24 + 20 + 27); /* revision string, diagnostics, microphone, BLE and volume gate status */
     assert(field(sent[0],sent_len[0],107,&n) && n == 32);
     assert(field(sent[0],sent_len[0],133,&n) && n == 24);

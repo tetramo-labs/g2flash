@@ -467,6 +467,9 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   46 -> head-down: IMU sub-event 7 (the head returning after a lift) is
+//         forwarded from the same dispatcher hook as sys event 15; field 107
+//         bytes 30/31 count it.
 //   45 -> head-up forwarded from the foreground UI dispatcher: with an app on
 //         screen the IMU record never reaches the display thread's idle policy
 //         (verified on hardware with revision 44), it goes to the dispatcher
@@ -585,7 +588,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
  * [worker_fail_count u16][gate_timeouts u16][hu_type7][hu_sub6][hu_fwd][hu_gate][hu_mode][hu_last_subtype]
  * [direct_pending][direct_active][gate_held]
  * [alloc_fail_count u16][alloc_fail_heap][last_worker_us/100 u16][0]
- * [ui_records][ui_sub6][ui_last_subtype][ui_last_source][ui_gate][ui_mode][0][0]. */
+ * [ui_records][ui_sub6][ui_last_subtype][ui_last_source][ui_gate][ui_mode][ui_sub7][hd_fwd]. */
 static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned capacity) {
     customCfwContext *ctx = faceclaw_context_if_valid();
     if (!ctx) return len;
@@ -611,13 +614,13 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
     d[23] = 0;
     d[24] = ctx->ui_records; d[25] = ctx->ui_sub6; d[26] = ctx->ui_last_subtype;   /* revision 45 */
     d[27] = ctx->ui_last_source; d[28] = ctx->ui_gate; d[29] = ctx->ui_mode;
-    d[30] = d[31] = 0;
+    d[30] = ctx->ui_sub7; d[31] = ctx->hd_fwd;                                     /* revision 46 */
     return pb_append_bytes_field(buf, len, capacity, 107u, d, (unsigned)sizeof(d));
 }
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/45";
+        static const char caps[] = "GLASSLYCFW/46";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);
