@@ -16,6 +16,14 @@ G2 glasses over Bluetooth and show off the [custom firmware](../) built by
   success; taps, long presses and releases are logged separately. Exits 1 on
   timeout and releases the leases, dismisses the page and disconnects on exit
   or Ctrl-C. Requires existing CFW; does not build or flash firmware.
+- **`head-up-test.ts`** — live head-up acceptance test. Run
+  `bun head-up-test.ts --timeout 120 --count 3 --angle 10`, wait for `READY`,
+  then lift your head. It arms the stock head-up switch and angle, opens an
+  EvenHub page under both framebuffer leases (the state the phone keeps) and
+  prints every input event plus, every 10 s, the firmware's head-up counters
+  from settings field 107 for both input paths (idle policy and foreground UI
+  dispatcher). `--no-page` leaves the glasses idle instead, where a lift opens
+  the stock dashboard. Exit 0 requires sys event 12. Needs GLASSLYCFW/45.
 - **`video-bench.ts`** — streams a video (as a GIF) to the lens as fast as it
   acks and benchmarks the achieved framerate / byte count. Streams via the
   CFW's compressed packed-4bpp keyframe and delta modes.
