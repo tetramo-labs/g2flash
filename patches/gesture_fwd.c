@@ -82,18 +82,20 @@ GESTURE_ENTRY(gesture_short_long, "11")
 /* Head-up (IMU head-tilt) forwarding while an EvenHub page is on screen.
  *
  * The IMU driver posts sensor sub-event 6 (head up) to the display thread's
- * dispatcher as a type-7 message. That dispatcher first calls the stock gate
- * FUN_0046f402 (`bl` at 0x467cf4) and frees the message when the gate fails,
- * which it does while an EvenHub page is on screen: a phone that blanked the
- * page but kept the session (soft sleep) never hears about the head-up. With
- * no page on screen the stock idle path launches the dashboard instead, which
+ * dispatcher as a type-7 message. That dispatcher first calls
+ * SVC_Settings_AppLaunchCheck (FUN_0046f402, `bl` at 0x467cf4), which in
+ * 2.3.0.24 returns 0 only for OTA in progress or silent mode (settings +0x15)
+ * and 1 otherwise -- it does NOT look at whether an EvenHub page is up. On 1
+ * the record goes on to the stock idle policy, which drops a head-up while an
+ * app owns the screen; with no page up it launches the dashboard, which
  * faceclaw_display_start_headup (settings_ext.c) already defers to the phone.
  *
- * headup_gate wraps the gate call: the stock result is passed through
+ * headup_gate wraps the check call: the stock result is passed through
  * unchanged, and a head-up is additionally forwarded as EvenHub sys event 12
  * under the framebuffer lease with EvenHub foreground (faceclaw_gesture_event),
- * when the stock head-up switch is on and the stock idle path would itself
- * have acted on it (FUN_004447e8 == 0: not mid-OTA/onboarding). */
+ * when the stock head-up switch is on and FUN_004447e8 == 0 (not in the
+ * silent-mode UI or the other stock states that ignore head-up). Revision 43:
+ * this used to run only when the check returned 0, i.e. never in normal use. */
 #define HEADUP_SUBEVENT_UP    6
 
 typedef unsigned (*headup_switch_t)(void);
@@ -108,10 +110,7 @@ int headup_gate_impl(int stock_result, const unsigned char *message)
     static const unsigned char headup_source[1] = { 0 };
     if (message) {
         const unsigned char *payload = *(const unsigned char *const *)(message + 8);
-        if (stock_result == 1) {
-            faceclaw_idle_input_forward(payload);
-            return stock_result;
-        }
+        if (stock_result == 1) faceclaw_idle_input_forward(payload);
         if (payload) {
             uint32_t subtype = (uint32_t)payload[4] | ((uint32_t)payload[5] << 8) |
                                ((uint32_t)payload[6] << 16) | ((uint32_t)payload[7] << 24);
