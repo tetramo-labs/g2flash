@@ -246,7 +246,7 @@ static void faceclaw_send_gesture_event(customCfwContext *ctx, unsigned event, u
  * so unlike the double-tap wake there is no CLAIM/fallback handshake, and the
  * stock branch still runs (and frees the record) exactly as before.
  *
- * 2.3.0 removed the old mode check. headup_gate_impl now calls this helper
+ * 2.3.0 removed the old mode check. headup_gate_impl (gesture_fwd.c) calls this helper
  * only when the stock idle gate returns 1, before the record is freed:
  * u16 raw source at +2 (0/1 = temple touchpads, 4 = ring), u32 gesture subtype
  * at +4 -- the same record the UI dispatcher reads (from +2) while an app is
@@ -467,18 +467,14 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
-//   46 -> head-down: IMU sub-event 7 (the head returning after a lift) is
-//         forwarded from the same dispatcher hook as sys event 15; field 107
-//         bytes 30/31 count it.
-//   45 -> head-up forwarded from the foreground UI dispatcher: with an app on
-//         screen the IMU record never reaches the display thread's idle policy
-//         (verified on hardware with revision 44), it goes to the dispatcher
-//         whose mode lookup the ring-press hook already wraps. Field 107 grows
-//         to 32 bytes with that dispatcher's counters (gesture_fwd.c).
-//   44 -> head-up diagnostics in field 107 bytes 9-14 (the sys event 127 echo
-//         carried no bits: the stock sender only encodes source 0/1/4).
-//   43 -> head-up forwarding runs whether or not SVC_Settings_AppLaunchCheck
-//         passes (it passes in normal use, so revisions 38-42 never forwarded).
+//   47 -> head-tilt forwarding from the foreground UI dispatcher
+//         (gesture_fwd.c): with an app on screen the IMU records never reach
+//         the display thread's idle policy that revisions 38-43 hooked, so
+//         the dispatcher's mode-lookup hook sends sys event 12 (head up,
+//         sub-event 6) and 15 (head down, sub-event 7) under the stock head-up
+//         switch, the framebuffer lease and EvenHub foreground. Revisions
+//         44-46 were the diagnostic and first working builds of this; their
+//         field-107 counters are gone again (24 bytes, bytes 9-14 reserved).
 //   42 -> object cache fixes (scene.c): a new asset version replaces the old
 //         one only once its last chunk is validated, found by id at commit
 //         rather than by an index that eviction could have reused (a PATH
@@ -559,7 +555,7 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 //         base 2.2.10.10, four-microphone relay, dirty-row partial panel
 //         refresh, session-persistent inflate stream, LE Data Length request,
 //         idle-input forwarding (field-102 events 2/3/4) and head-up wake
-//         event 5 (gesture_fwd.c headup_gate). The fast BLE profile stays a
+//         event 5 (faceclaw_display_start_headup). The fast BLE profile stays a
 //         field-127 toggle (this fork's hooks) rather than forced on.
 //   27 -> panel ownership: raster modes stop/freeze the scene and refresh the
 //         shadow from the scene frame; mode-37 op 10 TAG + settled report in
@@ -585,14 +581,13 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 /* Revision 36: settings field 107 carries the failure diagnostics that the
  * debug overlay shows, so a phone or script can read them without a display.
  * Little-endian: [1][nack_count u16][nack_reason][worker_fail_mode]
- * [worker_fail_count u16][gate_timeouts u16][hu_type7][hu_sub6][hu_fwd][hu_gate][hu_mode][hu_last_subtype]
+ * [worker_fail_count u16][gate_timeouts u16][reserved 6 bytes, zero]
  * [direct_pending][direct_active][gate_held]
- * [alloc_fail_count u16][alloc_fail_heap][last_worker_us/100 u16][0]
- * [ui_records][ui_sub6][ui_last_subtype][ui_last_source][ui_gate][ui_mode][ui_sub7][hd_fwd]. */
+ * [alloc_fail_count u16][alloc_fail_heap][last_worker_us/100 u16][0]. */
 static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned capacity) {
     customCfwContext *ctx = faceclaw_context_if_valid();
     if (!ctx) return len;
-    unsigned char d[32];
+    unsigned char d[24];
     uint32_t gt = ctx->gate_timeouts > 0xffffu ? 0xffffu : ctx->gate_timeouts;
     uint32_t af = ctx->alloc_fail_count > 0xffffu ? 0xffffu : ctx->alloc_fail_count;
     uint32_t wu = ctx->last_worker_us / 100u;
@@ -603,8 +598,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
     d[4] = ctx->worker_fail_mode;
     d[5] = (unsigned char)ctx->worker_fail_count; d[6] = (unsigned char)(ctx->worker_fail_count >> 8);
     d[7] = (unsigned char)gt; d[8] = (unsigned char)(gt >> 8);
-    d[9] = ctx->hu_type7;   d[10] = ctx->hu_sub6;  d[11] = ctx->hu_fwd;     /* revision 44 head-up diag */
-    d[12] = ctx->hu_gate;   d[13] = ctx->hu_mode;  d[14] = ctx->hu_last_subtype;
+    d[9] = d[10] = d[11] = d[12] = d[13] = d[14] = 0;   /* reserved */
     d[15] = ctx->direct_pending;
     d[16] = ctx->direct_active;
     d[17] = ctx->gate_held;
@@ -612,15 +606,12 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
     d[20] = ctx->alloc_fail_heap;
     d[21] = (unsigned char)wu; d[22] = (unsigned char)(wu >> 8);
     d[23] = 0;
-    d[24] = ctx->ui_records; d[25] = ctx->ui_sub6; d[26] = ctx->ui_last_subtype;   /* revision 45 */
-    d[27] = ctx->ui_last_source; d[28] = ctx->ui_gate; d[29] = ctx->ui_mode;
-    d[30] = ctx->ui_sub7; d[31] = ctx->hd_fwd;                                     /* revision 46 */
     return pb_append_bytes_field(buf, len, capacity, 107u, d, (unsigned)sizeof(d));
 }
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/46";
+        static const char caps[] = "GLASSLYCFW/47";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

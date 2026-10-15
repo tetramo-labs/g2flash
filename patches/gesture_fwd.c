@@ -11,73 +11,40 @@ typedef int (*gesture_sysevt_t)(int, int, int, int, int, int);
 #define GESTURE_FW_SYSEVT ((gesture_sysevt_t)0x004ef959u)
 #define GESTURE_UI_CTX (*(void *volatile *)0x200777fcu)
 #define GESTURE_APP_EVENHUB 0xe0
-#define GESTURE_ET_HEAD_UP 12
-#define GESTURE_ET_HEAD_DOWN 15 /* revision 46: IMU sub-event 7, the head returning after a lift */
+#define GESTURE_ET_HEAD_UP 12   /* IMU sub-event 6 */
 #define GESTURE_ET_RING_PRESS 14 /* 13 was used by an experimental temple edge */
-#define HEADUP_SUBEVENT_UP    6
-#define HEADUP_SUBEVENT_DOWN  7
-#define HEADUP_DIAG_SWITCH   0x01u
-#define HEADUP_DIAG_BUSY     0x02u
-#define HEADUP_DIAG_LEASE    0x04u
-#define HEADUP_DIAG_EVENHUB  0x08u
-#define HEADUP_DIAG_STOCK_OK 0x10u
-#define HEADUP_DIAG_RIGHT    0x20u
-#define HEADUP_DIAG_CTX      0x40u
+#define GESTURE_ET_HEAD_DOWN 15 /* IMU sub-event 7, the head returning after a lift */
+#define GESTURE_SUBTYPE_RING_PRESS 0x0du
+#define GESTURE_SUBTYPE_HEAD_UP    6u
+#define GESTURE_SUBTYPE_HEAD_DOWN  7u
 typedef unsigned (*headup_switch_t)(void);
-typedef int (*headup_busy_t)(void);
 #define HEADUP_FW_SWITCH ((headup_switch_t)0x00467291u) /* FUN_00467290: settings->head_up_switch */
-#define HEADUP_FW_BUSY   ((headup_busy_t)0x004447e9u)   /* FUN_004447e8: 1 while the stock idle path ignores head-up */
 
 /* Wrap the dispatcher's mode lookup at 0x44484a. r6 holds the full input
- * record, including its u16 source and unaligned u32 subtype. The return
- * value is still the original mode pointer, and stock dispatch continues.
- * Event 14 is ring-specific: the stock SysEvent sender leaves its source 0
- * (unspecified), so the phone derives ring provenance from this event ID.
- */
+ * record: u16 source at +0, unaligned u32 subtype at +2. The return value is
+ * still the original mode pointer, and stock dispatch continues.
+ *
+ * Ring touch-down (source 4, subtype 0x0d) goes out as event 14. It is
+ * ring-specific: the stock SysEvent sender leaves its source 0 (unspecified),
+ * so the phone derives ring provenance from the event ID.
+ *
+ * While an app owns the screen the IMU head-tilt records come through this
+ * dispatcher, never through the display thread's idle policy (which only
+ * sees them with no page up, where stock opens its own dashboard). A lift
+ * (sub-event 6) goes out as event 12 and the head returning (7) as event 15,
+ * gated by the stock head-up switch as the idle policy gates its own. */
 int *gesture_ring_press_mode_impl(void *ctx, const unsigned char *event)
 {
     int *mode = GESTURE_FW_MODE(ctx);
-    if (event && event[0] == 4 && event[1] == 0 &&
-        event[2] == 0x0d && event[3] == 0 && event[4] == 0 && event[5] == 0 &&
-        mode && *mode == GESTURE_APP_EVENHUB && cfw_fb_lease_active()) {
+    if (!event || !mode || *mode != GESTURE_APP_EVENHUB || !cfw_fb_lease_active()) return mode;
+    uint32_t subtype = (uint32_t)event[2] | ((uint32_t)event[3] << 8) |
+                       ((uint32_t)event[4] << 16) | ((uint32_t)event[5] << 24);
+    if (event[0] == 4 && event[1] == 0 && subtype == GESTURE_SUBTYPE_RING_PRESS) {
         GESTURE_FW_SYSEVT(0, 0, 0, GESTURE_ET_RING_PRESS, 0, 4);
-    }
-    /* Revision 45: while an app owns the screen the IMU head-up record comes
-     * through this dispatcher, not the display thread's idle policy (whose
-     * headup_gate never sees it with a page up). Forward sub-event 6 from
-     * here under the same switch, lease and EvenHub-foreground conditions,
-     * and count every record so settings field 107 shows what arrived.
-     * Revision 46: sub-event 7 (verified on hardware as the head coming back
-     * down after a lift) goes out the same way as sys event 15. */
-    if (event) {
-        uint32_t subtype = (uint32_t)event[2] | ((uint32_t)event[3] << 8) |
-                           ((uint32_t)event[4] << 16) | ((uint32_t)event[5] << 24);
-        customCfwContext *cfw = faceclaw_context_if_valid();
-        if (cfw) {
-            cfw->ui_records++;
-            cfw->ui_last_subtype = (uint8_t)subtype;
-            cfw->ui_last_source = event[0];
-        }
-        if (subtype == HEADUP_SUBEVENT_UP || subtype == HEADUP_SUBEVENT_DOWN) {
-            unsigned bits = 0;
-            int up = subtype == HEADUP_SUBEVENT_UP;
-            if (HEADUP_FW_SWITCH() != 0) bits |= HEADUP_DIAG_SWITCH;
-            if (HEADUP_FW_BUSY() != 0) bits |= HEADUP_DIAG_BUSY;
-            if (cfw_fb_lease_active()) bits |= HEADUP_DIAG_LEASE;
-            if (mode && *mode == GESTURE_APP_EVENHUB) bits |= HEADUP_DIAG_EVENHUB;
-            if (FW_SIDE_ID() == 1) bits |= HEADUP_DIAG_RIGHT;
-            if (cfw) {
-                bits |= HEADUP_DIAG_CTX;
-                if (up) cfw->ui_sub6++; else cfw->ui_sub7++;
-                cfw->ui_gate = (uint8_t)bits;
-                cfw->ui_mode = mode ? (uint8_t)*mode : 0xffu;
-            }
-            if ((bits & (HEADUP_DIAG_SWITCH | HEADUP_DIAG_LEASE | HEADUP_DIAG_EVENHUB)) ==
-                (HEADUP_DIAG_SWITCH | HEADUP_DIAG_LEASE | HEADUP_DIAG_EVENHUB)) {
-                GESTURE_FW_SYSEVT(0, 0, 0, up ? GESTURE_ET_HEAD_UP : GESTURE_ET_HEAD_DOWN, 0, 0);
-                if (cfw) { if (up) cfw->hu_fwd++; else cfw->hd_fwd++; }
-            }
-        }
+    } else if ((subtype == GESTURE_SUBTYPE_HEAD_UP || subtype == GESTURE_SUBTYPE_HEAD_DOWN) &&
+               HEADUP_FW_SWITCH() != 0) {
+        GESTURE_FW_SYSEVT(0, 0, 0, subtype == GESTURE_SUBTYPE_HEAD_UP ? GESTURE_ET_HEAD_UP
+                                                                       : GESTURE_ET_HEAD_DOWN, 0, 0);
     }
     return mode;
 }
@@ -130,66 +97,22 @@ GESTURE_ENTRY(gesture_release, "10")
 GESTURE_ENTRY(gesture_short_long, "11")
 #undef GESTURE_ENTRY
 
-/* Head-up (IMU head-tilt) forwarding while an EvenHub page is on screen.
- *
- * The IMU driver posts sensor sub-event 6 (head up) to the display thread's
- * dispatcher as a type-7 message. That dispatcher first calls
- * SVC_Settings_AppLaunchCheck (FUN_0046f402, `bl` at 0x467cf4), which in
- * 2.3.0.24 returns 0 only for OTA in progress or silent mode (settings +0x15)
- * and 1 otherwise -- it does NOT look at whether an EvenHub page is up. On 1
- * the record goes on to the stock idle policy, which drops a head-up while an
- * app owns the screen; with no page up it launches the dashboard, which
- * faceclaw_display_start_headup (settings_ext.c) already defers to the phone.
- *
- * headup_gate wraps the check call: the stock result is passed through
- * unchanged, and a head-up is additionally forwarded as EvenHub sys event 12
- * under the framebuffer lease with EvenHub foreground (faceclaw_gesture_event),
- * when the stock head-up switch is on and FUN_004447e8 == 0 (not in the
- * silent-mode UI or the other stock states that ignore head-up). Revision 43:
- * this used to run only when the check returned 0, i.e. never in normal use. */
+/* Idle-input forwarding at the display thread's type-7 input dispatcher: the
+ * `bl SVC_Settings_AppLaunchCheck` at 0x467cf4 (FUN_0046f402, which fails only
+ * for OTA, silent mode or product test). The stock result passes through
+ * unchanged; when it is 1 the record (u16 source at +2, u32 subtype at +4) is
+ * handed to faceclaw_idle_input_forward before the stock idle policy acts on
+ * it and frees it. Head-tilt records only reach this dispatcher with no page
+ * up, where that policy opens the stock dashboard (faceclaw_display_start_headup
+ * in settings_ext.c defers it to the phone under the wake lease); with a page
+ * up they go through the UI dispatcher hook above instead. */
 
 int headup_gate_impl(int stock_result, const unsigned char *message);
 
-/* Revision 44 diagnostics: the gate state of every head-up record that
- * reaches this hook is kept in the context for settings field 107
- * (diag_append_status). Revision 44 also echoed it as sys event 127, but the
- * stock sender only encodes source 0/1/4, so the bits never left the lens. */
-
 int headup_gate_impl(int stock_result, const unsigned char *message)
 {
-    static const unsigned char headup_source[1] = { 0 };
-    if (message) {
-        const unsigned char *payload = *(const unsigned char *const *)(message + 8);
-        customCfwContext *ctx = faceclaw_context_if_valid();
-        if (stock_result == 1) faceclaw_idle_input_forward(payload);
-        if (payload) {
-            uint32_t subtype = (uint32_t)payload[4] | ((uint32_t)payload[5] << 8) |
-                               ((uint32_t)payload[6] << 16) | ((uint32_t)payload[7] << 24);
-            if (ctx) {
-                ctx->hu_type7++;
-                ctx->hu_last_subtype = (uint8_t)subtype;
-            }
-            if (subtype == HEADUP_SUBEVENT_UP) {
-                unsigned bits = 0;
-                int *mode = GESTURE_FW_MODE(GESTURE_UI_CTX);
-                if (HEADUP_FW_SWITCH() != 0) bits |= HEADUP_DIAG_SWITCH;
-                if (HEADUP_FW_BUSY() != 0) bits |= HEADUP_DIAG_BUSY;
-                if (cfw_fb_lease_active()) bits |= HEADUP_DIAG_LEASE;
-                if (mode && *mode == GESTURE_APP_EVENHUB) bits |= HEADUP_DIAG_EVENHUB;
-                if (stock_result == 1) bits |= HEADUP_DIAG_STOCK_OK;
-                if (FW_SIDE_ID() == 1) bits |= HEADUP_DIAG_RIGHT;
-                if (ctx) {
-                    bits |= HEADUP_DIAG_CTX;
-                    ctx->hu_sub6++;
-                    ctx->hu_gate = (uint8_t)bits;
-                    ctx->hu_mode = mode ? (uint8_t)*mode : 0xffu;
-                }
-                if ((bits & (HEADUP_DIAG_SWITCH | HEADUP_DIAG_BUSY)) == HEADUP_DIAG_SWITCH &&
-                    faceclaw_gesture_event(headup_source, GESTURE_ET_HEAD_UP) && ctx) {
-                    ctx->hu_fwd++;
-                }
-            }
-        }
+    if (message && stock_result == 1) {
+        faceclaw_idle_input_forward(*(const unsigned char *const *)(message + 8));
     }
     return stock_result;
 }

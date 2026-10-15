@@ -290,8 +290,9 @@ fully documented):
    display thread drops, so the phone can show a lightweight sleep-time
    display (Faceclaw's Glanceboard) without a full wake
  * Report the head-up (IMU head-tilt) wake distinctly from the double-tap
-   wake, and forward the head-up while an EvenHub page is on screen, so the
-   phone can route it to that lightweight display too
+   wake, and while an EvenHub page is on screen forward the head lift (sys
+   event 12) and the head returning (15) from the foreground UI dispatcher,
+   so the phone can open and close its own dashboard on them
 
 The SID `0xf0` transport described above needs `GLASSLYCFW/31` on both lenses;
 `send_message_probe.py` documents the packet format, lens selection and ACK

@@ -580,11 +580,11 @@ def layout(img):
           for site, (orig, name) in DISPLAY_START_BL_SITES.items()],
         (g2f(HEADUP_GATE_BL_SITE[0]), HEADUP_GATE_BL_SITE[1],
          enc_bl(HEADUP_GATE_BL_SITE[0], headup_gate_addr),
-         "bl headup_gate (head-up sensor event -> EvenHub sys event 12 under lease)"),
+         "bl headup_gate (idle input gate: tap/long/release -> field-102 events, stock result kept)"),
         # Source-qualified long-press, tap-then-long-press, and release forwarding.
         (g2f(GESTURE_RING_PRESS_SITE[0]), GESTURE_RING_PRESS_SITE[1],
          enc_bl(GESTURE_RING_PRESS_SITE[0], ring_press_addr),
-         "bl gesture_ring_press_mode (observe ring touch-down, preserve stock dispatch)"),
+         "bl gesture_ring_press_mode (ring touch-down 14, head up 12 / down 15; stock dispatch preserved)"),
         (g2f(GESTURE_PRESS_SITE[0]), GESTURE_PRESS_SITE[1],
          enc_bl(GESTURE_PRESS_SITE[0], press_addr),
          "bl gesture_press (owned event 9 before stock menu gate)"),
