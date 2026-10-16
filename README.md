@@ -531,6 +531,22 @@ after a settings read, as a separate notification rather than inside the
 settings reply. Detect support by revision 24 or later, or by the `RB` report.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
 
+### Same-version PUT re-asserts the object (revision 48)
+
+Revision 48 (`GLASSLYCFW/48`) changes what a `PUT_OBJECT` whose id and version
+are already resident does. Revisions 38-47 ignored it, which left the object at
+whatever its ops had tweened it to; a phone that had lost its mirror of the
+cache (a dropped frame backlog, a lens-window change, a raster frame, a
+transport resync) re-PUT every object by content-hashed version, the glasses
+kept the tweened state, and a notification row faded to black stayed black
+until its text changed. The PUT now re-asserts the record at commit: color,
+width, geometry and visibility return to the definition and any running tween
+or rotation stops. The definition is unchanged, so no descriptor, store space,
+journal entry or revision is spent; a message that fails leaves the tweened
+state alone. A message with more than 64 such entries stages the rest as
+replacements, which cost a descriptor each and mean the same thing. Host test
+`test_reassert` in the shapes suite.
+
 ### Object cache asset replacement (revision 42)
 
 Revision 42 (`GLASSLYCFW/42`) changes how a new version of a public asset

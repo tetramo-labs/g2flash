@@ -35,6 +35,7 @@
 #define CFW_CACHE_GRANULES       (CFW_CACHE_STORE_BYTES / CFW_CACHE_GRANULE)
 #define CFW_CACHE_JOURNAL        64u
 #define CFW_CACHE_TXN_CHUNKS     32u           /* asset chunks applied per message */
+#define CFW_CACHE_TXN_REASSERTS  64u           /* same-version PUTs re-asserted per message (revision 48) */
 #define CFW_CACHE_ALL_OBJECTS    0xffffffffu   /* op target: every active object */
 #define CFW_SCENE_DEFAULT_PERIOD 33u           /* ms between animation frames */
 #define CFW_SCENE_MIN_PERIOD     10u
@@ -114,6 +115,12 @@ typedef struct {
     uint16_t staged_asset_count, staged_object_count;
     uint32_t chunk_count;
     struct { uint16_t asset; uint16_t len; } chunks[CFW_CACHE_TXN_CHUNKS];
+    /* Revision 48: a PUT_OBJECT whose id and version are already resident
+     * re-asserts the record at commit (index + 1, and the record in the
+     * message being applied) instead of being ignored. */
+    uint16_t reassert_count;
+    uint16_t reasserts[CFW_CACHE_TXN_REASSERTS];
+    const uint8_t *reassert_records[CFW_CACHE_TXN_REASSERTS];
 } cfw_txn;
 
 typedef struct cfw_cache_s {

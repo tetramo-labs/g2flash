@@ -578,10 +578,11 @@ static void test_identity(void) {
       CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_MISSING);
       CHECK(reply_extra()[0] == 2 && reply_extra()[1] == 0 && rd32(reply_extra() + 2) == 1 && rd32(reply_extra() + 6) == 7);
       CHECK(sc->active_count == 2 && pixel_at(sc->fb, 100, 100) == 15 && obj(1)->version == 1); }
-    /* same id, same version: a no-op PUT; new version replaces content in place, keeps its slot on the list */
+    /* same id, same version: the record is re-asserted in place (revision 48), no revision or descriptor
+     * spent; new version replaces content in place, keeps its slot on the list */
     uint32_t rev = sc->revision;
     put_circle(1, 1, 999, 999, 15);
-    CHECK(sc->revision == rev && obj(1)->p[0] == 100);
+    CHECK(sc->revision == rev && obj(1)->p[0] == 999 && obj(1)->version == 1 && live_objects() == 2);
     put_circle(1, 2, 300, 300, 9);
     CHECK(sc->revision == rev + 1 && obj(1)->version == 2 && obj(1)->p[0] == 300 && (obj(1)->state & CFW_CACHE_ST_ACTIVE) && sc->active_count == 2);
     CHECK(live_objects() == 2);
@@ -1159,6 +1160,53 @@ static void test_asset_replacement(void) {
     CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED && reply_extra()[0] == CFW_CACHE_REFUSE_UPLOAD);
 }
 
+/* A same-version PUT of a resident object re-asserts its record (revision 48): the
+ * ink and geometry that ops tweened away return to the definition and the
+ * animation stops, without a new descriptor, journal entry or revision. A failed
+ * transaction leaves the tweened state alone. */
+static void test_reassert(void) {
+    fresh();
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    put_circle(1, 1, 100, 100, 15);
+    uint32_t id = 1, ver = 1;
+    uint8_t r[20]; { int16_t v[] = { 100, 100, 20 }; rec(r, CFW_SHAPE_CIRCLE_FILL, 15, 0, v, 3); }
+    /* ink tweened to 0 (a fade) and a glide mid-flight */
+    m_show(1, 0x01, 0); m_refs(&id, &ver, 1);
+    { int16_t v[] = { 0 }; m_tween(1, 0x100, 0, LINEAR, v); }
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && obj(1)->color == 0 && pixel_at(sc->fb, 100, 100) == 0);
+    m_show(2, 0x01, 0); m_refs(&id, &ver, 1); m_glide(1, 300, 0, 10, LINEAR);
+    CHECK(send(38) == 0 && obj(1)->frames == 10);
+    tick(); tick();
+    CHECK(obj(1)->p[0] > 100 && obj(1)->p[0] < 400 && sc->anim_active);
+    uint32_t rev = sc->revision, live = live_objects(), la = live_assets(), heap = (uint32_t)g_alloc_live;
+    /* the same record again, inside a SHOW: back to the definition, idle, nothing allocated */
+    m_show(3, 0x01, 0); m_put_object(1, 1, r, 20); m_put_count(1); m_refs(&id, &ver, 1);
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(obj(1)->version == 1 && obj(1)->color == 15 && obj(1)->p[0] == 100 && obj(1)->p[1] == 100 && obj(1)->p[2] == 20);
+    CHECK(obj(1)->frames == 0 && obj(1)->duration == 0 && !sc->anim_active && (obj(1)->state & CFW_CACHE_ST_ACTIVE));
+    CHECK(pixel_at(sc->fb, 100, 100) == 15 && pixel_at(sc->fb, 300, 100) == 0);
+    CHECK(sc->revision == rev && live_objects() == live && live_assets() == la && (uint32_t)g_alloc_live == heap);
+    /* an op in the same SHOW lands on the re-asserted object */
+    m_show(4, 0x01, 0); m_put_object(1, 1, r, 20); m_put_count(1); m_refs(&id, &ver, 1);
+    { int16_t v[] = { 7 }; m_tween(1, 0x100, 0, LINEAR, v); }
+    CHECK(send(38) == 0 && obj(1)->color == 7 && obj(1)->p[0] == 100);
+    /* a standalone PUT message re-asserts too */
+    m_begin(5); m_put_object(1, 1, r, 20);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && obj(1)->color == 15 && sc->revision == rev);
+    /* the transaction fails after the entry: the tweened state stays */
+    m_show(6, 0x01, 0); m_refs(&id, &ver, 1);
+    { int16_t v[] = { 3 }; m_tween(1, 0x100, 0, LINEAR, v); }
+    CHECK(send(38) == 0 && obj(1)->color == 3);
+    uint8_t ri[12]; rec_asset(ri, CFW_SHAPE_IMAGE, 15, 0, 0, 100, 0);
+    m_begin(7); m_put_object(1, 1, r, 20); m_put_object(8, 0, ri, 12);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED && obj(1)->color == 3 && obj(1)->version == 1 && !(obj(1)->state & CFW_CACHE_ST_PINNED));
+    /* a rotation stops at its rest angle as well */
+    m_show(8, 0x01, 0); m_refs(&id, &ver, 1); m_rotate(1, 90 * 256, 100, 100, 0);
+    CHECK(send(38) == 0 && obj(1)->rotation.angle == 90 * 256);
+    m_show(9, 0x01, 0); m_put_object(1, 1, r, 20); m_put_count(1); m_refs(&id, &ver, 1);
+    CHECK(send(38) == 0 && obj(1)->rotation.angle == 0 && obj(1)->rotation.duration == 0);
+}
+
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : ".";
     test_immediate(dir);
@@ -1174,6 +1222,7 @@ int main(int argc, char **argv) {
     test_state();
     test_lifecycle();
     test_asset_replacement();
+    test_reassert();
     cfw_scene_release(&g_ctx);
     CHECK(g_alloc_live == 0);
     printf("%s (%d failures)\n", g_fail ? "FAILED" : "OK", g_fail);

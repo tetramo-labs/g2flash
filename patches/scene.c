@@ -29,9 +29,14 @@
  *       PUT_OBJECT. Record layouts are in shapes.h; IMAGE/TEXT/TEXT_CACHED
  *       reference assets by id (they must already be resident, or be uploaded
  *       earlier in the same message). Inline text and path commands become
- *       private assets owned by the object. Same id + same version is a no-op;
- *       a new version replaces the object, resets its animation and keeps its
- *       place on the active list.
+ *       private assets owned by the object. A new version replaces the
+ *       object, resets its animation and keeps its place on the active list.
+ *       Same id + same version re-asserts the record (revision 48): the
+ *       object's color, width, geometry and visibility return to what the
+ *       record says and any running animation stops, so a phone that has lost
+ *       track of what it tweened can redefine without a new version. Before
+ *       revision 48 that PUT was ignored and the object kept its tweened
+ *       state.
  *   Ids and versions are nonzero. The whole message is one transaction: any
  *   failure leaves the cache exactly as it was (staged descriptors and store
  *   bytes are reclaimed).
@@ -823,6 +828,7 @@ static void cfw_txn_init(cfw_txn *t, cfw_cache *sc, uint8_t *store) {
     t->missing_count = t->missing_more = 0;
     t->staged_asset_count = t->staged_object_count = 0;
     t->chunk_count = 0;
+    t->reassert_count = 0;
 }
 
 static int cfw_txn_fail(cfw_txn *t, uint8_t status, uint8_t reason) {
@@ -853,6 +859,7 @@ static void cfw_txn_abort(cfw_txn *t) {
     for (uint32_t i = 0; i < CFW_CACHE_OBJECTS; i++)
         sc->objects[i].state &= (uint8_t)~(CFW_CACHE_ST_PINNED | CFW_CACHE_ST_NEXT);
     t->staged_object_count = t->staged_asset_count = 0;
+    t->reassert_count = 0;
 }
 
 /* Validate the completed bytes of an asset by kind. */
@@ -989,8 +996,14 @@ static int cfw_txn_put_object(cfw_txn *t, const uint8_t *p) {
     if (!cfw_shape_valid(&s, 1)) return cfw_txn_fail(t, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_ASSET);
     if (cfw_object_find(sc, id, 1) >= 0) return cfw_txn_fail(t, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_DUPLICATE);
     int resident = cfw_object_find(sc, id, 0);
-    if (resident >= 0 && sc->objects[resident].version == version) return 1;   /* no-op */
     if (resident >= 0) sc->objects[resident].state |= CFW_CACHE_ST_PINNED;
+    if (resident >= 0 && sc->objects[resident].version == version && t->reassert_count < CFW_CACHE_TXN_REASSERTS) {
+        /* already resident: re-assert the record at commit (a full replacement
+         * when the list is full, which costs a descriptor but means the same) */
+        t->reasserts[t->reassert_count] = (uint16_t)(resident + 1);
+        t->reassert_records[t->reassert_count++] = p + CFW_PUT_OBJECT_HDR;
+        return 1;
+    }
     if (t->staged_object_count >= CFW_CACHE_OBJECTS) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
 
     /* dependencies first, so a missing asset costs no descriptor */
@@ -1147,9 +1160,26 @@ static void cfw_txn_commit(cfw_txn *t) {
         cfw_journal_note(sc, CFW_JOURNAL_OBJECT, o->id, o->version);
         mutated = 1;
     }
+    /* same-version PUTs: the definition is unchanged (no journal entry), the
+     * object's live state returns to it and its animation stops */
+    for (uint32_t i = 0; i < t->reassert_count; i++) {
+        cfw_object *o = &sc->objects[t->reasserts[i] - 1u];
+        cfw_shape s;
+        cfw_shape_decode(t->reassert_records[i], &s);
+        if (o->id == 0 || o->type != s.type) continue;
+        o->flags = s.flags;
+        o->color = s.color;
+        o->width = s.width;
+        for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) o->p[k] = s.p[k];
+        o->frames = 0;
+        o->duration = 0;
+        o->rotation.angle = 0;
+        o->rotation.duration = 0;
+    }
     if (mutated) sc->revision++;
     t->staged_object_count = t->staged_asset_count = 0;
     t->chunk_count = 0;
+    t->reassert_count = 0;
 }
 
 /* Reply for a transaction that did not commit. */

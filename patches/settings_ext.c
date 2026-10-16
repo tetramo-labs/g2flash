@@ -467,6 +467,12 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   48 -> a PUT_OBJECT whose id and version are already resident re-asserts
+//         the record at commit (scene.c): color, width, geometry and
+//         visibility return to the definition and any tween or rotation
+//         stops. Revisions 38-47 ignored it, so a phone that re-PUT an
+//         object after losing its mirror left the object at whatever ink a
+//         fade had tweened it to (dim or black notification rows).
 //   47 -> head-tilt forwarding from the foreground UI dispatcher
 //         (gesture_fwd.c): with an app on screen the IMU records never reach
 //         the display thread's idle policy that revisions 38-43 hooked, so
@@ -611,7 +617,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/47";
+        static const char caps[] = "GLASSLYCFW/48";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);
