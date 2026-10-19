@@ -50,7 +50,11 @@ static void rl_add(cfw_rectlist *rl, uint32_t l, uint32_t t, uint32_t w, uint32_
     }
 }
 static int g_alloc_fail_after=-1, g_alloc_live, g_store_fail;
+static int g_evenhub_fail, g_inside_gate, g_gate_allocs, g_alloc_calls;
+static uint32_t g_evenhub_max;
 static void *cfw_heap13_malloc(uint32_t size) {
+    g_alloc_calls++;
+    if (g_inside_gate) g_gate_allocs++;
     if ((g_fail_frame_alloc && size == IMAGE_BYTES) || g_alloc_fail_after==0) return 0;
     if (g_alloc_fail_after>0)g_alloc_fail_after--;
     void *p=malloc(size);if(p)g_alloc_live++;return p;
@@ -59,6 +63,9 @@ static void cfw_heap13_free(void *p) { if(p)g_alloc_live--;free(p); }
 /* the asset store lives on the EvenHub heap in the firmware */
 /* g_store_fail 1: no EvenHub memory at all; 2: only requests of 64 KiB or less succeed */
 static void *cfw_malloc(uint32_t size) {
+    g_alloc_calls++;
+    if (g_inside_gate) g_gate_allocs++;
+    if (g_evenhub_fail || (g_evenhub_max && size > g_evenhub_max)) return 0;
     if (g_store_fail == 1 && size >= 64u * 1024u) return 0;
     if (g_store_fail == 2 && size > 64u * 1024u) return 0;
     void *p = malloc(size); if (p) g_alloc_live++; return p;
@@ -266,8 +273,11 @@ static int send(uint8_t mode) {
     g_ctx.cache_reply_cap = 245;
     g_ctx.cache_reply_len = 0;
     g_ctx.direct_pending = 0;
-    cfw_cache_prepare(&g_ctx, mode);            /* image_worker does this before the gate */
-    return cfw_scene_dispatch(&g_ctx, mode, g_msg, g_len, 1, &rl);
+    cfw_cache_prepare(&g_ctx, mode, g_msg, g_len);            /* image_worker does this before the gate */
+    g_inside_gate = 1;
+    int result = cfw_scene_dispatch(&g_ctx, mode, g_msg, g_len, 1, &rl);
+    g_inside_gate = 0;
+    return result;
 }
 static int reply_status(void) { return g_ctx.cache_reply_len >= 10 ? g_ctx.cache_reply[3] : -1; }
 static int reply_mode(void) { return g_ctx.cache_reply_len >= 10 ? g_ctx.cache_reply[0] : -1; }
@@ -1207,6 +1217,147 @@ static void test_reassert(void) {
     CHECK(send(38) == 0 && obj(1)->rotation.angle == 0 && obj(1)->rotation.duration == 0);
 }
 
+
+/* Compare observable state, including the entire eviction journal and all
+ * previously allocated bytes; transaction scratch and spare store are private. */
+static cfw_cache g_before_cache;
+static uint8_t g_before_store[CFW_CACHE_STORE_BYTES];
+static int bytes_equal(const void *a, const void *b, uint32_t n) {
+    const uint8_t *x = a, *y = b;
+    for (uint32_t i = 0; i < n; i++) if (x[i] != y[i]) return 0;
+    return 1;
+}
+static void save_cache(void) {
+    memcpy(&g_before_cache, cfw_cache_peek(&g_ctx), sizeof(g_before_cache));
+    memcpy(g_before_store, g_ctx.texture_cache, g_ctx.texture_cache_size);
+}
+static void check_cache_unchanged(void) {
+    const cfw_cache *sc = cfw_cache_peek(&g_ctx), *b = &g_before_cache;
+    CHECK(sc->revision == b->revision && sc->use_clock == b->use_clock);
+    CHECK(sc->journal_head == b->journal_head && sc->journal_count == b->journal_count && sc->journal_lost_rev == b->journal_lost_rev);
+    CHECK(bytes_equal(sc->journal, b->journal, sizeof(sc->journal)));
+    CHECK(bytes_equal(sc->objects, b->objects, sizeof(sc->objects)));
+    CHECK(bytes_equal(sc->assets, b->assets, sizeof(sc->assets)));
+    CHECK(bytes_equal(sc->bitmap, b->bitmap, sizeof(sc->bitmap)));
+    CHECK(bytes_equal(sc->active, b->active, sizeof(sc->active)) && sc->active_count == b->active_count);
+    CHECK(sc->last_show_valid == b->last_show_valid && sc->last_show_request == b->last_show_request);
+    for (uint32_t g = 0; g < sc->store_bytes / CFW_CACHE_GRANULE; g++)
+        if (cfw_store_bit(b, g))
+            CHECK(bytes_equal(g_ctx.texture_cache + g * CFW_CACHE_GRANULE,
+                              g_before_store + g * CFW_CACHE_GRANULE, CFW_CACHE_GRANULE));
+}
+
+static void test_transaction_rollback(void) {
+    fresh();
+    uint8_t r[20]; int16_t v[] = {10, 10, 5}; rec(r, CFW_SHAPE_CIRCLE_FILL, 15, 0, v, 3);
+    uint32_t missing = 9999, ver = 1;
+    /* Full descriptors and a wrapped journal: rejected SHOW and PUT restore
+     * evictions, including the private asset owned by the evicted object. */
+    uint8_t text[64]; uint32_t textlen = (uint32_t)(rec_inline(text, 15, 0, 0, 0, 0, "original") - text);
+    m_begin(1); m_put_object(1, 1, text, textlen); CHECK(send(37) == 0);
+    for (uint32_t i = 2; i <= CFW_CACHE_OBJECTS; i++) put_circle(i, 1, 1, 1, 15);
+    save_cache();
+    m_show(500, 1, 0); m_put_object(1000, 1, r, 20); m_put_count(1); m_refs(&missing, &ver, 1);
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_MISSING && rd32(reply_extra() + 2) == missing);
+    check_cache_unchanged();
+    m_begin(501); m_put_object(1000, 1, r, 20); m_put_object(1001, 0, r, 20);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED);
+    check_cache_unchanged();
+    /* Reuse the evicted private string's storage, then reject. */
+    textlen = (uint32_t)(rec_inline(text, 15, 0, 0, 0, 0, "replaced") - text);
+    m_begin(502); m_put_object(1000, 1, text, textlen); m_put_object(1001, 0, r, 20);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED);
+    check_cache_unchanged();
+    /* Compiled paths write through the same before-image protection. */
+    uint8_t cmds[] = {0, 0, 0, 0, 0, 1, 0x40, 0x06, 0, 0, 1, 0x40, 0x06, 0x40, 0x06, 4};
+    uint8_t path[64]; uint32_t pathlen = (uint32_t)(rec_path(path, 15, 0, 0, 0, 256, cmds, sizeof(cmds)) - path);
+    m_begin(504); m_put_object(1000, 1, path, pathlen); m_put_object(1001, 0, r, 20);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED);
+    check_cache_unchanged();
+    /* Success still evicts and records the replacement. */
+    m_begin(503); m_put_object(1000, 1, text, textlen);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && !obj(1) && obj(1000) && reply_extra()[0] == 1);
+
+    fresh();
+    const uint8_t original[] = "abcdefghij", replacement[] = "XYZ1234567";
+    m_begin(1); m_put_asset(100, 1, CFW_ASSET_STRING, 10, 0, original, 5); CHECK(send(37) == 0);
+    save_cache();
+    m_begin(2); m_put_asset(100, 1, CFW_ASSET_STRING, 10, 0, replacement, 3); m_put_object(8, 0, r, 20);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED);
+    check_cache_unchanged();
+    /* Two chunks share a saved granule; rollback must recover the original,
+     * not the intermediate restart bytes. */
+    m_show(3, 1, 0); m_put_asset(100, 1, CFW_ASSET_STRING, 10, 0, replacement, 3);
+    m_put_asset(100, 1, CFW_ASSET_STRING, 10, 3, replacement + 3, 7); m_put_count(2); m_refs(&missing, &ver, 1);
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_MISSING);
+    check_cache_unchanged();
+    /* Original upload remains resumable after both rejections. */
+    m_begin(4); m_put_asset(100, 1, CFW_ASSET_STRING, 10, 5, original + 5, 5);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && asset(100)->filled == 10);
+    CHECK(bytes_equal(g_ctx.texture_cache + asset(100)->offset, original, 10));
+    m_begin(5); m_put_asset(101, 1, CFW_ASSET_STRING, 10, 0, original, 5); CHECK(send(37) == 0);
+    m_begin(6); m_put_asset(101, 1, CFW_ASSET_STRING, 10, 0, replacement, 3); CHECK(send(37) == 0 && asset(101)->filled == 3);
+    m_begin(7); m_put_asset(101, 1, CFW_ASSET_STRING, 10, 3, replacement + 3, 7);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && asset(101)->filled == 10);
+    CHECK(bytes_equal(g_ctx.texture_cache + asset(101)->offset, replacement, 10));
+
+    /* Fill the store, reuse an evicted asset's bytes, and fail after writing. */
+    fresh();
+    static uint8_t big[66000]; uint32_t bl = mk_big_image(big, 255, 255, 3);
+    for (uint32_t i = 1; i <= 4; i++) {
+        m_begin((uint16_t)i); m_put_asset(i, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
+        CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    }
+    save_cache();
+    mk_big_image(big, 255, 255, 7);
+    m_show(10, 1, 0); m_put_asset(5, 1, CFW_ASSET_IMAGE, bl, 0, big, bl); m_put_count(1); m_refs(&missing, &ver, 1);
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_MISSING);
+    check_cache_unchanged();
+    /* Force a smaller allocation on growth: no destructive fallback, even
+     * after some granules have already been saved. */
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    sc->undo_capacity = 2;
+    g_evenhub_max = sizeof(cfw_undo) + 2u * sizeof(sc->undo->granules[0]);
+    m_begin(11); m_put_asset(5, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_CAPACITY && reply_extra()[0] == 0);
+    check_cache_unchanged();
+    CHECK(sc->undo && sc->undo_capacity <= 2u);
+    g_evenhub_max = 0;
+    m_begin(12); m_put_asset(5, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && !asset(1) && asset(5));
+
+    /* Missing snapshot allocation fails before any cache mutations. */
+    fresh(); sc = cfw_cache_peek(&g_ctx); save_cache(); g_evenhub_fail = 1;
+    m_begin(1); m_put_object(1, 1, r, 20);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_CAPACITY);
+    check_cache_unchanged();
+    g_evenhub_fail = 0;
+    put_circle(1, 1, 10, 10, 15);
+    uint32_t id = 1;
+    int calls = g_alloc_calls;
+    m_show(2, 1, 0); m_refs(&id, &ver, 1); CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(g_alloc_calls == calls); /* ordinary screen update does no allocations */
+    /* RESET retains owned workspaces and cleanup frees them (main's leak check). */
+    cfw_undo *undo = sc->undo;
+    m_begin(3); g_msg[g_len++] = 0; CHECK(send(41) == 0 && sc->undo == undo);
+    /* A bundle prepares embedded PUTs before entering the gate, including a
+     * first-use cache and truncated segment headers. Dispatch the same PUT
+     * directly under the gate to exercise that allocation contract. */
+    fresh(); sc = cfw_cache_peek(&g_ctx);
+    m_begin(9); m_put_object(1, 1, r, 20);
+    uint8_t bundle[128]; bundle[0] = 1; put16(bundle + 1, (int)g_len + 1);
+    bundle[3] = 37; memcpy(bundle + 4, g_msg, g_len);
+    cfw_cache_prepare(&g_ctx, 8, bundle, g_len + 4);
+    CHECK(sc->undo != 0);
+    calls = g_alloc_calls;
+    cfw_rectlist rl = {0}; g_inside_gate = 1;
+    CHECK(cfw_scene_dispatch(&g_ctx, 37, g_msg, g_len, 0, &rl) == 0);
+    g_inside_gate = 0;
+    CHECK(reply_status() == CFW_CACHE_REPLY_APPLIED && obj(1) && g_alloc_calls == calls);
+    for (uint32_t len = 0; len < g_len + 4; len++) cfw_cache_prepare(&g_ctx, 8, bundle, len);
+    CHECK(g_gate_allocs == 0);
+}
+
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : ".";
     test_immediate(dir);
@@ -1223,6 +1374,7 @@ int main(int argc, char **argv) {
     test_lifecycle();
     test_asset_replacement();
     test_reassert();
+    test_transaction_rollback();
     cfw_scene_release(&g_ctx);
     CHECK(g_alloc_live == 0);
     printf("%s (%d failures)\n", g_fail ? "FAILED" : "OK", g_fail);

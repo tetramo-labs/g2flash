@@ -531,6 +531,21 @@ after a settings read, as a separate notification rather than inside the
 settings reply. Detect support by revision 24 or later, or by the `RB` report.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
 
+### Cache transaction rollback (revision 49)
+
+Revision 49 (`GLASSLYCFW/49`) restores evicted objects, assets, store bytes and
+journal entries when a PUT or SHOW is rejected. Restarting an incomplete upload
+and then rejecting the message also restores its previous bytes and progress,
+so the phone can resume the original upload. Successful transactions keep the
+existing LRU eviction behavior.
+
+Rollback storage is allocated before taking the display gate and reused across
+messages. Only overwritten store granules are copied. If memory is insufficient,
+the transaction returns CAPACITY without changing the cache; SHOW messages with
+no embedded PUTs need no rollback snapshot. The shapes suite's
+`test_transaction_rollback` covers eviction, upload restarts, memory pressure,
+bundled-message preparation and allocation outside the display gate.
+
 ### Same-version PUT re-asserts the object (revision 48)
 
 Revision 48 (`GLASSLYCFW/48`) changes what a `PUT_OBJECT` whose id and version

@@ -339,7 +339,7 @@ static int image_worker(const uint8_t *src, uint32_t size, uint8_t reply_cap, ui
     if (is_shadow_message(src, size)) {
         /* Revision 38: the object cache's heap allocations happen here, before
          * the gate, never under it (see cfw_cache_prepare). */
-        cfw_cache_prepare(ctx, src[0] & 0x7fu);
+        cfw_cache_prepare(ctx, src[0] & 0x7fu, src + 1, size - 1u);
         void *sem = FW_DISPLAY_SEM;
         if (sem != 0) {
             held = FW_SEM_TAKE(sem, FW_DISPLAY_GATE_TICKS) != 0;

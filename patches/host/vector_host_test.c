@@ -237,7 +237,7 @@ static int replay(const char *file,const char *dir) {
             if(avail<2)goto malformed;
             uint32_t len=rd16(data+pos);pos+=2;
             if(len<2 || len>(uint32_t)size-pos)goto malformed;
-            cfw_cache_prepare(&g_ctx,data[pos]);          /* image_worker does this before the gate */
+            cfw_cache_prepare(&g_ctx,data[pos],data+pos+1,len-1);          /* image_worker does this before the gate */
             int result=replay_message(data+pos,len,1);
             if(result){printf("REJECTED %s, message %u (mode %u, result %d)\n",label,messages,data[pos],result);g_fail++;}
             pos+=len;messages++;

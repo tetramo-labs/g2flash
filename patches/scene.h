@@ -16,7 +16,7 @@
  * The displayed scene is an ordered list of active objects (paint order =
  * list order, independent of storage order); its dependency closure is pinned.
  *
- * Storage: this descriptor block lives on heap 13 (allocated lazily, released
+ * Storage: this descriptor block lives on the EvenHub heap (allocated lazily, released
  * by mode 11); variable data (asset bytes, inline strings, compiled path
  * edges) lives in the 256 KiB store on the EvenHub heap behind a 16-byte
  * granule bitmap allocator. Descriptors are reusable; a recycled index can
@@ -106,6 +106,8 @@ typedef struct {
     struct cfw_cache_s *sc;
     uint8_t *store;
     uint32_t evicted;
+    uint32_t undo_count;
+    uint8_t undo_active;
     uint8_t status;              /* CFW_CACHE_REPLY_* once failed; APPLIED while fine */
     uint8_t reason;
     uint8_t missing_count, missing_more;
@@ -141,6 +143,8 @@ typedef struct cfw_cache_s {
     uint32_t journal_lost_rev; /* highest revision overwritten out of the journal ring */
     uint8_t  journal_head, journal_count, pad0[2];
     cfw_vector_work *vector_work; /* lazy, serialized by the display gate */
+    struct cfw_undo_s *undo; /* allocated before the display gate, reused across PUTs */
+    uint32_t undo_capacity; /* number of saved store granules that fit */
     cfw_txn txn;            /* the message being applied (handlers run one at a time) */
     uint16_t next[CFW_CACHE_OBJECTS]; /* SHOW: the incoming active list */
     uint32_t bitmap[CFW_CACHE_GRANULES / 32u];
@@ -163,7 +167,8 @@ static void cfw_scene_notify_settled(customCfwContext *ctx, uint16_t tag);
 static void cfw_scene_release(customCfwContext *ctx);
 static void cfw_scene_render_if_due(customCfwContext *ctx, uint8_t *fb);
 static void cfw_cache_lose(customCfwContext *ctx);
-static void cfw_cache_prepare(customCfwContext *ctx, uint8_t mode);
+static void cfw_cache_prepare(customCfwContext *ctx, uint8_t mode,
+                              const uint8_t *src, uint32_t srclen);
 /* message_transport.c: raise the reply capacity of the ingress streams. */
 static void cfw_message_reply_capacity_hint(uint8_t capacity);
 static void cfw_cache_reap(customCfwContext *ctx);

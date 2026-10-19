@@ -313,6 +313,7 @@ static void cfw_cache_free_storage(customCfwContext *ctx) {
     sc->magic = 0;
     sc->fb = 0;                                  /* aliases the shadow; not ours to free */
     if (sc->vector_work) cfw_heap13_free(sc->vector_work);
+    if (sc->undo) FW_FREE(sc->undo);
     FW_FREE(sc);
     cfw_cache_store_release(ctx);
 }
@@ -343,12 +344,82 @@ static void cfw_cache_reap(customCfwContext *ctx) {
     cfw_cache_free_storage(ctx);      /* cfw_cache_lose already moved the epoch */
 }
 
+/* Revision 49: staging may evict descriptors and reuse their store space.
+ * Keep a metadata snapshot plus a sparse before-image of overwritten granules.
+ * Each granule is saved once, even if several entries overlap. The workspace
+ * is allocated before the display gate; the snapshot is taken under it so an
+ * animation tick cannot race the copy. No large bridge-task stack objects. */
+typedef struct cfw_undo_s {
+    cfw_cache before;
+    uint32_t saved[CFW_CACHE_GRANULES / 32u];
+    struct { uint32_t offset; uint8_t bytes[CFW_CACHE_GRANULE]; } granules[];
+} cfw_undo;
+
+static uint32_t cfw_put_entry_len(const uint8_t *p, uint32_t avail);
+
+/* Bound writes from the wire without touching the rendering workspace. Paths
+ * can expand to the maximum edge count; all other writes fit in their entry.
+ * A smaller allocation is still usable: staging refuses before overwriting
+ * bytes it cannot save, then rolls back. */
+static void cfw_cache_prepare_undo(cfw_cache *sc, uint8_t mode,
+                                   const uint8_t *src, uint32_t srclen) {
+    uint32_t pos = mode == 37 ? 4u : 7u;
+    if (srclen < pos) return;
+    uint32_t entries = mode == 37 ? srclen : src[6];
+    if (entries == 0 || pos == srclen) return;
+    uint32_t need = 0;
+    for (uint32_t i = 0; i < entries && pos < srclen; i++) {
+        uint32_t n = cfw_put_entry_len(src + pos, srclen - pos);
+        if (!n) return;
+        uint32_t bytes = n;
+        if (src[pos] == CFW_PUT_OBJECT && src[pos + CFW_PUT_OBJECT_HDR] == CFW_SHAPE_PATH)
+            bytes = sizeof(cfw_path) + CFW_PATH_MAX_EDGES * sizeof(cfw_edge);
+        need += (bytes + 2u * (CFW_CACHE_GRANULE - 1u)) / CFW_CACHE_GRANULE;
+        if (need > CFW_CACHE_GRANULES) need = CFW_CACHE_GRANULES;
+        pos += n;
+    }
+    uint32_t capacity = (need + 63u) & ~63u;
+    if (capacity == 0) capacity = 64u;
+    if (sc->undo && sc->undo_capacity >= capacity) return;
+    /* No transaction is active before the gate. Release the old workspace
+     * before growing: keeping both alive can exhaust the 450 KiB arena. */
+    if (sc->undo) FW_FREE(sc->undo);
+    sc->undo = 0;
+    sc->undo_capacity = 0;
+    for (;;) {
+        cfw_undo *undo = (cfw_undo *)cfw_malloc(sizeof(cfw_undo) + capacity * sizeof(undo->granules[0]));
+        if (undo) {
+            sc->undo = undo;
+            sc->undo_capacity = capacity;
+            return;
+        }
+        if (capacity == 0) return;
+        capacity /= 2u;
+    }
+}
+
 /* Allocate the descriptor block and the store before a cache message takes
  * the display gate (image_worker, receiving task, image mutex held). Both come
  * from the EvenHub heap, whose allocator has a mutex of its own; taking it
  * while holding the display gate risks a lock-order deadlock with the display
  * task. Nothing is allocated without the lease (the lease loss path frees). */
-static void cfw_cache_prepare(customCfwContext *ctx, uint8_t mode) {
+static void cfw_cache_prepare(customCfwContext *ctx, uint8_t mode,
+                              const uint8_t *src, uint32_t srclen) {
+    /* Bundled messages are dispatched under one gate, so prepare each cache
+     * segment now. Nested bundles are rejected by image_dispatch. */
+    if (mode == 8 && srclen >= 1u) {
+        uint32_t pos = 1;
+        for (uint32_t i = 0; i < src[0]; i++) {
+            if (srclen - pos < 2u) return;
+            uint32_t n = rd16(src + pos); pos += 2u;
+            if (n < 1u || n > srclen - pos) return;
+            uint8_t submode = src[pos] & 0x7fu;
+            if (submode >= 37 && submode <= 41)
+                cfw_cache_prepare(ctx, submode, src + pos + 1u, n - 1u);
+            pos += n;
+        }
+        return;
+    }
     if (ctx == 0 || mode < 37 || mode > 41 || mode == 40) return;
     cfw_cache_reap(ctx);
     if (!cfw_fb_lease_active()) return;
@@ -358,6 +429,7 @@ static void cfw_cache_prepare(customCfwContext *ctx, uint8_t mode) {
     if (mode == 37 || mode == 38) {
         /* paths and rotation need the vector workspace (heap 13); take it now too */
         if (!sc->vector_work) sc->vector_work = (cfw_vector_work *)cfw_heap13_malloc(sizeof(cfw_vector_work));
+        cfw_cache_prepare_undo(sc, mode, src, srclen);
     }
 }
 
@@ -823,6 +895,8 @@ static void cfw_txn_init(cfw_txn *t, cfw_cache *sc, uint8_t *store) {
     t->sc = sc;
     t->store = store;
     t->evicted = 0;
+    t->undo_active = 0;
+    t->undo_count = 0;
     t->status = CFW_CACHE_REPLY_APPLIED;
     t->reason = 0;
     t->missing_count = t->missing_more = 0;
@@ -834,6 +908,32 @@ static void cfw_txn_init(cfw_txn *t, cfw_cache *sc, uint8_t *store) {
 static int cfw_txn_fail(cfw_txn *t, uint8_t status, uint8_t reason) {
     if (t->status == CFW_CACHE_REPLY_APPLIED) { t->status = status; t->reason = reason; }
     return 0;
+}
+
+/* Called before pinning or staging. Failure must precede every mutation. */
+static int cfw_txn_snapshot(cfw_txn *t) {
+    cfw_undo *undo = t->sc->undo;
+    if (!undo) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
+    memcpy(&undo->before, t->sc, sizeof(cfw_cache));
+    bzero((uint8_t *)undo->saved, sizeof(undo->saved));
+    t->undo_active = 1;
+    return 1;
+}
+
+static int cfw_txn_save_bytes(cfw_txn *t, uint32_t offset, uint32_t len) {
+    cfw_undo *undo = t->sc->undo;
+    if (!t->undo_active || !undo) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
+    uint32_t end = (offset + len + CFW_CACHE_GRANULE - 1u) / CFW_CACHE_GRANULE;
+    for (uint32_t g = offset / CFW_CACHE_GRANULE; g < end; g++) {
+        uint32_t bit = 1u << (g & 31u);
+        if (!(undo->before.bitmap[g >> 5] & bit) || (undo->saved[g >> 5] & bit)) continue;
+        if (t->undo_count >= t->sc->undo_capacity) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
+        uint32_t at = t->undo_count++;
+        undo->granules[at].offset = g * CFW_CACHE_GRANULE;
+        memcpy(undo->granules[at].bytes, t->store + g * CFW_CACHE_GRANULE, CFW_CACHE_GRANULE);
+        undo->saved[g >> 5] |= bit;
+    }
+    return 1;
 }
 
 static void cfw_txn_missing(cfw_txn *t, uint32_t id) {
@@ -852,6 +952,20 @@ static uint32_t cfw_txn_staged_fill(const cfw_txn *t, uint16_t asset) {
 
 static void cfw_txn_abort(cfw_txn *t) {
     cfw_cache *sc = t->sc;
+    if (t->undo_active) {
+        cfw_undo *undo = sc->undo;
+        for (uint32_t i = 0; i < t->undo_count; i++)
+            memcpy(t->store + undo->granules[i].offset, undo->granules[i].bytes, CFW_CACHE_GRANULE);
+        /* Keep the rejection reply, but restore descriptors, upload progress,
+         * refcounts, allocation bitmap, LRU clock and the complete journal. */
+        undo->before.txn.status = t->status;
+        undo->before.txn.reason = t->reason;
+        undo->before.txn.missing_count = t->missing_count;
+        undo->before.txn.missing_more = t->missing_more;
+        memcpy(undo->before.txn.missing, t->missing, sizeof(t->missing));
+        memcpy(sc, &undo->before, sizeof(*sc));
+        return;
+    }
     for (uint32_t i = 0; i < t->staged_object_count; i++)
         cfw_object_free(sc, t->staged_objects[i] - 1u);
     for (uint32_t i = 0; i < t->staged_asset_count; i++)
@@ -949,6 +1063,7 @@ copy:
     if (t->store == 0) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
     /* Bytes land now (the space is reserved); `filled` only advances at commit,
      * so an aborted message leaves a resident partial upload where it was. */
+    if (!cfw_txn_save_bytes(t, sc->assets[idx].offset + offset, len)) return 0;
     memcpy(t->store + sc->assets[idx].offset + offset, data, len);
     t->chunks[t->chunk_count].asset = (uint16_t)(idx + 1);
     t->chunks[t->chunk_count].len = (uint16_t)len;
@@ -1037,6 +1152,7 @@ static int cfw_txn_put_object(cfw_txn *t, const uint8_t *p) {
         int pa = cfw_txn_new_asset(t, 0, 1, CFW_ASSET_STRING, len, CFW_CACHE_ST_PRIVATE | CFW_CACHE_ST_COMPLETE);
         if (pa < 0) return 0;
         if (t->store == 0) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
+        if (!cfw_txn_save_bytes(t, sc->assets[pa].offset, len)) return 0;
         memcpy(t->store + sc->assets[pa].offset, s.text, len);
         sc->assets[pa].filled = len;
         sc->assets[pa].refs = 1;
@@ -1050,6 +1166,7 @@ static int cfw_txn_put_object(cfw_txn *t, const uint8_t *p) {
         int pa = cfw_txn_new_asset(t, 0, 1, CFW_ASSET_EDGES, bytes, CFW_CACHE_ST_PRIVATE | CFW_CACHE_ST_COMPLETE);
         if (pa < 0) return 0;
         if (t->store == 0) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
+        if (!cfw_txn_save_bytes(t, sc->assets[pa].offset, bytes)) return 0;
         cfw_path *path = (cfw_path *)(void *)(t->store + sc->assets[pa].offset);
         path->count = (uint16_t)n;
         path->rule = s.width;
@@ -1111,6 +1228,7 @@ static void cfw_asset_supersede(cfw_cache *sc, uint32_t idx) {
 /* Make every staged descriptor resident. Cannot fail. */
 static void cfw_txn_commit(cfw_txn *t) {
     cfw_cache *sc = t->sc;
+    t->undo_active = 0;
     int mutated = t->evicted != 0;
     for (uint32_t i = 0; i < t->chunk_count; i++)
         sc->assets[t->chunks[i].asset - 1u].filled += t->chunks[i].len;
@@ -1354,6 +1472,10 @@ static int cfw_cache_put(customCfwContext *ctx, const uint8_t *src, uint32_t src
     if (sc == 0 || store == 0) { cfw_reply_simple(ctx, 37, request, CFW_CACHE_REPLY_CAPACITY, sc, 0); return 0; }
     cfw_txn *t = &sc->txn;
     cfw_txn_init(t, sc, store);
+    if (srclen > 4u && !cfw_txn_snapshot(t)) {
+        cfw_txn_reply_failure(ctx, t, 37, request);
+        return 0;
+    }
     pos = 4;
     while (pos < srclen) {
         uint32_t n = cfw_put_entry_len(src + pos, srclen - pos);
@@ -1362,7 +1484,6 @@ static int cfw_cache_put(customCfwContext *ctx, const uint8_t *src, uint32_t src
     }
     if (t->status != CFW_CACHE_REPLY_APPLIED) {
         cfw_txn_abort(t);
-        if (t->evicted) sc->revision++;
         cfw_txn_reply_failure(ctx, t, 37, request);
         return 0;
     }
@@ -1409,6 +1530,10 @@ static int cfw_cache_show(customCfwContext *ctx, const uint8_t *src, uint32_t sr
     if (puts && store == 0) { cfw_reply_simple(ctx, 38, request, CFW_CACHE_REPLY_CAPACITY, sc, 0); return 0; }
     cfw_txn *tp = &sc->txn;
     cfw_txn_init(tp, sc, store);
+    if (puts && !cfw_txn_snapshot(tp)) {
+        cfw_txn_reply_failure(ctx, tp, 38, request);
+        return 0;
+    }
     uint16_t *next = sc->next;
 
     /* pin every referenced resident object before staging can evict it */
@@ -1449,7 +1574,6 @@ static int cfw_cache_show(customCfwContext *ctx, const uint8_t *src, uint32_t sr
             if (!cfw_op_check(tp, src + pos)) break;
     if (tp->status != CFW_CACHE_REPLY_APPLIED) {
         cfw_txn_abort(tp);
-        if (tp->evicted) sc->revision++;
         cfw_txn_reply_failure(ctx, tp, 38, request);
         return 0;
     }
@@ -1612,11 +1736,15 @@ static void cfw_cache_reset(customCfwContext *ctx, cfw_cache *sc, uint16_t epoch
     cfw_scene_settled(ctx, sc);
     uint8_t period = sc->period_ms;
     cfw_vector_work *work = sc->vector_work;
+    cfw_undo *undo = sc->undo;
+    uint32_t undo_capacity = sc->undo_capacity;
     uint32_t store_bytes = sc->store_bytes;
     bzero((uint8_t *)sc, sizeof(*sc));
     sc->magic = CFW_CACHE_MAGIC;
     sc->period_ms = period;
     sc->vector_work = work;
+    sc->undo = undo;
+    sc->undo_capacity = undo_capacity;
     sc->store_bytes = store_bytes;
     if (epoch) ctx->cache_epoch = epoch;
     else cfw_cache_next_epoch(ctx);
