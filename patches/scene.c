@@ -910,10 +910,12 @@ static int cfw_txn_fail(cfw_txn *t, uint8_t status, uint8_t reason) {
     return 0;
 }
 
-/* Called before pinning or staging. Failure must precede every mutation. */
+/* Called before pinning or staging. Without a workspace the message applies
+ * without rollback, as before revision 49: a rejection keeps its evictions and
+ * moves the revision (revision 50; refusing every PUT left the panel blank). */
 static int cfw_txn_snapshot(cfw_txn *t) {
     cfw_undo *undo = t->sc->undo;
-    if (!undo) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
+    if (!undo) return 1;
     memcpy(&undo->before, t->sc, sizeof(cfw_cache));
     bzero((uint8_t *)undo->saved, sizeof(undo->saved));
     t->undo_active = 1;
@@ -922,7 +924,7 @@ static int cfw_txn_snapshot(cfw_txn *t) {
 
 static int cfw_txn_save_bytes(cfw_txn *t, uint32_t offset, uint32_t len) {
     cfw_undo *undo = t->sc->undo;
-    if (!t->undo_active || !undo) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
+    if (!t->undo_active || !undo) return 1;
     uint32_t end = (offset + len + CFW_CACHE_GRANULE - 1u) / CFW_CACHE_GRANULE;
     for (uint32_t g = offset / CFW_CACHE_GRANULE; g < end; g++) {
         uint32_t bit = 1u << (g & 31u);
@@ -934,6 +936,25 @@ static int cfw_txn_save_bytes(cfw_txn *t, uint32_t offset, uint32_t len) {
         undo->saved[g >> 5] |= bit;
     }
     return 1;
+}
+
+/* Bytes [offset, offset + len) of asset `idx`. An asset resident at the
+ * snapshot holds data only below its committed fill; past it the space is
+ * reserved but empty, so a continuation chunk saves nothing. Revision 49 saved
+ * every allocated granule, so each 8 KiB chunk needed ~10 KiB of workspace and
+ * multi-message uploads (large fonts) failed CAPACITY under heap pressure. */
+static int cfw_txn_save_asset_bytes(cfw_txn *t, uint32_t idx, uint32_t offset, uint32_t len) {
+    const cfw_asset *a = &t->sc->assets[idx];
+    cfw_undo *undo = t->sc->undo;
+    if (t->undo_active && undo) {
+        const cfw_asset *b = &undo->before.assets[idx];
+        if (b->id == a->id && b->version == a->version && b->kind == a->kind && b->offset == a->offset &&
+            b->length == a->length && !(b->state & CFW_CACHE_ST_STAGED)) {
+            if (offset >= b->filled) return 1;
+            if (len > b->filled - offset) len = b->filled - offset;
+        }
+    }
+    return cfw_txn_save_bytes(t, a->offset + offset, len);
 }
 
 static void cfw_txn_missing(cfw_txn *t, uint32_t id) {
@@ -1063,7 +1084,7 @@ copy:
     if (t->store == 0) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
     /* Bytes land now (the space is reserved); `filled` only advances at commit,
      * so an aborted message leaves a resident partial upload where it was. */
-    if (!cfw_txn_save_bytes(t, sc->assets[idx].offset + offset, len)) return 0;
+    if (!cfw_txn_save_asset_bytes(t, (uint32_t)idx, offset, len)) return 0;
     memcpy(t->store + sc->assets[idx].offset + offset, data, len);
     t->chunks[t->chunk_count].asset = (uint16_t)(idx + 1);
     t->chunks[t->chunk_count].len = (uint16_t)len;
@@ -1484,6 +1505,7 @@ static int cfw_cache_put(customCfwContext *ctx, const uint8_t *src, uint32_t src
     }
     if (t->status != CFW_CACHE_REPLY_APPLIED) {
         cfw_txn_abort(t);
+        if (t->evicted) sc->revision++;          /* kept only without a rollback workspace */
         cfw_txn_reply_failure(ctx, t, 37, request);
         return 0;
     }
@@ -1574,6 +1596,7 @@ static int cfw_cache_show(customCfwContext *ctx, const uint8_t *src, uint32_t sr
             if (!cfw_op_check(tp, src + pos)) break;
     if (tp->status != CFW_CACHE_REPLY_APPLIED) {
         cfw_txn_abort(tp);
+        if (tp->evicted) sc->revision++;          /* kept only without a rollback workspace */
         cfw_txn_reply_failure(ctx, tp, 38, request);
         return 0;
     }

@@ -531,6 +531,19 @@ after a settings read, as a separate notification rather than inside the
 settings reply. Detect support by revision 24 or later, or by the `RB` report.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
 
+### Upload continuations need no rollback space (revision 50)
+
+Revision 50 (`GLASSLYCFW/50`) saves only the bytes below an asset's committed
+fill before a PUT overwrites them. A continuation chunk writes past the fill,
+into space that is reserved but holds no data, so it needs no rollback space.
+Revision 49 saved every allocated granule, so each 8 KiB chunk needed about
+10 KiB of workspace. When the heap could not grow it, every continuation was
+refused with CAPACITY and the same chunk was refused again after each RESET:
+assets that span messages (the dashboard clock's 28 px and larger fonts) never
+drew. When the workspace cannot be allocated at all, a message now applies
+without rollback, as before revision 49; a rejection then keeps its evictions
+and moves the cache revision.
+
 ### Cache transaction rollback (revision 49)
 
 Revision 49 (`GLASSLYCFW/49`) restores evicted objects, assets, store bytes and

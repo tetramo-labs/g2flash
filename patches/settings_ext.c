@@ -467,6 +467,9 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   50 -> continuation chunks of an upload need no rollback space (only
+//         bytes below an asset's committed fill are saved), and a message
+//         applies without rollback when the workspace cannot be allocated.
 //   49 -> rejected cache PUT/SHOW transactions restore evicted entries,
 //         the mutation journal and overwritten partial-upload bytes.
 //   48 -> a PUT_OBJECT whose id and version are already resident re-asserts
@@ -619,7 +622,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/49";
+        static const char caps[] = "GLASSLYCFW/50";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

@@ -1241,10 +1241,18 @@ static void check_cache_unchanged(void) {
     CHECK(bytes_equal(sc->bitmap, b->bitmap, sizeof(sc->bitmap)));
     CHECK(bytes_equal(sc->active, b->active, sizeof(sc->active)) && sc->active_count == b->active_count);
     CHECK(sc->last_show_valid == b->last_show_valid && sc->last_show_request == b->last_show_request);
+    /* Allocated bytes hold data except past an incomplete upload's fill:
+     * that space is reserved but empty, and rollback need not restore it. */
+    static uint8_t live[CFW_CACHE_STORE_BYTES];
+    bzero(live, sizeof live);
     for (uint32_t g = 0; g < sc->store_bytes / CFW_CACHE_GRANULE; g++)
-        if (cfw_store_bit(b, g))
-            CHECK(bytes_equal(g_ctx.texture_cache + g * CFW_CACHE_GRANULE,
-                              g_before_store + g * CFW_CACHE_GRANULE, CFW_CACHE_GRANULE));
+        if (cfw_store_bit(b, g)) for (uint32_t i = 0; i < CFW_CACHE_GRANULE; i++) live[g * CFW_CACHE_GRANULE + i] = 1;
+    for (uint32_t i = 0; i < CFW_CACHE_ASSETS; i++) {
+        const cfw_asset *a = &b->assets[i];
+        if ((a->id || a->length) && a->filled < a->length) bzero(live + a->offset + a->filled, a->length - a->filled);
+    }
+    for (uint32_t i = 0; i < sc->store_bytes; i++)
+        if (live[i] && g_ctx.texture_cache[i] != g_before_store[i]) { CHECK(0); break; }
 }
 
 static void test_transaction_rollback(void) {
@@ -1326,12 +1334,17 @@ static void test_transaction_rollback(void) {
     m_begin(12); m_put_asset(5, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
     CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && !asset(1) && asset(5));
 
-    /* Missing snapshot allocation fails before any cache mutations. */
-    fresh(); sc = cfw_cache_peek(&g_ctx); save_cache(); g_evenhub_fail = 1;
+    /* Revision 50: without a workspace a PUT applies without rollback, and a
+     * rejection keeps its evictions but moves the revision. */
+    fresh(); sc = cfw_cache_peek(&g_ctx); FW_FREE(sc->undo); sc->undo = 0; sc->undo_capacity = 0; g_evenhub_fail = 1;
     m_begin(1); m_put_object(1, 1, r, 20);
-    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_CAPACITY);
-    check_cache_unchanged();
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && obj(1) && !sc->undo);
+    for (uint32_t i = 2; i <= CFW_CACHE_OBJECTS; i++) put_circle(i, 1, 1, 1, 15);
+    uint32_t rev = sc->revision;
+    m_begin(2); m_put_object(1000, 1, r, 20); m_put_object(1001, 0, r, 20);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED && !obj(1000) && sc->revision == rev + 1u);
     g_evenhub_fail = 0;
+    fresh(); sc = cfw_cache_peek(&g_ctx);
     put_circle(1, 1, 10, 10, 15);
     uint32_t id = 1;
     int calls = g_alloc_calls;
@@ -1358,6 +1371,39 @@ static void test_transaction_rollback(void) {
     CHECK(g_gate_allocs == 0);
 }
 
+/* Revision 50: continuing an upload writes past the committed fill, which
+ * holds no data, so it needs no saved granules. Revision 49 saved the whole
+ * chunk and failed CAPACITY when the heap could not grow the workspace: SM and
+ * MD dashboard clocks (fonts over one 8 KiB message) never drew. */
+static void test_upload_continuation(void) {
+    fresh();
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    static uint8_t big[66000]; uint32_t bl = mk_big_image(big, 200, 100, 5);
+    uint32_t half = 8160;
+    uint8_t r[20]; int16_t v[] = {10, 10, 5}; rec(r, CFW_SHAPE_CIRCLE_FILL, 15, 0, v, 3);
+    m_begin(1); m_put_asset(7, 1, CFW_ASSET_IMAGE, bl, 0, big, half);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && asset(7)->filled == half);
+    /* only the bare workspace fits */
+    sc->undo_capacity = 0;
+    g_evenhub_max = sizeof(cfw_undo);
+    uint32_t off = half;
+    while (off < bl) {
+        uint32_t len = bl - off < half ? bl - off : half;
+        /* a rejected continuation leaves the upload where it was */
+        save_cache();
+        m_begin((uint16_t)(10 + off / half)); m_put_asset(7, 1, CFW_ASSET_IMAGE, bl, off, big + off, len);
+        m_put_object(1001, 0, r, 20);
+        CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED && asset(7)->filled == off);
+        check_cache_unchanged();
+        m_begin((uint16_t)(20 + off / half)); m_put_asset(7, 1, CFW_ASSET_IMAGE, bl, off, big + off, len);
+        CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && asset(7)->filled == off + len);
+        CHECK(sc->undo && sc->undo_capacity == 0);
+        off += len;
+    }
+    CHECK(bytes_equal(g_ctx.texture_cache + asset(7)->offset, big, bl));
+    g_evenhub_max = 0;
+}
+
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : ".";
     test_immediate(dir);
@@ -1375,6 +1421,7 @@ int main(int argc, char **argv) {
     test_asset_replacement();
     test_reassert();
     test_transaction_rollback();
+    test_upload_continuation();
     cfw_scene_release(&g_ctx);
     CHECK(g_alloc_live == 0);
     printf("%s (%d failures)\n", g_fail ? "FAILED" : "OK", g_fail);
