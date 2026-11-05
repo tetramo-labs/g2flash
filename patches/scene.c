@@ -540,6 +540,68 @@ static void cfw_asset_unref(cfw_cache *sc, uint16_t ref) {
     if ((a->state & CFW_CACHE_ST_PRIVATE) && a->refs == 0) cfw_asset_free(sc, ref - 1u);
 }
 
+/* --- partial rendering ----------------------------------------------------------
+ * Revision 51: a render used to clear and redraw the whole canvas, so one
+ * changed glyph or an animation tick cost as much as a cold frame. Each active
+ * object now remembers the box its last render may have touched; a render
+ * clears and redraws only the union of the boxes of objects that changed,
+ * arrived or left, drawing every object that overlaps it clipped to that box.
+ * Objects whose pixels cannot be bounded from their record (paths, rotated
+ * shapes, built-in font strings without a box) still redraw the whole canvas
+ * when they change. */
+typedef struct { int32_t l, t, r, b; } cfw_box;   /* r, b exclusive; empty when r <= l or b <= t */
+
+/* Field by field: the freestanding build has no memcpy for struct copies. */
+static void cfw_box_set(cfw_box *a, int32_t l, int32_t t, int32_t r, int32_t b) { a->l = l; a->t = t; a->r = r; a->b = b; }
+
+static int cfw_box_empty(const cfw_box *a) { return a->r <= a->l || a->b <= a->t; }
+
+static void cfw_box_add(cfw_box *a, const cfw_box *b) {
+    if (cfw_box_empty(b)) return;
+    if (cfw_box_empty(a)) { cfw_box_set(a, b->l, b->t, b->r, b->b); return; }
+    if (b->l < a->l) a->l = b->l;
+    if (b->t < a->t) a->t = b->t;
+    if (b->r > a->r) a->r = b->r;
+    if (b->b > a->b) a->b = b->b;
+}
+
+static int cfw_box_overlaps(const cfw_box *a, const cfw_box *b) {
+    return !cfw_box_empty(a) && !cfw_box_empty(b) && a->l < b->r && b->l < a->r && a->t < b->b && b->t < a->b;
+}
+
+static void cfw_box_clip(cfw_box *a, int32_t w, int32_t h) {
+    if (a->l < 0) a->l = 0;
+    if (a->t < 0) a->t = 0;
+    if (a->r > w) a->r = w;
+    if (a->b > h) a->b = h;
+}
+
+static void cfw_box_load(const int16_t in[4], cfw_box *out) { cfw_box_set(out, in[0], in[1], in[2], in[3]); }
+
+static void cfw_box_store(const cfw_box *a, int16_t out[4]) {
+    out[0] = cfw_sat16(a->l); out[1] = cfw_sat16(a->t); out[2] = cfw_sat16(a->r); out[3] = cfw_sat16(a->b);
+}
+
+/* An object leaves the panel without a render seeing it go: keep its box. */
+static void cfw_drawn_release(cfw_cache *sc, cfw_object *o) {
+    if (!(o->draw & CFW_DRAW_VALID)) return;
+    cfw_box stale, was;
+    cfw_box_load(sc->stale, &stale);
+    cfw_box_load(o->drawn, &was);
+    cfw_box_add(&stale, &was);
+    cfw_box_store(&stale, sc->stale);
+    o->draw = 0;
+}
+
+/* The panel was just cleared to `bg` by hand (HIDE): nothing drawn remains. */
+static void cfw_drawn_reset(cfw_cache *sc, uint8_t *fb, uint8_t bg) {
+    for (uint32_t i = 0; i < CFW_CACHE_OBJECTS; i++) sc->objects[i].draw &= (uint8_t)~CFW_DRAW_VALID;
+    for (uint32_t k = 0; k < 4; k++) sc->stale[k] = 0;
+    sc->full_redraw = 0;
+    sc->drawn_fb = fb;
+    sc->drawn_bg = bg;
+}
+
 static void cfw_active_remove(cfw_cache *sc, uint16_t idx) {
     uint32_t n = 0;
     for (uint32_t i = 0; i < sc->active_count; i++)
@@ -550,6 +612,7 @@ static void cfw_active_remove(cfw_cache *sc, uint16_t idx) {
 static void cfw_object_free(cfw_cache *sc, uint32_t idx) {
     cfw_object *o = &sc->objects[idx];
     if (o->id == 0) return;
+    cfw_drawn_release(sc, o);
     if (!(o->state & CFW_CACHE_ST_STAGED)) cfw_journal_note(sc, CFW_JOURNAL_OBJECT, o->id, 0);
     if (o->state & CFW_CACHE_ST_ACTIVE) cfw_active_remove(sc, (uint16_t)idx);
     cfw_asset_unref(sc, o->asset);
@@ -642,24 +705,172 @@ static const cfw_path *cfw_object_path(const cfw_cache *sc, const uint8_t *store
     return (const cfw_path *)(const void *)(store + a->offset);
 }
 
+/* Native-font strings: how far a glyph may reach above and left of its origin
+ * (the font's ascent above the line box; negative glyph offsets). */
+#define CFW_TEXT_ABOVE 34
+#define CFW_TEXT_LEFT  16
+
+/* Horizontal span [l, r) and height of a cached-font string laid out as
+ * cfw_texture_draw_string_region draws it: glyphs advance by their width,
+ * control bytes 1..31 move the pen by (byte - 11). 0 when a glyph is missing. */
+static int cfw_cached_text_extent(const customCfwContext *ctx, const cfw_asset *str, const cfw_asset *font, int32_t ext[3]) {
+    const uint8_t *store = ctx->texture_cache;
+    if (store == 0 || font->length < CFW_FONT_TABLE_BYTES) return 0;
+    const uint8_t *s = store + str->offset, *f = store + font->offset;
+    int32_t x = 0, l = 0, r = 0, h = 0;
+    for (uint32_t i = 0; i < str->length; i++) {
+        uint32_t ch = s[i];
+        if (ch <= 31u) { x += (int32_t)ch - 11; if (x < l) l = x; continue; }
+        if (ch > 127u) return 0;
+        uint32_t off = rd32(f + (ch - 32u) * 4u);
+        if (off == 0 || off + 2u > font->length) return 0;
+        x += f[off];
+        if (x > r) r = x;
+        if (f[off + 1u] > h) h = f[off + 1u];
+    }
+    ext[0] = l; ext[1] = r; ext[2] = h;
+    return 1;
+}
+
+/* 1 and the box every pixel of `o`'s current record lies in; 0 when its extent
+ * cannot be bounded without drawing it. */
+static int cfw_object_bounds(const cfw_cache *sc, const customCfwContext *ctx, const cfw_object *o, cfw_box *out) {
+    int32_t pw = (int32_t)IMAGE_W, ph = (int32_t)IMAGE_H;
+    const int16_t *p = o->p;
+    out->l = out->t = out->r = out->b = 0;
+    if (!(o->flags & CFW_SHAPE_FLAG_VISIBLE)) return 1;
+    if (o->rotation.angle || o->rotation.duration) return 0;
+    if (o->type == CFW_SHAPE_PATH || o->type == CFW_SHAPE_TEXT) return 0;
+    if (o->type == CFW_SHAPE_TEXT_CACHED) {
+        if (o->asset == 0 || o->font == 0) return 1;
+        int32_t ext[3];
+        if (!cfw_cached_text_extent(ctx, &sc->assets[o->asset - 1u], &sc->assets[o->font - 1u], ext)) return 0;
+        out->l = p[0] + ext[0]; out->t = p[1]; out->r = p[0] + ext[1]; out->b = p[1] + ext[2];
+        return 1;
+    }
+    if (o->type == CFW_SHAPE_TEXT_INLINE) {
+        out->l = p[0] - CFW_TEXT_LEFT; out->t = p[1] - CFW_TEXT_ABOVE;
+        out->r = p[2] > 0 ? p[0] + p[2] : pw;
+        out->b = p[3] > 0 ? p[1] + p[3] : ph;
+        return 1;
+    }
+    if (o->type == CFW_SHAPE_IMAGE) {
+        if (o->asset == 0) return 1;
+        const cfw_asset *a = &sc->assets[o->asset - 1u];
+        uint8_t hd[2];
+        {
+            const uint8_t *store = ctx->texture_cache;
+            if (store == 0 || a->length < 2u) return 1;
+            hd[0] = store[a->offset]; hd[1] = store[a->offset + 1u];
+        }
+        out->l = p[0]; out->t = p[1]; out->r = p[0] + hd[0]; out->b = p[1] + hd[1];
+        return 1;
+    }
+    if (o->type == CFW_SHAPE_NONE || o->type > CFW_SHAPE_PIE) return 0;
+    /* Geometry: the coordinate parameters bound the shape (a bezier stays inside
+     * its control points); circles, arcs and pies reach radius p2 from p0, p1;
+     * rectangles span p2 x p3 from p0, p1. A stroke reaches its width further. */
+    uint8_t xm, ym;
+    cfw_shape_masks(o->type, &xm, &ym);
+    int32_t l = INT32_MAX, t = INT32_MAX, r = INT32_MIN, b = INT32_MIN;
+    for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) {
+        if (xm & (1u << k)) { if (p[k] < l) l = p[k]; if (p[k] > r) r = p[k]; }
+        if (ym & (1u << k)) { if (p[k] < t) t = p[k]; if (p[k] > b) b = p[k]; }
+    }
+    if (o->type == CFW_SHAPE_RECT || o->type == CFW_SHAPE_RECT_FILL) {
+        r = p[0] + (p[2] > 0 ? p[2] : 0);
+        b = p[1] + (p[3] > 0 ? p[3] : 0);
+    } else if (o->type == CFW_SHAPE_CIRCLE || o->type == CFW_SHAPE_CIRCLE_FILL ||
+               o->type == CFW_SHAPE_ARC || o->type == CFW_SHAPE_PIE) {
+        int32_t rad = p[2] > 0 ? p[2] : 0;
+        l = p[0] - rad; r = p[0] + rad; t = p[1] - rad; b = p[1] + rad;
+    }
+    int32_t pad = (int32_t)o->width + 2;
+    out->l = l - pad; out->t = t - pad; out->r = r + pad + 1; out->b = b + pad + 1;
+    return 1;
+}
+
+static void cfw_shape_translate(cfw_shape *s, int32_t dx, int32_t dy) {
+    uint8_t xm, ym;
+    cfw_shape_masks(s->type, &xm, &ym);
+    for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) {
+        if (xm & (1u << k)) s->p[k] = cfw_sat16(s->p[k] - dx);
+        if (ym & (1u << k)) s->p[k] = cfw_sat16(s->p[k] - dy);
+    }
+}
+
 static void cfw_scene_render(customCfwContext *ctx, cfw_cache *sc, uint8_t *fb, cfw_rectlist *rl) {
-    cfw_raster r = { fb, IMAGE_STRIDE, (int32_t)IMAGE_W, (int32_t)IMAGE_H };
     const uint8_t *store = ctx ? ctx->texture_cache : 0;
+    int32_t pw = (int32_t)IMAGE_W, ph = (int32_t)IMAGE_H;
+    cfw_box dirty;
+    cfw_box_load(sc->stale, &dirty);
+    int whole = sc->full_redraw || fb != sc->drawn_fb || sc->bg != sc->drawn_bg;
+    /* departures: whatever they left behind is redrawn */
+    for (uint32_t i = 0; i < CFW_CACHE_OBJECTS; i++) {
+        cfw_object *o = &sc->objects[i];
+        if (!(o->draw & CFW_DRAW_VALID) || (o->id != 0 && (o->state & CFW_CACHE_ST_ACTIVE))) continue;
+        cfw_box was;
+        cfw_box_load(o->drawn, &was);
+        cfw_box_add(&dirty, &was);
+        o->draw = 0;
+    }
+    /* arrivals and changes: where they were and where they will be */
+    for (uint32_t i = 0; i < sc->active_count; i++) {
+        cfw_object *o = &sc->objects[sc->active[i]];
+        if (o->id == 0 || ((o->draw & CFW_DRAW_VALID) && !(o->draw & CFW_DRAW_DIRTY))) continue;
+        if (o->draw & CFW_DRAW_VALID) {
+            cfw_box was;
+            cfw_box_load(o->drawn, &was);
+            cfw_box_add(&dirty, &was);
+        }
+        cfw_box now;
+        if (!cfw_object_bounds(sc, ctx, o, &now)) { whole = 1; cfw_box_set(&now, 0, 0, pw, ph); }
+        cfw_box_clip(&now, pw, ph);
+        cfw_box_add(&dirty, &now);
+        cfw_box_store(&now, o->drawn);
+        o->draw = CFW_DRAW_VALID;
+    }
+    if (whole) cfw_box_set(&dirty, 0, 0, pw, ph);
+    cfw_box_clip(&dirty, pw, ph);
+    for (uint32_t k = 0; k < 4; k++) sc->stale[k] = 0;
+    sc->full_redraw = 0;
+    sc->drawn_fb = fb;
+    sc->drawn_bg = sc->bg;
+    if (cfw_box_empty(&dirty)) return;
+    /* GRAY4 packs two pixels per byte: the view starts on an even column */
+    dirty.l &= ~1;
+    dirty.r = (dirty.r + 1) & ~1;
+    if (dirty.r > pw) dirty.r = pw;
+    cfw_raster r = { fb + (uint32_t)dirty.t * IMAGE_STRIDE + ((uint32_t)dirty.l >> 1), IMAGE_STRIDE, dirty.r - dirty.l, dirty.b - dirty.t };
+    cfw_rectlist scratch;                          /* draws report view coordinates; the panel gets the box */
+    scratch.n = 0;
+    scratch.direct_submitted = 0;
     cfw_raster_clear(&r, sc->bg);
     for (uint32_t i = 0; i < sc->active_count; i++) {
         const cfw_object *o = &sc->objects[sc->active[i]];
         if (o->id == 0 || !(o->flags & CFW_SHAPE_FLAG_VISIBLE)) continue;
+        cfw_box box;
+        cfw_box_load(o->drawn, &box);
+        if (!cfw_box_overlaps(&box, &dirty)) continue;
         cfw_shape s;
         cfw_object_shape(sc, store, o, &s);
+        cfw_shape_translate(&s, dirty.l, dirty.t);
+        cfw_rotation rot;                          /* the pivot moves with the view */
+        rot.angle = o->rotation.angle; rot.from = o->rotation.from; rot.to = o->rotation.to;
+        rot.px = cfw_sat16(o->rotation.px - dirty.l);
+        rot.py = cfw_sat16(o->rotation.py - dirty.t);
+        rot.started = o->rotation.started; rot.duration = o->rotation.duration;
+        for (uint32_t k = 0; k < 4; k++) rot.curve[k] = o->rotation.curve[k];
+        scratch.n = 0;
         if (o->type == CFW_SHAPE_PATH) {
             const cfw_path *path = cfw_object_path(sc, store, o);
             if (path && sc->vector_work)
-                cv_path_draw(&r, sc->vector_work, path, o->p, &o->rotation, o->color);
+                cv_path_draw(&r, sc->vector_work, path, s.p, &rot, o->color);
         } else if (sc->vector_work)
-            cv_shape_draw(&r, sc->vector_work, &s, &o->rotation, rl);
-        else cfw_shape_draw(&r, &s, rl);
+            cv_shape_draw(&r, sc->vector_work, &s, &rot, &scratch);
+        else cfw_shape_draw(&r, &s, &scratch);
     }
-    rl_add(rl, 0, 0, IMAGE_W, IMAGE_H);
+    rl_add(rl, (uint32_t)dirty.l, (uint32_t)dirty.t, (uint32_t)(dirty.r - dirty.l), (uint32_t)(dirty.b - dirty.t));
 }
 
 /* Called by display_copy_hook (display task) while the gate is held for the
@@ -735,6 +946,7 @@ static int cfw_scene_advance(cfw_cache *sc) {
     for (uint32_t i = 0; i < sc->active_count; i++) {
         cfw_object *o = &sc->objects[sc->active[i]];
         if (o->id == 0) continue;
+        if (o->frames || o->rotation.duration) o->draw |= CFW_DRAW_DIRTY;
         cfw_rotation_advance(&o->rotation, now);
         if (o->rotation.duration) moving = 1;
         if (cfw_object_advance(o, now)) moving = 1;
@@ -845,6 +1057,7 @@ static int cfw_scene_present(customCfwContext *ctx, cfw_cache *sc, int present, 
 static void cfw_scene_takeover(customCfwContext *ctx) {
     cfw_cache *sc = cfw_cache_peek(ctx);
     if (sc == 0) return;
+    sc->full_redraw = 1;
     cfw_scene_stop(ctx);
     for (uint32_t i = 0; i < sc->active_count; i++) {
         cfw_object *o = &sc->objects[sc->active[i]];
@@ -1244,6 +1457,11 @@ static void cfw_asset_supersede(cfw_cache *sc, uint32_t idx) {
         }
         cfw_asset_free(sc, old);
     }
+    /* whatever draws from it changed appearance */
+    for (uint32_t k = 0; k < CFW_CACHE_OBJECTS; k++) {
+        cfw_object *o = &sc->objects[k];
+        if (o->asset == idx + 1u || o->font == idx + 1u) o->draw |= CFW_DRAW_DIRTY;
+    }
 }
 
 /* Make every staged descriptor resident. Cannot fail. */
@@ -1293,6 +1511,7 @@ static void cfw_txn_commit(cfw_txn *t) {
             o->replaces = 0;
         }
         o->state &= (uint8_t)~CFW_CACHE_ST_STAGED;
+        o->draw |= CFW_DRAW_DIRTY;
         o->last_use = ++sc->use_clock;
         if (o->asset) sc->assets[o->asset - 1u].last_use = o->last_use;
         if (o->font)  sc->assets[o->font - 1u].last_use = o->last_use;
@@ -1306,6 +1525,7 @@ static void cfw_txn_commit(cfw_txn *t) {
         cfw_shape s;
         cfw_shape_decode(t->reassert_records[i], &s);
         if (o->id == 0 || o->type != s.type) continue;
+        o->draw |= CFW_DRAW_DIRTY;
         o->flags = s.flags;
         o->color = s.color;
         o->width = s.width;
@@ -1406,6 +1626,7 @@ static int cfw_op_check(cfw_txn *t, const uint8_t *p) {
 }
 
 static void cfw_op_apply_one(cfw_object *o, const uint8_t *p, const cfw_op_clock *clock) {
+    o->draw |= CFW_DRAW_DIRTY;
     switch (p[0]) {
     case CFW_OP_VISIBLE:
         if (p[5]) o->flags |= CFW_SHAPE_FLAG_VISIBLE;
@@ -1604,10 +1825,15 @@ static int cfw_cache_show(customCfwContext *ctx, const uint8_t *src, uint32_t sr
 
     /* the active list: departing objects freeze, arrivals become pinned */
     if (!(flags & CFW_SHOW_FLAG_KEEP)) {
+        uint32_t behind = 0;                   /* paint order: an object now listed after one it used to precede is redrawn */
         for (uint32_t i = 0; i < count; i++) {
             uint32_t id = rd32(src + refs + 8u * i);
             int idx = cfw_object_find(sc, id, 0);
             next[i] = (uint16_t)(idx < 0 ? 0 : idx);
+            uint32_t was = sc->active_count;
+            for (uint32_t k = 0; k < sc->active_count; k++) if (sc->active[k] == next[i]) { was = k; break; }
+            if (was == sc->active_count || was < behind) sc->objects[next[i]].draw |= CFW_DRAW_DIRTY;
+            else behind = was;
         }
         for (uint32_t i = 0; i < CFW_CACHE_OBJECTS; i++) {
             cfw_object *o = &sc->objects[i];
@@ -1677,6 +1903,7 @@ static int cfw_cache_hide(customCfwContext *ctx, const uint8_t *src, uint32_t sr
         if (fb == 0) return -1;
         cfw_raster r = { fb, IMAGE_STRIDE, (int32_t)IMAGE_W, (int32_t)IMAGE_H };
         cfw_raster_clear(&r, bg);
+        if (sc) cfw_drawn_reset(sc, fb, bg);
         rl_add(rl, 0, 0, IMAGE_W, IMAGE_H);
         if (present) { present_buffer(ctx, fb, rl); ctx->shadow_stale = 1; }
         else ctx->shadow_stale = 0;

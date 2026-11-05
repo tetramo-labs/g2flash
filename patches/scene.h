@@ -53,6 +53,8 @@
 #define CFW_CACHE_ST_PRIVATE  0x04u  /* asset: owned by exactly one object, no id */
 #define CFW_CACHE_ST_ACTIVE   0x08u  /* object: on the active list */
 #define CFW_CACHE_ST_PINNED   0x10u  /* object: referenced by the transaction in progress */
+#define CFW_DRAW_VALID        0x01u  /* object: drawn[] describes the panel */
+#define CFW_DRAW_DIRTY        0x02u  /* object: changed since its last render */
 
 typedef struct {
     uint32_t id;            /* 0 = free (private assets are also 0: reached via their object) */
@@ -86,11 +88,13 @@ typedef struct {
     uint8_t  width_from, width_to;
     uint32_t started;       /* FW_MS_TICK when the tween began (revision 41: clock-based) */
     uint16_t duration;      /* frames * period at start, ms; 0 = idle */
-    uint8_t  pad[2];
+    uint8_t  draw;          /* CFW_DRAW_*: what the last render left on the panel */
+    uint8_t  pad[1];
     int16_t  p[8];          /* current geometry */
     int16_t  from[8];       /* tween start geometry */
     int16_t  to[8];         /* tween end geometry */
     cfw_rotation rotation;
+    int16_t  drawn[4];      /* l, t, r, b (r, b exclusive) the last render may have touched */
 } cfw_object;
 
 typedef struct {
@@ -134,6 +138,11 @@ typedef struct cfw_cache_s {
     uint8_t  period_ms;     /* animation frame period */
     uint8_t  settle_pending; /* a tagged SHOW has not reported settled yet */
     uint8_t  last_show_valid; /* last_show_request holds the last applied SHOW/HIDE */
+    uint8_t  full_redraw;   /* the panel holds pixels no object accounts for: redraw everything */
+    uint8_t  drawn_bg;      /* background the panel was last cleared to */
+    uint8_t  pad1[2];
+    int16_t  stale[4];      /* box freed objects left on the panel since the last render */
+    uint8_t *drawn_fb;      /* the buffer the drawn boxes describe; 0 = none yet */
     uint16_t tag;           /* request echoed in the settled report (field 129) */
     uint16_t last_show_request;
     uint16_t active_count;

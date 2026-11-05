@@ -83,11 +83,22 @@ static void rs_hspan(const cfw_raster *r, int32_t x0, int32_t x1, int32_t y, uin
     for (int32_t i = x0 >> 1; i <= (x1 >> 1); i++) row[i] = v;
 }
 
+/* A raster narrower than its stride is a view into a wider buffer (a partial
+ * render): clear row by row and leave the columns outside it alone. */
 static void cfw_raster_clear(const cfw_raster *r, uint8_t color) {
-    uint32_t words = (r->stride * (uint32_t)r->h) >> 2;
-    uint32_t v = (uint32_t)(color & 0x0fu) * 0x11111111u;
-    uint32_t *dst = (uint32_t *)(void *)r->buf;
-    for (uint32_t i = 0; i < words; i++) dst[i] = v;
+    uint32_t bytes = ((uint32_t)r->w + 1u) >> 1;
+    uint8_t c = (uint8_t)((color & 0x0fu) * 0x11u);
+    if (bytes >= r->stride) {
+        uint32_t words = (r->stride * (uint32_t)r->h) >> 2;
+        uint32_t v = (uint32_t)c * 0x01010101u;
+        uint32_t *dst = (uint32_t *)(void *)r->buf;
+        for (uint32_t i = 0; i < words; i++) dst[i] = v;
+        return;
+    }
+    for (int32_t y = 0; y < r->h; y++) {
+        uint8_t *row = r->buf + (uint32_t)y * r->stride;
+        for (uint32_t i = 0; i < bytes; i++) row[i] = c;
+    }
 }
 
 /* ---- rectangles and circles ------------------------------------------------ */

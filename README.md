@@ -531,6 +531,20 @@ after a settings read, as a separate notification rather than inside the
 settings reply. Detect support by revision 24 or later, or by the `RB` report.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
 
+### Partial renders (revision 51)
+
+Revision 51 (`GLASSLYCFW/51`) renders only what changed. Every active object
+remembers the box its last render may have touched; a render clears and
+redraws the union of the boxes of the objects that changed, arrived, left or
+moved in the paint order, drawing every object that overlaps it clipped to
+that box, and reports that box to the panel. Before, every SHOW and every
+animation tick cleared and redrew the whole canvas, so a clock update cost as
+much as a cold frame. Cached-font strings are bounded from their glyph headers.
+Objects whose pixels cannot be bounded from their record (paths, rotated
+shapes, built-in font strings without a box) still redraw everything when they
+change; a new background or a raster takeover also does. The wire protocol is
+unchanged.
+
 ### Upload continuations need no rollback space (revision 50)
 
 Revision 50 (`GLASSLYCFW/50`) saves only the bytes below an asset's committed

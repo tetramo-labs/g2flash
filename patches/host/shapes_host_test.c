@@ -1375,6 +1375,66 @@ static void test_transaction_rollback(void) {
  * holds no data, so it needs no saved granules. Revision 49 saved the whole
  * chunk and failed CAPACITY when the heap could not grow the workspace: SM and
  * MD dashboard clocks (fonts over one 8 KiB message) never drew. */
+/* Revision 51: a render touches only the union of the boxes of objects that
+ * changed, left or arrived; everything else on the panel is left alone. */
+static void test_partial_render(void) {
+    fresh();
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    uint8_t ra[20], rb[20], rc[20];
+    { int16_t v[] = { 20, 20, 100, 100, 0 }; rec(ra, CFW_SHAPE_RECT_FILL, 15, 0, v, 5); }
+    { int16_t v[] = { 400, 300, 100, 100, 0 }; rec(rb, CFW_SHAPE_RECT_FILL, 9, 0, v, 5); }
+    { int16_t v[] = { 60, 60, 100, 100, 0 }; rec(rc, CFW_SHAPE_RECT_FILL, 5, 0, v, 5); }
+    m_begin(1); m_put_object(1, 1, ra, 20); m_put_object(2, 1, rb, 20);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    uint32_t ids[] = { 1, 2 }, vers[] = { 1, 1 };
+    cfw_rectlist rl = { 0 };
+    m_show(2, 1, 0); m_refs(ids, vers, 2); g_ctx.cache_reply_cap = 245; g_ctx.cache_reply_len = 0;
+    CHECK(cfw_scene_dispatch(&g_ctx, 38, g_msg, g_len, 1, &rl) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(rl.n == 1 && rl.r[0].l == 0 && rl.r[0].t == 0 && rl.r[0].w == IMAGE_W && rl.r[0].h == IMAGE_H);   /* first render: everything */
+    CHECK(count_color(sc->fb, 15) == 10000 && count_color(sc->fb, 9) == 10000);
+    /* a mark nobody owns (top right, outside every box) survives renders that do not reach it */
+    sc->fb[10 * IMAGE_STRIDE + 300] = 0x77;
+    /* move B: only where B was and is gets cleared and redrawn */
+    rl.n = 0; m_show(3, 0x01 | 0x02, 0); m_refs(0, 0, 0);
+    { uint8_t *p = g_msg + g_len; p[0] = 3; put32(p + 1, 2); put16(p + 5, 20); put16(p + 7, 0); g_len += 9; }
+    CHECK(cfw_scene_dispatch(&g_ctx, 38, g_msg, g_len, 1, &rl) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(rl.n == 1 && rl.r[0].l >= 396 && rl.r[0].t >= 296 && rl.r[0].l + rl.r[0].w <= 524 && rl.r[0].t + rl.r[0].h <= 404);
+    CHECK(pixel_at(sc->fb, 410, 350) == 0 && pixel_at(sc->fb, 500, 350) == 9 && count_color(sc->fb, 9) == 10000);
+    CHECK(sc->fb[10 * IMAGE_STRIDE + 300] == 0x77 && count_color(sc->fb, 15) == 10000);
+    /* an arrival over A redraws A's overlap in paint order, nothing further away */
+    m_begin(4); m_put_object(3, 1, rc, 20);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    uint32_t ids3[] = { 3, 1, 2 }, vers3[] = { 1, 1, 1 };
+    rl.n = 0; m_show(5, 1, 0); m_refs(ids3, vers3, 3);
+    CHECK(cfw_scene_dispatch(&g_ctx, 38, g_msg, g_len, 1, &rl) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(rl.n == 1 && rl.r[0].l + rl.r[0].w <= 164 && rl.r[0].t + rl.r[0].h <= 164);
+    CHECK(pixel_at(sc->fb, 100, 100) == 15 && pixel_at(sc->fb, 140, 140) == 5 && pixel_at(sc->fb, 30, 30) == 15);
+    CHECK(sc->fb[10 * IMAGE_STRIDE + 300] == 0x77);
+    /* a departure clears what it left behind; the mark under nobody stays */
+    rl.n = 0; m_show(6, 1, 0); m_refs(ids, vers, 2);
+    CHECK(cfw_scene_dispatch(&g_ctx, 38, g_msg, g_len, 1, &rl) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(rl.n == 1 && count_color(sc->fb, 5) == 0 && count_color(sc->fb, 15) == 10000 && sc->fb[10 * IMAGE_STRIDE + 300] == 0x77);
+    /* a new background redraws everything */
+    rl.n = 0; m_show(7, 1, 2); m_refs(ids, vers, 2);
+    CHECK(cfw_scene_dispatch(&g_ctx, 38, g_msg, g_len, 1, &rl) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(rl.n == 1 && rl.r[0].w == IMAGE_W && rl.r[0].h == IMAGE_H && sc->fb[10 * IMAGE_STRIDE + 300] == 0x22);
+    /* HIDE then SHOW: the blank panel is accounted for, the warm reopen draws only the objects */
+    m_begin(8); g_msg[g_len++] = 0x01 | 0x04; g_msg[g_len++] = 0;
+    CHECK(send(39) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && count_color(sc->fb, 15) == 0);
+    sc->fb[10 * IMAGE_STRIDE + 300] = 0x77;
+    rl.n = 0; m_show(9, 1, 0); m_refs(ids, vers, 2);
+    CHECK(cfw_scene_dispatch(&g_ctx, 38, g_msg, g_len, 1, &rl) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(rl.n == 1 && count_color(sc->fb, 15) == 10000 && count_color(sc->fb, 9) == 10000 && sc->fb[10 * IMAGE_STRIDE + 300] == 0x77);
+    /* a tween redraws its box each frame and nothing else */
+    rl.n = 0; m_show(10, 0x01 | 0x02, 0); m_refs(0, 0, 0); m_glide(1, 200, 0, 4, LINEAR);
+    CHECK(cfw_scene_dispatch(&g_ctx, 38, g_msg, g_len, 1, &rl) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && sc->anim_active);
+    for (int f = 0; f < 4; f++) {
+        tick();
+        CHECK(sc->fb[10 * IMAGE_STRIDE + 300] == 0x77 && count_color(sc->fb, 15) == 10000 && count_color(sc->fb, 9) == 10000);
+    }
+    CHECK(obj(1)->p[0] == 220 && sc->anim_active == 0 && pixel_at(sc->fb, 30, 30) == 0 && pixel_at(sc->fb, 300, 100) == 15);
+}
+
 static void test_upload_continuation(void) {
     fresh();
     cfw_cache *sc = cfw_cache_peek(&g_ctx);
@@ -1422,6 +1482,7 @@ int main(int argc, char **argv) {
     test_reassert();
     test_transaction_rollback();
     test_upload_continuation();
+    test_partial_render();
     cfw_scene_release(&g_ctx);
     CHECK(g_alloc_live == 0);
     printf("%s (%d failures)\n", g_fail ? "FAILED" : "OK", g_fail);

@@ -467,6 +467,9 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   51 -> a scene render clears and redraws only the box of the objects that
+//         changed, arrived or left (scene.c); a tick or a one-object update
+//         no longer costs a whole-canvas redraw.
 //   50 -> continuation chunks of an upload need no rollback space (only
 //         bytes below an asset's committed fill are saved), and a message
 //         applies without rollback when the workspace cannot be allocated.
@@ -622,7 +625,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/50";
+        static const char caps[] = "GLASSLYCFW/51";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);
