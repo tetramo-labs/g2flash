@@ -862,7 +862,9 @@ static int cfw_cleanup_session(void) {
      * cleanup ended the RIGHT's bring-up 5 s after CONFIGURE and the re-arm storm never
      * recovered the codec. The array has its own 90 s streaming lease (fail-open: the phone
      * must keep renewing), so a departing app still cannot leave the mics on. STOP (op 3)
-     * and the lease watchdog remain the only teardown paths. */
+     * and the lease watchdog remain the only teardown paths. The volume gate's
+     * lease does end here: a gate left closed would drop the next app's audio. */
+    ctx->vg_lease_deadline = 0;
     ancs_cleanup_session();
 
     /* Give the ambient light sensor back to the stock auto-brightness machine. */

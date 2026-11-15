@@ -505,7 +505,8 @@ that handshake appears to cause firmware 2.2.10 to close an otherwise busy GATT
 connection after about 30 seconds. OTA data fragments refresh the transfer watchdog. The
 official OTA capture sends no EvenHub-control heartbeats between BEGIN and the
 final END, so neither does this flasher. DroidBridge flashes also reuse one HTTP connection
-instead of opening one per BLE fragment. If an ACK is lost, the flasher never
+instead of opening one per BLE fragment. If an ACK is lost or a write fails
+because the link went away, the flasher never
 risks replaying that ambiguous block in place: it reconnects, restores
 notifications, sends a fresh BEGIN, and restarts the entire component from
 FILE_CHECK. Arms are flashed one at a time. See the module docstring and comments
@@ -530,6 +531,47 @@ read-only image-handler query `[17,0]`. The firmware also sends this report
 after a settings read, as a separate notification rather than inside the
 settings reply. Detect support by revision 24 or later, or by the `RB` report.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
+
+### Tick refreshes and cache fixes (revision 52)
+
+Revision 52 (`GLASSLYCFW/52`) makes an animation tick refresh only the rows of
+the box it redraws. The timer callback works out that box under the display
+gate and queues those rows; the display task paints the box right before the
+copy. Revision 51 already redrew only the box but still copied, flushed and
+refreshed all 480 rows on every tick, and a SHOW that changed nothing
+refreshed the whole panel too. Now a tick or a SHOW that changes nothing
+queues no refresh at all, and a frame the display queue refuses makes the next
+render redraw everything.
+
+Fixes in the same revision:
+
+ * The cache preparation that runs before the display gate no longer frees a
+   cache lost with the lease (the display task could still be drawing from
+   it). The message that finds the cache lost is answered without one (STALE,
+   or CAPACITY with the current epoch, including a RESET); the next message
+   prepares a fresh cache.
+ * A partial upload that receives a chunk can no longer be evicted by a later
+   entry of the same message, which credited the chunk to a freed or reused
+   descriptor.
+ * FREEZE (op or SHOW flag) and FINISH, including the finish a SHOW falls back
+   to when no frame timer can be created, redraw the object where it stopped.
+ * A same-version PUT of an inline string keeps the resident string's length.
+ * An object at a whole number of turns keeps a bounded box.
+ * Mode 11 cleanup ends the volume gate lease, and a CONFIGURE renewal compares
+   the clamped parameters, so out-of-range values no longer reopen the gate.
+ * While a leased volume gate is closed, its own frame tick counts as capture
+   for the microphone's stale-session check, so a gated mic is no longer
+   restarted as dead. A lapsed microphone lease makes the next arm acquire the
+   left temple's audio-manager slot again.
+ * Image rendering walks rows instead of dividing per pixel and stops below
+   the clip; the transport CRC uses a 16-entry table. Both produce identical
+   results (host-tested exhaustively for the CRC).
+
+The wire protocol is unchanged. Host tests: `test_tick_present`,
+`test_freeze_redraw`, `test_staged_chunk_eviction`, `test_texture_render`,
+additions to `test_lifecycle`, `test_reassert` and `test_partial_render` in the
+shapes suite, the CRC check in the transport suite and the renewal and
+liveness checks in the volume gate suite.
 
 ### Partial renders (revision 51)
 

@@ -180,10 +180,8 @@ void volume_gate_apply_control(const uint8_t *data, uint32_t len) {
         vg_state *s = &ctx->volume_gate;
         /* A renewal with the same parameters keeps the running state; only a
          * changed configuration restarts the gate (open). */
-        if (!s->enabled || !vg_lease_live(ctx, now) || s->threshold != thr ||
-            s->hold_ms != hold || s->min_open_ms != open || (c[0] != 0u) != (s->enabled != 0u)) {
+        if (!vg_lease_live(ctx, now) || !vg_config_matches(s, c[0], thr, hold, open))
             vg_configure(s, c[0], thr, hold, open);
-        }
         ctx->vg_lease_deadline = now + VG_LEASE_MS;
         if (ctx->vg_lease_deadline == 0u) ctx->vg_lease_deadline = 1u;
     } else if (op != VG_OP_QUERY) {

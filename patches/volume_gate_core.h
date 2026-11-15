@@ -77,11 +77,15 @@ static inline uint32_t vg_udiv64(uint64_t n, uint32_t d) {
     return q > 0xffffffffull ? 0xffffffffu : (uint32_t)q;
 }
 
+static inline void vg_clamp(uint16_t *threshold, uint16_t *hold_ms, uint16_t *min_open_ms) {
+    if (*threshold > 32767u) *threshold = 32767u;
+    if (*hold_ms > VG_MAX_HOLD_MS) *hold_ms = (uint16_t)VG_MAX_HOLD_MS;
+    if (*min_open_ms > VG_MAX_OPEN_MS) *min_open_ms = (uint16_t)VG_MAX_OPEN_MS;
+}
+
 static inline void vg_configure(vg_state *s, uint8_t enabled, uint16_t threshold,
                                 uint16_t hold_ms, uint16_t min_open_ms) {
-    if (threshold > 32767u) threshold = 32767u;
-    if (hold_ms > VG_MAX_HOLD_MS) hold_ms = (uint16_t)VG_MAX_HOLD_MS;
-    if (min_open_ms > VG_MAX_OPEN_MS) min_open_ms = (uint16_t)VG_MAX_OPEN_MS;
+    vg_clamp(&threshold, &hold_ms, &min_open_ms);
     s->threshold = threshold;
     s->hold_ms = hold_ms;
     s->min_open_ms = min_open_ms;
@@ -90,6 +94,23 @@ static inline void vg_configure(vg_state *s, uint8_t enabled, uint16_t threshold
     s->open = 1u;
     s->last_frame_tick = 0u;
     s->last_report_tick = 0u;
+}
+
+/* 1 when an enabled gate already runs this configuration (compared after the
+ * clamping vg_configure applies), so a renewal keeps its state. */
+static inline int vg_config_matches(const vg_state *s, uint8_t enabled, uint16_t threshold,
+                                    uint16_t hold_ms, uint16_t min_open_ms) {
+    vg_clamp(&threshold, &hold_ms, &min_open_ms);
+    return s->enabled && enabled && s->threshold == threshold &&
+           s->hold_ms == hold_ms && s->min_open_ms == min_open_ms;
+}
+
+/* A closed, leased gate drops every chunk before the dispatcher, so only its
+ * own frame tick shows capture; an open one forwards them to the tap. */
+static inline uint32_t vg_heard_tick(const vg_state *s, int leased, uint32_t tap_tick) {
+    if (!s->enabled || !leased || s->open || s->last_frame_tick == 0u) return tap_tick;
+    if (tap_tick != 0u && (int32_t)(tap_tick - s->last_frame_tick) >= 0) return tap_tick;
+    return s->last_frame_tick;
 }
 
 /* RMS of `samples` int16 values (any channel layout; the level is over all of

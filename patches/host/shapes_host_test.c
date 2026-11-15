@@ -110,8 +110,14 @@ static int cfw_builtin_draw_string_buf(uint8_t *shadow, uint32_t stride, uint32_
     (void)rl; (void)tokens; uint32_t n = src[5]; if (len != 6 + n || n > max_tokens) return -1;
     stub_box(shadow, stride, w, h, (int16_t)rd16(src), (int16_t)rd16(src + 2), 10 * n, 20, src[4] & 15); return 0;
 }
+/* g_present_fail: the display queue refuses the frame. The first rect of the last present is kept. */
+static int g_present_fail, g_present_n;
+static cfw_rect g_present_rect;
 static void present_buffer(customCfwContext *ctx, const uint8_t *buf, cfw_rectlist *rl) {
-    (void)ctx; (void)buf; g_presented++; if (rl) rl->direct_submitted = 1;
+    (void)ctx; (void)buf; g_presented++;
+    g_present_n = rl ? (int)rl->n : 0;
+    if (rl && rl->n) g_present_rect = rl->r[0];
+    if (rl && !g_present_fail) rl->direct_submitted = 1;
 }
 static uint8_t g_hint;
 static void cfw_message_reply_capacity_hint(uint8_t capacity) { g_hint = capacity; }
@@ -1062,11 +1068,29 @@ static void test_lifecycle(void) {
     cfw_cache_reap(&g_ctx);                                   /* display task, gate held */
     CHECK(g_ctx.scene == 0 && g_ctx.texture_cache == 0 && !g_ctx.cache_lost && g_alloc_live == 0);
     m_begin(2); CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_STALE && reply_epoch() == g_ctx.cache_epoch);
-    /* the next handler reaps by itself */
+    /* the next handler reaps by itself, under the gate: the prepare before it
+     * (no gate) leaves the lost cache alone, so that message finds no cache
+     * and the one after it prepares a fresh one */
     fresh(); put_circle(1, 1, 1, 1, 15);
     cfw_cache_lose(&g_ctx);
     g_epoch = g_ctx.cache_epoch;
-    m_begin(3); CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && g_ctx.scene != 0 && obj(1) == 0);
+    { cfw_cache *lost = g_ctx.scene; int live = g_alloc_live, calls = g_alloc_calls;
+      m_begin(3); cfw_cache_prepare(&g_ctx, 37, g_msg, g_len);
+      CHECK(g_ctx.scene == lost && g_ctx.cache_lost && g_alloc_live == live && g_alloc_calls == calls); }
+    m_begin(3); CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_CAPACITY && reply_epoch() == g_epoch);
+    CHECK(g_ctx.scene == 0 && g_ctx.texture_cache == 0 && !g_ctx.cache_lost && g_alloc_live == 0);
+    m_begin(4); CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && g_ctx.scene != 0 && obj(1) == 0);
+    /* a SHOW, a HIDE that blanks and a RESET right after a loss answer without one too; the next RESET works */
+    { uint32_t o[] = { 1 }, w[] = { 1 }; cfw_cache_lose(&g_ctx); g_epoch = g_ctx.cache_epoch;
+      m_show(5, 1, 0); m_refs(o, w, 1); CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_CAPACITY && g_ctx.scene == 0); }
+    put_circle(1, 1, 1, 1, 15); cfw_cache_lose(&g_ctx); g_epoch = g_ctx.cache_epoch;
+    m_begin(6); g_msg[g_len++] = 0x01; g_msg[g_len++] = 0;
+    CHECK(send(39) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && g_ctx.scene == 0 && count_color(g_container_shadow, 0) == IMAGE_W * IMAGE_H);
+    put_circle(1, 1, 1, 1, 15); cfw_cache_lose(&g_ctx);
+    m_begin(7); g_msg[g_len++] = 0; CHECK(send(41) == 0 && reply_status() == CFW_CACHE_REPLY_CAPACITY && g_ctx.scene == 0 && g_alloc_live == 0);
+    m_begin(8); g_msg[g_len++] = 0; CHECK(send(41) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && g_ctx.scene != 0);
+    g_epoch = reply_epoch();
+    put_circle(1, 1, 1, 1, 15); CHECK(obj(1));
     /* losing twice before a reap bumps once per loss; a reap with nothing lost is a no-op */
     cfw_cache_lose(&g_ctx); cfw_cache_lose(&g_ctx); cfw_cache_reap(&g_ctx); cfw_cache_reap(&g_ctx);
     CHECK(g_ctx.scene == 0);
@@ -1215,6 +1239,17 @@ static void test_reassert(void) {
     CHECK(send(38) == 0 && obj(1)->rotation.angle == 90 * 256);
     m_show(9, 0x01, 0); m_put_object(1, 1, r, 20); m_put_count(1); m_refs(&id, &ver, 1);
     CHECK(send(38) == 0 && obj(1)->rotation.angle == 0 && obj(1)->rotation.duration == 0);
+    /* an inline string keeps the length it was defined with, which is what its
+     * private asset holds, whatever length the re-asserted record carries */
+    uint8_t t1[64], t2[160];
+    uint32_t l1 = (uint32_t)(rec_inline(t1, 15, 10, 300, 0, 0, "hi") - t1);
+    uint32_t l2 = (uint32_t)(rec_inline(t2, 15, 10, 300, 0, 0, "a string much longer than the resident one") - t2);
+    m_begin(10); m_put_object(5, 1, t1, l1);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    uint32_t id5 = 5;
+    m_show(11, 0x01, 0); m_put_object(5, 1, t2, l2); m_put_count(1); m_refs(&id5, &ver, 1);
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && obj(5)->p[4] == 2 && sc->assets[obj(5)->asset - 1u].length == 2);
+    CHECK(pixel_at(sc->fb, 15, 305) == 15 && pixel_at(sc->fb, 35, 305) == 0);
 }
 
 
@@ -1433,6 +1468,15 @@ static void test_partial_render(void) {
         CHECK(sc->fb[10 * IMAGE_STRIDE + 300] == 0x77 && count_color(sc->fb, 15) == 10000 && count_color(sc->fb, 9) == 10000);
     }
     CHECK(obj(1)->p[0] == 220 && sc->anim_active == 0 && pixel_at(sc->fb, 30, 30) == 0 && pixel_at(sc->fb, 300, 100) == 15);
+    /* a whole turn draws with the plain rasterizer, so the object keeps a bounded box */
+    rl.n = 0; m_show(11, 0x01 | 0x02, 0); m_refs(0, 0, 0); m_rotate(2, -360 * 256, 470, 350, 0);
+    CHECK(cfw_scene_dispatch(&g_ctx, 38, g_msg, g_len, 1, &rl) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(rl.n == 1 && rl.r[0].w < IMAGE_W && sc->fb[10 * IMAGE_STRIDE + 300] == 0x77);
+    rl.n = 0; m_show(12, 0x01 | 0x02, 0); m_refs(0, 0, 0);
+    { uint8_t *p = g_msg + g_len; p[0] = 3; put32(p + 1, 2); put16(p + 5, 10); put16(p + 7, 0); g_len += 9; }
+    CHECK(cfw_scene_dispatch(&g_ctx, 38, g_msg, g_len, 1, &rl) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(rl.n == 1 && rl.r[0].l >= 400 && rl.r[0].w < 150 && sc->fb[10 * IMAGE_STRIDE + 300] == 0x77);
+    CHECK(count_color(sc->fb, 9) == 10000 && pixel_at(sc->fb, 529, 350) == 9 && pixel_at(sc->fb, 425, 350) == 0);
 }
 
 static void test_upload_continuation(void) {
@@ -1464,6 +1508,181 @@ static void test_upload_continuation(void) {
     g_evenhub_max = 0;
 }
 
+/* Revision 52: an animation tick plans its box under the gate and queues only
+ * that box's rows; the display task paints it. A tick or a SHOW that changes
+ * nothing queues nothing, and a frame the display queue refuses is redrawn
+ * whole by the next render. */
+static void test_tick_present(void) {
+    fresh();
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    uint8_t ra[20], rb[20];
+    { int16_t v[] = { 20, 300, 40, 40, 0 }; rec(ra, CFW_SHAPE_RECT_FILL, 15, 0, v, 5); }
+    { int16_t v[] = { 400, 20, 100, 100, 0 }; rec(rb, CFW_SHAPE_RECT_FILL, 9, 0, v, 5); }
+    m_begin(1); m_put_object(1, 1, ra, 20); m_put_object(2, 1, rb, 20);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    uint32_t ids[] = { 1, 2 }, vers[] = { 1, 1 };
+    m_show(2, 1, 0); m_refs(ids, vers, 2);
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && g_present_n == 1 && g_present_rect.h == IMAGE_H);
+    int presents = g_presented, signals = g_gate_signals;
+    m_show(3, 0x01 | 0x02, 0); m_refs(0, 0, 0);
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && g_presented == presents);
+    /* each frame of a glide queues the rows between the old and the new place */
+    m_show(4, 0x01 | 0x02, 0); m_refs(0, 0, 0); m_glide(1, 0, -40, 4, LINEAR);
+    CHECK(send(38) == 0 && sc->anim_active);
+    for (int f = 0; f < 4; f++) {
+        int16_t was = obj(1)->p[1];
+        presents = g_presented; signals = g_gate_signals;
+        tick();
+        CHECK(g_presented == presents + 1 && g_gate_signals == signals && sc->render_due == 0 && g_present_n == 1);
+        CHECK(g_present_rect.t <= obj(1)->p[1] && g_present_rect.t + g_present_rect.h >= was + 40 && g_present_rect.h < 100);
+        CHECK(g_present_rect.l <= 20 && g_present_rect.l + g_present_rect.w <= 64);
+        CHECK(count_color(sc->fb, 15) == 1600 && count_color(sc->fb, 9) == 10000);
+    }
+    CHECK(obj(1)->p[1] == 260 && !sc->anim_active && pixel_at(sc->fb, 30, 265) == 15 && pixel_at(sc->fb, 30, 330) == 0);
+    /* an animation nobody can see queues nothing, gives the gate back and still settles */
+    m_show(5, 0x01 | 0x02, 0); m_refs(0, 0, 0); m_visible(1, 0);
+    CHECK(send(38) == 0 && count_color(sc->fb, 15) == 0);
+    presents = g_presented; g_settled = 0;
+    m_show(6, 0x01 | 0x02 | 0x04, 0); m_refs(0, 0, 0); m_glide(1, 0, 40, 3, LINEAR);
+    CHECK(send(38) == 0 && sc->anim_active && g_presented == presents);
+    signals = g_gate_signals;
+    for (int f = 0; f < 3; f++) tick();
+    CHECK(g_presented == presents && g_gate_signals == signals + 3 && !sc->anim_active && sc->render_due == 0);
+    CHECK(obj(1)->p[1] == 300 && g_settled == 1 && g_settled_tag == 6);
+    /* the display queue refuses a frame: the gate comes back and the next render redraws everything */
+    m_show(7, 0x01 | 0x02, 0); m_refs(0, 0, 0); m_visible(1, 1); m_glide(1, 0, -40, 2, LINEAR);
+    CHECK(send(38) == 0 && sc->anim_active && pixel_at(sc->fb, 30, 330) == 15);
+    g_present_fail = 1; signals = g_gate_signals;
+    tick();
+    g_present_fail = 0;
+    CHECK(g_gate_signals == signals + 1 && sc->full_redraw && sc->render_due == 0);
+    tick();
+    CHECK(g_present_n == 1 && g_present_rect.w == IMAGE_W && g_present_rect.h == IMAGE_H && !sc->anim_active);
+    CHECK(count_color(sc->fb, 15) == 1600 && count_color(sc->fb, 9) == 10000 && pixel_at(sc->fb, 30, 265) == 15 && pixel_at(sc->fb, 30, 330) == 0);
+}
+
+/* Revision 52: FREEZE and FINISH move a running animation to a value no tick
+ * rendered; the object is redrawn there, not left where the last tick drew it. */
+static void test_freeze_redraw(void) {
+    fresh();
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    uint8_t ra[20], rb[20];
+    { int16_t v[] = { 20, 20, 40, 40, 0 }; rec(ra, CFW_SHAPE_RECT_FILL, 15, 0, v, 5); }
+    { int16_t v[] = { 400, 300, 40, 40, 0 }; rec(rb, CFW_SHAPE_RECT_FILL, 9, 0, v, 5); }
+    m_begin(1); m_put_object(1, 1, ra, 20); m_put_object(2, 1, rb, 20);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    uint32_t ids[] = { 1, 2 }, vers[] = { 1, 1 };
+    m_show(2, 1, 0); m_refs(ids, vers, 2); m_glide(1, 300, 0, 10, LINEAR);
+    CHECK(send(38) == 0 && sc->anim_active);
+    tick();
+    int16_t drawn = obj(1)->p[0];
+    /* the SHOW FREEZE flag between ticks */
+    g_now += 150;
+    m_show(3, 0x01 | 0x02 | 0x08, 0); m_refs(0, 0, 0);
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && obj(1)->frames == 0 && !sc->anim_active);
+    int16_t x = obj(1)->p[0];
+    CHECK(x > drawn + 40 && pixel_at(sc->fb, x, 30) == 15 && pixel_at(sc->fb, x + 39, 30) == 15 && pixel_at(sc->fb, drawn, 30) == 0);
+    CHECK(count_color(sc->fb, 15) == 1600);
+    /* no timer: the SHOW finishes every running animation, including one an op of it did not touch */
+    m_show(4, 0x01 | 0x02, 0); m_refs(0, 0, 0); m_glide(1, -100, 0, 10, LINEAR);
+    CHECK(send(38) == 0 && sc->anim_active);
+    tick();
+    drawn = obj(1)->p[0];
+    g_ctx.scene_timer = 0; g_fail_timer = 1;
+    m_show(5, 0x01 | 0x02, 0); m_refs(0, 0, 0);
+    { uint8_t *p = g_msg + g_len; p[0] = 3; put32(p + 1, 2); put16(p + 5, 0); put16(p + 7, 20); g_len += 9; }
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && !sc->anim_active && obj(1)->frames == 0);
+    g_fail_timer = 0;
+    CHECK(obj(1)->p[0] == x - 100 && drawn > x - 60);
+    CHECK(pixel_at(sc->fb, x - 100, 30) == 15 && pixel_at(sc->fb, drawn + 39, 30) == 0 && count_color(sc->fb, 15) == 1600);
+    CHECK(pixel_at(sc->fb, 410, 330) == 9 && count_color(sc->fb, 9) == 1600);
+}
+
+/* Revision 52: a resident partial upload that takes a chunk of a message stays
+ * while a later entry of the same message evicts for room; another
+ * unreferenced asset goes, and the chunk counts toward the upload. */
+static void test_staged_chunk_eviction(void) {
+    fresh();
+    static uint8_t big[66000];
+    uint32_t bl = mk_big_image(big, 255, 255, 4);
+    m_begin(1); m_put_asset(1, 1, CFW_ASSET_IMAGE, bl, 0, big, 8000);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && asset(1)->filled == 8000);
+    for (uint32_t i = 2; i <= 4; i++) {
+        m_begin((uint16_t)i); m_put_asset(i, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
+        CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    }
+    CHECK(CFW_CACHE_STORE_BYTES - store_used() < bl);
+    m_begin(5);
+    m_put_asset(1, 1, CFW_ASSET_IMAGE, bl, 8000, big + 8000, 8000);
+    m_put_asset(5, 1, CFW_ASSET_IMAGE, bl, 0, big, 8000);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(asset(1) && asset(1)->filled == 16000 && asset(1)->length == bl && !(asset(1)->state & CFW_CACHE_ST_COMPLETE));
+    CHECK(asset(1) && bytes_equal(g_ctx.texture_cache + asset(1)->offset, big, 16000));
+    CHECK(asset(2) == 0 && asset(3) && asset(4) && asset(5) && asset(5)->filled == 8000);
+    m_begin(6); m_put_asset(1, 1, CFW_ASSET_IMAGE, bl, 16000, big + 16000, bl - 16000);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && asset(1) && (asset(1)->state & CFW_CACHE_ST_COMPLETE));
+    CHECK(asset(1) && bytes_equal(g_ctx.texture_cache + asset(1)->offset, big, bl));
+}
+
+/* The per-pixel image renderer that cfw_texture_render replaced. */
+static void ref_texture_render(uint8_t *shadow, uint32_t stride, uint32_t panel_w, uint32_t panel_h,
+                               int32_t x0, int32_t y0, const cfw_cached_image *image,
+                               const uint8_t *lut, int transparent) {
+    uint32_t pos = 0, pixel = 0;
+    while (pos < image->rle_len) {
+        uint32_t used, count;
+        uint8_t color;
+        if (!cfw_texture_rle_token(image->rle + pos, image->rle_len - pos, &used, &count, &color)) return;
+        pos += used;
+        int skip = transparent && color == 0;
+        uint8_t mapped = lut[color];
+        for (uint32_t i = 0; i < count; i++, pixel++) {
+            int32_t x = x0 + (int32_t)(pixel % image->width);
+            int32_t y = y0 + (int32_t)(pixel / image->width);
+            if (!skip && x >= 0 && y >= 0 && (uint32_t)x < panel_w && (uint32_t)y < panel_h) {
+                uint8_t *b = shadow + (uint32_t)y * stride + ((uint32_t)x >> 1);
+                if (x & 1) *b = (uint8_t)((*b & 0xf0u) | mapped);
+                else       *b = (uint8_t)((*b & 0x0fu) | (uint8_t)(mapped << 4));
+            }
+        }
+    }
+}
+
+/* Random images, every token form, positions on and off every edge, views
+ * narrower than their stride, odd columns, all options: the same pixels. */
+static void test_texture_render(void) {
+    enum { STRIDE = 64, ROWS = 96 };
+    static uint8_t want[STRIDE * ROWS], got[STRIDE * ROWS], img[8192];
+    uint32_t seed = 0x2468ace1u;
+#define RND() (seed = seed * 1664525u + 1013904223u, seed >> 8)
+    int differ = 0;
+    for (int k = 0; k < 20000 && !differ; k++) {
+        uint32_t w = 1 + RND() % 40, h = 1 + RND() % 40, left = w * h, n = 2;
+        img[0] = (uint8_t)w; img[1] = (uint8_t)h;
+        while (left) {
+            uint8_t color = (uint8_t)(RND() % 16);
+            uint32_t form = RND() % 3, count;
+            if (form == 0) { count = 1 + RND() % 15; if (count > left) count = left; img[n++] = (uint8_t)((count << 4) | color); }
+            else if (form == 1) { count = 1 + RND() % 255; if (count > left) count = left; img[n++] = color; img[n++] = (uint8_t)count; }
+            else { count = 1 + RND() % 400; if (count > left) count = left; img[n++] = color; img[n++] = 0; img[n++] = (uint8_t)count; img[n++] = (uint8_t)(count >> 8); }
+            left -= count;
+        }
+        cfw_cached_image image;
+        CHECK(cfw_texture_image_in(img, n, 0, &image) && image.rle_len + 2u == n);
+        uint32_t pw = 1 + RND() % (STRIDE * 2), ph = 1 + RND() % ROWS;
+        int32_t x0 = (int32_t)(RND() % 220) - 60, y0 = (int32_t)(RND() % 200) - 60;
+        uint8_t lut[16];
+        cfw_texture_make_lut((uint8_t)RND(), lut);
+        int transparent = (int)(RND() & 1u);
+        for (uint32_t i = 0; i < sizeof want; i++) want[i] = got[i] = (uint8_t)RND();
+        ref_texture_render(want, STRIDE, pw, ph, x0, y0, &image, lut, transparent);
+        cfw_texture_render(got, STRIDE, pw, ph, x0, y0, &image, lut, transparent);
+        differ = !bytes_equal(want, got, sizeof want);
+    }
+#undef RND
+    CHECK(!differ);
+}
+
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : ".";
     test_immediate(dir);
@@ -1483,6 +1702,10 @@ int main(int argc, char **argv) {
     test_transaction_rollback();
     test_upload_continuation();
     test_partial_render();
+    test_tick_present();
+    test_freeze_redraw();
+    test_staged_chunk_eviction();
+    test_texture_render();
     cfw_scene_release(&g_ctx);
     CHECK(g_alloc_live == 0);
     printf("%s (%d failures)\n", g_fail ? "FAILED" : "OK", g_fail);

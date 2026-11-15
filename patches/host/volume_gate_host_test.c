@@ -149,6 +149,43 @@ int main(void) {
     vg_configure(&s, 1, 65535, 65535, 65535);
     assert(s.threshold == 32767 && s.hold_ms == VG_MAX_HOLD_MS && s.min_open_ms == VG_MAX_OPEN_MS);
 
+    /* A renewal compares what vg_configure would store: out-of-range values
+     * match the configuration they clamp to, so the running gate is kept. */
+    assert(vg_config_matches(&s, 1, 65535, 65535, 65535));
+    assert(vg_config_matches(&s, 1, 32767, VG_MAX_HOLD_MS, VG_MAX_OPEN_MS));
+    assert(vg_config_matches(&s, 7, 40000, 61000, 62000));
+    assert(!vg_config_matches(&s, 1, 32766, 65535, 65535) && !vg_config_matches(&s, 1, 65535, 59999, 65535));
+    assert(!vg_config_matches(&s, 1, 65535, 65535, 59999) && !vg_config_matches(&s, 0, 65535, 65535, 65535));
+    vg_configure(&s, 0, 100, 100, 100);
+    assert(!vg_config_matches(&s, 0, 100, 100, 100) && !vg_config_matches(&s, 1, 100, 100, 100));
+
+    /* The stale-mic check's liveness: a closed, leased gate drops every chunk
+     * before the tap, so its own frame tick counts; open, unleased, disabled
+     * or unfed, only the tap's does. */
+    vg_configure(&s, 1, 1000, 1000, 100);
+    now = 200000;
+    assert(vg_heard_tick(&s, 1, 0) == 0 && vg_heard_tick(&s, 1, 1234) == 1234);
+    uint32_t tap = 0;
+    for (unsigned i = 0; i < 100; i++) {           /* 5 s of quiet: open for 1 s, then closed */
+        uint8_t ev;
+        now += 50u;
+        if (feed(&s, quiet, now, &ev)) tap = now;
+    }
+    assert(!s.open && tap != 0 && now - tap > 3000u && s.last_frame_tick == now);
+    assert(vg_heard_tick(&s, 1, tap) == now && vg_heard_tick(&s, 1, 0) == now);
+    assert(vg_heard_tick(&s, 0, tap) == tap);
+    assert(vg_heard_tick(&s, 1, now + 10u) == now + 10u);
+    {
+        uint8_t ev;
+        now += 50u;
+        assert(feed(&s, loud, now, &ev) == 1 && s.open);
+        assert(vg_heard_tick(&s, 1, tap) == tap);    /* open: the chunk went to the tap */
+    }
+    s.enabled = 0;
+    assert(vg_heard_tick(&s, 1, tap) == tap);
+    vg_configure(&s, 1, 1000, 1000, 100);
+    assert(vg_heard_tick(&s, 1, tap) == tap);
+
     /* Chunks longer than 4096 samples are measured on their head. */
     {
         static int16_t big[9000];

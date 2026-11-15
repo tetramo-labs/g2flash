@@ -338,7 +338,35 @@ static void handler_failure(void) {
     assert(g_ctx[0].nack_reason == CFW_NACK_HANDLER && g_ctx[1].nack_reason == CFW_NACK_HANDLER);
 }
 
+/* The table CRC against the bitwise CRC-16/CCITT-FALSE it replaced. Two bytes
+ * from the initial value reach every 16-bit state, and a third byte steps each
+ * of them by every byte value, so all inputs of any length agree by induction. */
+static uint16_t ref_crc_step(uint16_t crc, uint8_t byte) {
+    crc ^= (uint16_t)byte << 8;
+    for (unsigned bit = 0; bit < 8; ++bit)
+        crc = (uint16_t)((crc << 1) ^ ((crc & 0x8000u) ? 0x1021u : 0));
+    return crc;
+}
+static void crc_table(void) {
+    static uint8_t reached[65536 / 8];
+    uint8_t m[3];
+    for (unsigned a = 0; a < 65536u; a++) {
+        m[0] = (uint8_t)(a >> 8); m[1] = (uint8_t)a;
+        uint16_t state = ref_crc_step(ref_crc_step(0xffffu, m[0]), m[1]);
+        reached[state >> 3] |= (uint8_t)(1u << (state & 7u));
+        assert(cfw_message_crc(m, 1) == ref_crc_step(0xffffu, m[0]) && cfw_message_crc(m, 2) == state);
+        for (unsigned c = 0; c < 256u; c++) {
+            m[2] = (uint8_t)c;
+            assert(cfw_message_crc(m, 3) == ref_crc_step(state, m[2]));
+        }
+    }
+    for (unsigned i = 0; i < sizeof reached; i++) assert(reached[i] == 0xffu);
+    assert(cfw_message_crc(m, 0) == 0xffffu);
+    assert(cfw_message_crc((const uint8_t *)"123456789", 9) == 0x29b1u);
+}
+
 int main(void) {
+    crc_table();
     for (unsigned chunk = 3; chunk <= 64; chunk += 7) {
         subset_records(chunk);
         compressed_records(chunk);
@@ -350,6 +378,6 @@ int main(void) {
     handler_failure();
     reset();
     assert(g_live == 0);
-    puts("PASS: subset-lens records ACK once per lens at their ordinals; outside-lens records NACK");
+    puts("PASS: table CRC equals the bitwise CRC; subset-lens records ACK once per lens at their ordinals; outside-lens records NACK");
     return 0;
 }

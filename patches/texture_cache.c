@@ -136,8 +136,9 @@ static void cfw_texture_render(uint8_t *shadow, uint32_t stride,
                                const cfw_cached_image *image,
                                const uint8_t *lut, int transparent) {
     uint32_t pos = 0;
-    uint32_t pixel = 0;
-    while (pos < image->rle_len) {
+    uint32_t col = 0;
+    int32_t y = y0;
+    while (pos < image->rle_len && y < (int32_t)panel_h) {
         uint32_t used, count;
         uint8_t color;
         /* The validation pass guarantees success here. */
@@ -148,14 +149,24 @@ static void cfw_texture_render(uint8_t *shadow, uint32_t stride,
         pos += used;
         int skip = transparent && color == 0;
         uint8_t mapped = lut[color];
-        for (uint32_t i = 0; i < count; i++, pixel++) {
-            int32_t x = x0 + (int32_t)(pixel % image->width);
-            int32_t y = y0 + (int32_t)(pixel / image->width);
-            if (!skip && x >= 0 && y >= 0 &&
-                (uint32_t)x < panel_w && (uint32_t)y < panel_h) {
-                uint8_t *b = shadow + (uint32_t)y * stride + ((uint32_t)x >> 1);
-                if (x & 1) *b = (uint8_t)((*b & 0xf0u) | mapped);
-                else       *b = (uint8_t)((*b & 0x0fu) | (uint8_t)(mapped << 4));
+        while (count) {
+            uint32_t run = image->width - col;
+            if (run > count) run = count;
+            if (!skip && y >= 0) {
+                int32_t x = x0 + (int32_t)col, end = x + (int32_t)run;
+                if (x < 0) x = 0;
+                if (end > (int32_t)panel_w) end = (int32_t)panel_w;
+                for (; x < end; x++) {
+                    uint8_t *b = shadow + (uint32_t)y * stride + ((uint32_t)x >> 1);
+                    if (x & 1) *b = (uint8_t)((*b & 0xf0u) | mapped);
+                    else       *b = (uint8_t)((*b & 0x0fu) | (uint8_t)(mapped << 4));
+                }
+            }
+            count -= run;
+            col += run;
+            if (col == image->width) {
+                col = 0;
+                if (++y >= (int32_t)panel_h) return;
             }
         }
     }

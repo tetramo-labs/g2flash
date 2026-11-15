@@ -115,8 +115,9 @@
  *
  * Threads: the receiving task owns the display gate while it mutates the cache
  * or renders. Animation frames are paced by a CFW osTimer; the callback takes
- * the same gate, advances every active animation, queues the frame and lets
- * display_copy_hook re-render right before the copy. Lease loss only flags the
+ * the same gate, advances every active animation, plans the box that changed,
+ * queues only its rows and lets display_copy_hook paint it right before the
+ * copy; a frame that changes nothing is not queued. Lease loss only flags the
  * cache as lost (cfw_cache_lose, any thread); the memory is released under the
  * gate by the next handler or display refresh (cfw_cache_reap). */
 
@@ -421,8 +422,8 @@ static void cfw_cache_prepare(customCfwContext *ctx, uint8_t mode,
         return;
     }
     if (ctx == 0 || mode < 37 || mode > 41 || mode == 40) return;
-    cfw_cache_reap(ctx);
-    if (!cfw_fb_lease_active()) return;
+    /* A lost cache is freed under the gate by the handler; the next message prepares. */
+    if (ctx->cache_lost || !cfw_fb_lease_active()) return;
     cfw_cache *sc = cfw_cache_get(ctx);
     if (sc == 0) return;
     (void)cfw_cache_store(ctx);                 /* RESET reports the size the heap gave */
@@ -622,11 +623,16 @@ static void cfw_object_free(cfw_cache *sc, uint32_t idx) {
 
 /* --- eviction ------------------------------------------------------------------- */
 
+static uint32_t cfw_txn_staged_fill(const cfw_txn *t, uint16_t asset);
+
+/* Only from staging: a resident partial upload that took a chunk of the
+ * transaction in progress stays, since commit credits that chunk to it. */
 static int cfw_evict_asset(cfw_cache *sc) {
     int best = -1;
     for (uint32_t i = 0; i < CFW_CACHE_ASSETS; i++) {
         const cfw_asset *a = &sc->assets[i];
         if ((a->id == 0 && a->length == 0) || a->refs || (a->state & (CFW_CACHE_ST_STAGED | CFW_CACHE_ST_PRIVATE))) continue;
+        if (cfw_txn_staged_fill(&sc->txn, (uint16_t)(i + 1u))) continue;
         if (best < 0 || a->last_use < sc->assets[best].last_use) best = (int)i;
     }
     if (best < 0) return 0;
@@ -739,7 +745,7 @@ static int cfw_object_bounds(const cfw_cache *sc, const customCfwContext *ctx, c
     const int16_t *p = o->p;
     out->l = out->t = out->r = out->b = 0;
     if (!(o->flags & CFW_SHAPE_FLAG_VISIBLE)) return 1;
-    if (o->rotation.angle || o->rotation.duration) return 0;
+    if (o->rotation.angle % (360 * 256) || o->rotation.duration) return 0;
     if (o->type == CFW_SHAPE_PATH || o->type == CFW_SHAPE_TEXT) return 0;
     if (o->type == CFW_SHAPE_TEXT_CACHED) {
         if (o->asset == 0 || o->font == 0) return 1;
@@ -799,8 +805,9 @@ static void cfw_shape_translate(cfw_shape *s, int32_t dx, int32_t dy) {
     }
 }
 
-static void cfw_scene_render(customCfwContext *ctx, cfw_cache *sc, uint8_t *fb, cfw_rectlist *rl) {
-    const uint8_t *store = ctx ? ctx->texture_cache : 0;
+/* The drawn boxes now describe the paint of sc->due (reported to rl unless
+ * empty), so that paint must follow before the display gate is given back. */
+static void cfw_scene_plan(customCfwContext *ctx, cfw_cache *sc, uint8_t *fb, cfw_rectlist *rl) {
     int32_t pw = (int32_t)IMAGE_W, ph = (int32_t)IMAGE_H;
     cfw_box dirty;
     cfw_box_load(sc->stale, &dirty);
@@ -836,11 +843,21 @@ static void cfw_scene_render(customCfwContext *ctx, cfw_cache *sc, uint8_t *fb, 
     sc->full_redraw = 0;
     sc->drawn_fb = fb;
     sc->drawn_bg = sc->bg;
+    if (!cfw_box_empty(&dirty)) {
+        /* GRAY4 packs two pixels per byte: the view starts on an even column */
+        dirty.l &= ~1;
+        dirty.r = (dirty.r + 1) & ~1;
+        if (dirty.r > pw) dirty.r = pw;
+        rl_add(rl, (uint32_t)dirty.l, (uint32_t)dirty.t, (uint32_t)(dirty.r - dirty.l), (uint32_t)(dirty.b - dirty.t));
+    }
+    cfw_box_store(&dirty, sc->due);
+}
+
+static void cfw_scene_paint(customCfwContext *ctx, cfw_cache *sc, uint8_t *fb) {
+    const uint8_t *store = ctx ? ctx->texture_cache : 0;
+    cfw_box dirty;
+    cfw_box_load(sc->due, &dirty);
     if (cfw_box_empty(&dirty)) return;
-    /* GRAY4 packs two pixels per byte: the view starts on an even column */
-    dirty.l &= ~1;
-    dirty.r = (dirty.r + 1) & ~1;
-    if (dirty.r > pw) dirty.r = pw;
     cfw_raster r = { fb + (uint32_t)dirty.t * IMAGE_STRIDE + ((uint32_t)dirty.l >> 1), IMAGE_STRIDE, dirty.r - dirty.l, dirty.b - dirty.t };
     cfw_rectlist scratch;                          /* draws report view coordinates; the panel gets the box */
     scratch.n = 0;
@@ -870,19 +887,20 @@ static void cfw_scene_render(customCfwContext *ctx, cfw_cache *sc, uint8_t *fb, 
             cv_shape_draw(&r, sc->vector_work, &s, &rot, &scratch);
         else cfw_shape_draw(&r, &s, &scratch);
     }
-    rl_add(rl, (uint32_t)dirty.l, (uint32_t)dirty.t, (uint32_t)(dirty.r - dirty.l), (uint32_t)(dirty.b - dirty.t));
+}
+
+static void cfw_scene_render(customCfwContext *ctx, cfw_cache *sc, uint8_t *fb, cfw_rectlist *rl) {
+    cfw_scene_plan(ctx, sc, fb, rl);
+    cfw_scene_paint(ctx, sc, fb);
 }
 
 /* Called by display_copy_hook (display task) while the gate is held for the
- * queued scene frame. */
+ * frame scene_tick queued: paint the box it planned. */
 static void cfw_scene_render_if_due(customCfwContext *ctx, uint8_t *fb) {
     cfw_cache *sc = cfw_cache_peek(ctx);
     if (sc == 0 || !sc->render_due || fb == 0 || fb != sc->fb) return;
     sc->render_due = 0;
-    cfw_rectlist rl;
-    rl.n = 0;
-    rl.direct_submitted = 0;
-    cfw_scene_render(ctx, sc, fb, &rl);
+    cfw_scene_paint(ctx, sc, fb);
 }
 
 /* 0 always, now that the frame aliases the shadow; kept for the dispatcher. */
@@ -925,6 +943,7 @@ static void cfw_rotation_advance(cfw_rotation *t, uint32_t now) {
 }
 
 static void cfw_object_finish(cfw_object *o) {
+    if (o->frames || o->rotation.duration) o->draw |= CFW_DRAW_DIRTY;
     if (o->frames) cfw_object_snap_end(o);
     if (o->rotation.duration) { o->rotation.angle = o->rotation.to; o->rotation.duration = 0; }
 }
@@ -932,6 +951,7 @@ static void cfw_object_finish(cfw_object *o) {
 /* Stop at the value the clock has reached, not the last rendered frame. */
 static void cfw_object_freeze(cfw_object *o) {
     uint32_t now = FW_MS_TICK;
+    if (o->frames || o->rotation.duration) o->draw |= CFW_DRAW_DIRTY;
     cfw_object_advance(o, now);
     o->frames = 0;
     o->duration = 0;
@@ -1041,11 +1061,11 @@ static int cfw_scene_present(customCfwContext *ctx, cfw_cache *sc, int present, 
     uint8_t *fb = cfw_scene_frame(sc);
     if (fb == 0) return -1;
     cfw_scene_render(ctx, sc, fb, rl);
-    if (present) {
+    if (!present) {
+        ctx->shadow_stale = 0;
+    } else if (rl->n) {                         /* an empty list would refresh the whole panel */
         present_buffer(ctx, fb, rl);
         ctx->shadow_stale = 1;
-    } else {
-        ctx->shadow_stale = 0;
     }
     if (!sc->anim_active) cfw_scene_settled(ctx, sc);
     return 0;
@@ -1529,7 +1549,9 @@ static void cfw_txn_commit(cfw_txn *t) {
         o->flags = s.flags;
         o->color = s.color;
         o->width = s.width;
-        for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) o->p[k] = s.p[k];
+        /* the private asset keeps the length the object was defined with */
+        uint32_t len_param = s.type == CFW_SHAPE_TEXT_INLINE ? 4u : s.type == CFW_SHAPE_PATH ? 3u : CFW_SHAPE_PARAMS;
+        for (uint32_t k = 0; k < CFW_SHAPE_PARAMS; k++) if (k != len_param) o->p[k] = s.p[k];
         o->frames = 0;
         o->duration = 0;
         o->rotation.angle = 0;
@@ -2163,16 +2185,20 @@ void scene_tick(void *arg) {
     cfw_rectlist rl;
     rl.n = 0;
     rl.direct_submitted = 0;
-    sc->render_due = 1;                            /* display_copy_hook rasterizes */
-    present_buffer(ctx, sc->fb, &rl);
-    ctx->shadow_stale = 1;
-    if (!rl.direct_submitted) {
-        sc->render_due = 0;
-        FW_DISPLAY_SIGNAL();
-    }
+    cfw_scene_plan(ctx, sc, sc->fb, &rl);
     if (moving) FW_TIMER_START(ctx->scene_timer, sc->period_ms);
     else {
         sc->anim_active = 0;
         cfw_scene_settled(ctx, sc);
     }
+    /* A submitted frame hands the gate to the display task: sc is not ours after it. */
+    if (rl.n) {
+        sc->render_due = 1;                        /* display_copy_hook paints the planned box */
+        present_buffer(ctx, sc->fb, &rl);
+        ctx->shadow_stale = 1;
+        if (rl.direct_submitted) return;
+        sc->render_due = 0;
+        sc->full_redraw = 1;                       /* the planned boxes never reached the panel */
+    }
+    FW_DISPLAY_SIGNAL();
 }

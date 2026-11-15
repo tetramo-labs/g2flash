@@ -467,6 +467,14 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   52 -> an animation tick refreshes only the rows of the box it redraws and
+//         a render that changes nothing refreshes nothing (scene.c); the
+//         cache prepare no longer frees a lost cache outside the display gate,
+//         a staged chunk's asset cannot be evicted by its own transaction, a
+//         frozen or finished animation is redrawn, a re-asserted inline string
+//         keeps its length, full turns keep a bounded box. Mode 11 ends the
+//         volume gate lease; a closed gate counts as capture for the stale
+//         mic check; a lapsed mic lease re-acquires the codec on the next arm.
 //   51 -> a scene render clears and redraws only the box of the objects that
 //         changed, arrived or left (scene.c); a tick or a one-object update
 //         no longer costs a whole-canvas redraw.
@@ -625,7 +633,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/51";
+        static const char caps[] = "GLASSLYCFW/52";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

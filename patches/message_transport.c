@@ -45,12 +45,16 @@ static void cfw_nack_note(uint8_t reason) {
  * the stream's own buffer (cfw_message_received copies it out under the
  * handler's lock), not in the context the two ingress tasks share. */
 
+/* CRC-16/CCITT-FALSE (poly 0x1021, init 0xffff), four bits per table step. */
 static uint16_t cfw_message_crc(const uint8_t *data, uint16_t size) {
+    static const uint16_t nibble[16] = {
+        0x0000u, 0x1021u, 0x2042u, 0x3063u, 0x4084u, 0x50a5u, 0x60c6u, 0x70e7u,
+        0x8108u, 0x9129u, 0xa14au, 0xb16bu, 0xc18cu, 0xd1adu, 0xe1ceu, 0xf1efu,
+    };
     uint16_t crc = 0xffffu;
     for (uint16_t i = 0; i < size; ++i) {
-        crc ^= (uint16_t)data[i] << 8;
-        for (unsigned bit = 0; bit < 8; ++bit)
-            crc = (uint16_t)((crc << 1) ^ ((crc & 0x8000u) ? 0x1021u : 0));
+        crc = (uint16_t)((crc << 4) ^ nibble[(crc >> 12) ^ (data[i] >> 4)]);
+        crc = (uint16_t)((crc << 4) ^ nibble[(crc >> 12) ^ (data[i] & 0x0fu)]);
     }
     return crc;
 }

@@ -184,6 +184,8 @@ def parse_firmware_segments(img):
     n = struct.unpack_from('<I', img, 8)[0]
     if not (0 < n <= 64):
         raise ValueError(f"implausible component count {n} (corrupt header?)")
+    if 0x40 + n*16 > len(img):
+        raise ValueError(f"table of {n} components runs past end of file")
     segs = []
     for i in range(n):
         eid, off, size, crc = struct.unpack_from('<IIII', img, 0x40 + i*16)
@@ -191,6 +193,9 @@ def parse_firmware_segments(img):
         if len(sub) < 128:
             raise ValueError(f"segment {i} subheader runs past end of file")
         ps = struct.unpack_from('<I', sub, 8)[0]
+        if off + 128 + ps > len(img):
+            raise ValueError(f"segment {i} payload ({ps}B at 0x{off+128:x}) runs past end of file "
+                             f"({len(img)}B): truncated image?")
         fn = sub[48:128].split(b'\0')[0].decode('latin1')
         segs.append({'eid':eid,'off':off,'size':size,'crc':crc,'sub':sub,'ps':ps,'fn':fn})
     return segs
@@ -291,6 +296,8 @@ def recompute_checksums(path):
         # The mainApp internal preamble CRC32 lives INSIDE the payload, so fix it
         # before computing the component CRC32C (which covers the whole payload).
         if fn.endswith('s200_firmware_ota.bin'):
+            if ps < APP_PREAMBLE:
+                raise ValueError(f"segment {i} ({fn}) payload is smaller than its {APP_PREAMBLE}-byte preamble")
             pre=zlib.crc32(bytes(data[off+128+8:off+128+ps]))&0xffffffff
             old=struct.unpack_from('<I',data,off+128+4)[0]
             if old!=pre:
@@ -320,6 +327,12 @@ def recompute_checksums(path):
         raise
     print(f"updated {path}: {changed} checksum field(s) rewritten")
     return changed
+
+class ProtocolError(RuntimeError):
+    """The arm answered and refused (a FILE_CHECK status, repeated block NAKs)."""
+
+class TransportError(RuntimeError):
+    """The link to the arm failed underneath the protocol (DroidBridge HTTP errors)."""
 
 # ---------------- DroidBridge client ----------------
 class Bridge:
@@ -354,8 +367,8 @@ class Bridge:
                     if resp.will_close:
                         self._http.close(); self._http=None
                     if not 200 <= resp.status < 300:
-                        raise RuntimeError(f"DroidBridge {verb} {path} failed: HTTP {resp.status}: "
-                                           f"{body.decode('utf-8','replace')[:300]}")
+                        raise TransportError(f"DroidBridge {verb} {path} failed: HTTP {resp.status}: "
+                                             f"{body.decode('utf-8','replace')[:300]}")
                     return body
                 except (http.client.HTTPException, OSError):
                     if self._http is not None:
@@ -476,11 +489,18 @@ def match_scanned_device(devs, address, side):
         m=G2_NAME_RE.search(name_of(d,adv))
         if m and m.group(3).lower()==want_tail and (not side_letter or m.group(2).upper()==side_letter):
             return d
-    # 3) last resort: exactly one advertised arm on the requested side
-    if side_letter:
-        cands=[d for a,(d,adv) in devs.items()
+    # 3) last resort, for a CoreBluetooth UUID only (it can change between hosts
+    # and scans): exactly one advertised arm on the requested side. A MAC that
+    # matched neither way belongs to an arm that is not advertising, and the one
+    # that is may be another pair's.
+    if side_letter and len(want)==32:
+        cands=[(d,adv) for a,(d,adv) in devs.items()
                if (lambda m: m and m.group(2).upper()==side_letter)(G2_NAME_RE.search(name_of(d,adv)))]
-        if len(cands)==1: return cands[0]
+        if len(cands)==1:
+            d,adv=cands[0]
+            print(f"    [no arm matches {address}; using the only {side} arm advertising: "
+                  f"{name_of(d,adv)!r} @ {d.address}]")
+            return d
     return None
 
 class LocalBleTransport:
@@ -611,6 +631,18 @@ class LocalBleTransport:
 
 # ---------------- ack handling ----------------
 DEBUG=False
+
+def lost_session_errors():
+    """Exceptions that mean the GATT session is gone and must be rebuilt, as
+    opposed to a protocol rejection on a live session. bleak is optional."""
+    errors=[TimeoutError, OSError, EOFError, http.client.HTTPException, TransportError]
+    try:
+        from bleak.exc import BleakError
+    except ImportError:
+        pass
+    else:
+        errors.append(BleakError)
+    return tuple(errors)
 def parse_rx(frame):
     """unwrap an aa12 reply envelope -> (sid, pb). pb is [opcode,status,...]."""
     if len(frame)>=10 and frame[0]==0xaa and frame[1]==0x12:
@@ -686,7 +718,7 @@ def flash_component(tp, seg, img, stop_before, comp_index=-1):
     sub=seg['sub']; ps=seg['ps']; fn=seg['fn']
     payload=img[seg['off']+128:seg['off']+128+ps]
     st=send_data_msg(tp, ctrl_frames(0x01, sub), 0x01)            # FILE_CHECK / OTA_TRANSMIT_INFORMATION
-    if st: raise RuntimeError(f"FILE_CHECK rejected status={st} ({rsp_name(st)})")
+    if st: raise ProtocolError(f"FILE_CHECK rejected status={st} ({rsp_name(st)})")
     if not allowed("flash", stop_before):
         return None
     nb=-(-len(payload)//4096)
@@ -709,7 +741,7 @@ def flash_component(tp, seg, img, stop_before, comp_index=-1):
             resends+=1
             print(f"     block {b}/{nb} NAK={st} ({rsp_name(st)}) resend {tries+1}/{BLOCK_NAK_RETRIES}")
         else:
-            raise RuntimeError(f"block {b} NAK'd {BLOCK_NAK_RETRIES}x")
+            raise ProtocolError(f"block {b} NAK'd {BLOCK_NAK_RETRIES}x")
         if b%100==0 or b==nb-1: print(f"     {fn}: block {b+1}/{nb}")
     print(f"     {fn}: data phase done in {time.monotonic()-data_started:.1f}s,"
           f" {resends} block resend(s); sending END")
@@ -722,15 +754,22 @@ def flash_component_with_retry(tp, i, seg, img, stop_before, recover_session=Non
     fn=seg['fn']; ps=seg['ps']
     payload=img[seg['off']+128:seg['off']+128+ps]
     print(f"[{i}] {fn} ({ps}B crc32c=0x{crc32c_msb(payload):08x})")
+    lost_session=lost_session_errors()
     for attempt in range(COMPONENT_RETRIES):
-        timed_out=False
+        lost=False
         if attempt: print(f"   re-flash attempt {attempt+1}/{COMPONENT_RETRIES}")
         try:
             end_st=flash_component(tp, seg, img, stop_before, comp_index=i)
-        except (TimeoutError, RuntimeError) as e:
+        except ProtocolError as e:
             print(f"   block phase failed: {e}")
             end_st=-1
-            timed_out=isinstance(e, TimeoutError)
+        except lost_session as e:
+            print(f"   block phase failed ({type(e).__name__}): {e}")
+            end_st=-1
+            lost=True
+        except RuntimeError as e:
+            print(f"   block phase failed: {e}")
+            end_st=-1
         if end_st is None: return None
         if end_st in END_OK:
             print(f"   END verify OK ({fn}) status={end_st} ({rsp_name(end_st)})")
@@ -738,10 +777,11 @@ def flash_component_with_retry(tp, i, seg, img, stop_before, recover_session=Non
         if end_st>=0:
             print(f"   END verify FAILED status={end_st} ({rsp_name(end_st)})")
         if attempt+1 < COMPONENT_RETRIES:
-            if end_st==-1 and timed_out and recover_session is not None:
+            if lost and recover_session is not None:
                 # A bare timeout is ambiguous at the block layer and frequently
-                # means 2.2.9 has dropped GATT.  Rebuild the connection and issue
-                # a fresh BEGIN before FILE_CHECK restarts the whole component.
+                # means 2.2.9 has dropped GATT; a write that raised did see the
+                # link go. Rebuild the connection and issue a fresh BEGIN before
+                # FILE_CHECK restarts the whole component.
                 recover_session()
             else:
                 while not tp.notes.empty(): tp.notes.get()

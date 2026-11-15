@@ -142,6 +142,7 @@ typedef struct cfw_cache_s {
     uint8_t  drawn_bg;      /* background the panel was last cleared to */
     uint8_t  pad1[2];
     int16_t  stale[4];      /* box freed objects left on the panel since the last render */
+    int16_t  due[4];        /* box the planned render clears and redraws; empty when nothing changed */
     uint8_t *drawn_fb;      /* the buffer the drawn boxes describe; 0 = none yet */
     uint16_t tag;           /* request echoed in the settled report (field 129) */
     uint16_t last_show_request;

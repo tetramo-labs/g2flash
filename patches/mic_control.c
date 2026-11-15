@@ -512,6 +512,7 @@ static uint32_t mic_pack_adpcm(const int16_t *pcm, uint32_t bytes, uint8_t nch, 
 }
 
 static void mic_finish_unregister(customCfwContext *ctx);
+static int vg_lease_live(const customCfwContext *ctx, uint32_t now);   /* volume_gate.c */
 void mic_watchdog_tick(void *arg);
 void mic_settle_tick(void *arg);
 static void mic_complete_bringup(customCfwContext *ctx);
@@ -1236,6 +1237,9 @@ void mic_watchdog_tick(void *arg) {
     }
     ctx->mic_lease_deadline = 0;
     mic_session_stop(ctx);
+    /* the stop released the LEFT's manager slot: the next arm acquires it again */
+    ctx->mic_codec_cycled = 0u;
+    ctx->mic_codec_ready_tick = 0u;
 }
 
 static void mic_lease_renew(customCfwContext *ctx) {
@@ -1378,8 +1382,10 @@ void mic_apply_control(const uint8_t *data, uint32_t len) {
         if (ctx->mic_hw_armed && !stale) {
             if (ctx->mic_settle_stage != 0u && ctx->mic_stage_deadline_tick
                 && (int32_t)(now - ctx->mic_stage_deadline_tick) > 0) stale = 1;
-            if (ctx->mic_settle_stage == 0u && (int32_t)(now - ctx->mic_armed_tick) > 20000
-                && (ctx->mic_last_tap_tick == 0u || (int32_t)(now - ctx->mic_last_tap_tick) > 3000)) stale = 1;
+            if (ctx->mic_settle_stage == 0u && (int32_t)(now - ctx->mic_armed_tick) > 20000) {
+                uint32_t heard = vg_heard_tick(&ctx->volume_gate, vg_lease_live(ctx, now), ctx->mic_last_tap_tick);
+                if (heard == 0u || (int32_t)(now - heard) > 3000) stale = 1;
+            }
         }
         if (stale) {
             ctx->mic_recoveries++;
