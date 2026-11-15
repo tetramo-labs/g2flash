@@ -174,7 +174,7 @@ static void settings(void) {
     sends = 0;
     assert(settings_send_wrapper(1,9,buf,44) == 0 && sends == 2);
     const uint8_t *caps = field(sent[0],sent_len[0],100,&n);
-    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/52",13) == 0);
+    assert(caps && n == 13 && memcmp(caps,"GLASSLYCFW/53",13) == 0);
     assert(sent_len[0] == 44 + 16 + 27 + 24 + 20 + 27); /* revision string, diagnostics, microphone, BLE and volume gate status */
     assert(field(sent[0],sent_len[0],107,&n) && n == 24);
     assert(field(sent[0],sent_len[0],133,&n) && n == 24);
@@ -248,10 +248,13 @@ static void ble_link(void) {
     assert(st[3] == 0 && st[4] == 1 && st[5] == 0xa3 && st[6] == 0xa3);
     assert(st[7] == 0x0c && st[8] == 0 && st[9] == 0x18 && st[10] == 0 && st[11] == 0 && st[12] == 0);
     assert(st[13] == 12 && st[14] == 0 && st[15] == 0 && st[16] == 0); /* live link */
+    assert(ble_phone_linked());
     ble_conn_ptr = 0;
     st = ble_status();
     assert(st[13] == 0 && st[14] == 0 && st[15] == 0 && st[16] == 0); /* no connection: zeros */
+    assert(!ble_phone_linked());
     ble_conn_ptr = ble_conn;
+    ble_conn[0x18] = 0; assert(!ble_phone_linked()); ble_conn[0x18] = 12;
     faceclaw_scan_settings_control(bad, sizeof(bad));
     faceclaw_scan_settings_control(old_version, sizeof(old_version));
     faceclaw_scan_settings_control(unknown_op, sizeof(unknown_op));

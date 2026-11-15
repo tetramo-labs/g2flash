@@ -532,6 +532,35 @@ after a settings read, as a separate notification rather than inside the
 settings reply. Detect support by revision 24 or later, or by the `RB` report.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
 
+### Bounded rotations and paths, compass watchdog, timing on request (revision 53)
+
+Revision 53 (`GLASSLYCFW/53`) bounds the objects revision 51 still redrew the
+whole canvas for. A rotating or rotated shape (types 1-13) or path is bounded
+by the square around the circle its farthest corner sweeps about the pivot,
+and a path's box comes from its compiled edges under the current origin and
+scale. A spinner, a compass needle or a moving SVG path now redraws only that
+box on each animation tick. Built-in font strings without a box still redraw
+everything.
+
+A compass started with mode 10 is now stopped by a 15 s timer on the right lens
+once two checks in a row find no phone link (the connection record
+`ble_link.c` reports in field 128), so a phone that disappears without a mode 10
+stop or a mode 11 cleanup no longer leaves the magnetometer and heading reports
+running. The phone's sensor service drops its subscriptions on disconnect, so
+nothing expects the compass to survive one.
+
+Mode 7 gains sub 3 (time the worker and presents) and sub 4 (stop). The DWT
+cycle counter now runs only while timing is on or the diagnostics overlay is
+shown; otherwise `last_worker_us` and `last_present_us` read 0 and the counter
+and TRCENA are restored to their state before the CFW first enabled them.
+
+Host tests: `test_rotation_bounds` in the shapes suite (fixed spins checked
+against a full redraw, plus 400 random scenes of shapes and paths with random
+pivots, spins and glides, checking that every object draws inside its box and
+that nothing changes outside the painted box), and the link check in the
+upstream suite. The compass timer and the timing switch are compile-checked
+only; revision 53 has not been tested on hardware.
+
 ### Tick refreshes and cache fixes (revision 52)
 
 Revision 52 (`GLASSLYCFW/52`) makes an animation tick refresh only the rows of

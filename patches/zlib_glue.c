@@ -226,6 +226,8 @@ typedef int (*sem_take_fn)(void *sem, uint32_t ticks);
 #define FW_DISPLAY_SEM     (*(void * volatile *)0x20077a34U)
 #define FW_DISPLAY_GATE_TICKS 1000u
 extern void cfw_time_calibrate(void);
+static void cfw_timing_release(customCfwContext *ctx);   /* debug.c (same TU) */
+static int ble_phone_linked(void);                       /* ble_link.c (same TU) */
 #define BUZZ_TIMER_ADDR 0x20077834U                   /* RAM: buzzer osTimer handle global */
 
 #define PANEL_W 640u
@@ -238,6 +240,38 @@ extern void cfw_time_calibrate(void);
 #define IMAGE_BYTES (IMAGE_STRIDE * IMAGE_H)
 #define IMAGE_X 0u
 #define IMAGE_Y 0u
+
+#define COMPASS_LINK_CHECK_MS 15000u
+
+/* RTOS timer thread: a compass whose phone went away without stopping it
+ * (no mode 10 stop, no mode 11) is stopped once two checks in a row find this
+ * lens without a phone link. Referenced through CFW_FN_ADDR. */
+__attribute__((used)) static void compass_watchdog_tick(void *arg) {
+    customCfwContext *ctx = (customCfwContext *)arg;
+    if (ctx == 0 || ctx->magic != CFW_CTX_MAGIC || !ctx->compass_forward) return;
+    if (ble_phone_linked()) {
+        ctx->compass_unlinked = 0;
+    } else if (++ctx->compass_unlinked >= 2u) {
+        ctx->compass_unlinked = 0;
+        ctx->compass_forward = 0;
+        FW_COMPASS_STOP();
+        return;
+    }
+    FW_TIMER_START(ctx->compass_watchdog_timer, COMPASS_LINK_CHECK_MS);
+}
+
+static void compass_watch(customCfwContext *ctx) {
+    ctx->compass_unlinked = 0;
+    if (ctx->compass_watchdog_timer == 0)
+        ctx->compass_watchdog_timer = FW_TIMER_NEW(CFW_FN_ADDR(compass_watchdog_tick), 0, ctx, 0);
+    if (ctx->compass_watchdog_timer == 0) return;
+    FW_TIMER_STOP(ctx->compass_watchdog_timer);
+    FW_TIMER_START(ctx->compass_watchdog_timer, COMPASS_LINK_CHECK_MS);
+}
+
+static void compass_unwatch(customCfwContext *ctx) {
+    if (ctx->compass_watchdog_timer) FW_TIMER_STOP(ctx->compass_watchdog_timer);
+}
 
 /* Buzzer tone-sequence timer callback (mode-5 kind 4). Plays seq_steps[cursor],
  * advances the cursor, and re-arms this timer for that step's ms; after the final
@@ -493,6 +527,7 @@ static int image_dispatch(const uint8_t *src, uint32_t srclen, int present, cfw_
         /* Diagnostic control (no display change). [7][sub]:
          *   0 -> clear the sticky flags and frame-order tracking (use between tests)
          *   1 -> hide the flag overlay      2 -> show the flag overlay
+         *   3 -> time the worker and presents  4 -> stop timing (revision 53)
          * Runs on each selected lens, so it clears/toggles
          * both eyes. */
         customCfwContext *ctx = getCustomCfwContext();
@@ -511,8 +546,14 @@ static int image_dispatch(const uint8_t *src, uint32_t srclen, int present, cfw_
                 ctx->recent_pos = 0;
             } else if (sub == 1) {
                 ctx->diag_hide = 1;
+                cfw_timing_release(ctx);
             } else if (sub == 2) {
                 ctx->diag_hide = 0;
+            } else if (sub == 3) {
+                ctx->perf_timing = 1;
+            } else if (sub == 4) {
+                ctx->perf_timing = 0;
+                cfw_timing_release(ctx);
             }
         }
         return 0;
@@ -525,6 +566,8 @@ static int image_dispatch(const uint8_t *src, uint32_t srclen, int present, cfw_
          *   [10][2][interval16][min-change16] starts, then applies the supplied
          *       little-endian configuration through the stock sensor-hub API.
          *       interval is clamped to 50..2000 ms; min-change is passed through.
+         * From revision 53 a timer stops the compass about 15-30 s after the
+         * right lens loses its phone link, if nothing stopped it before.
          * The stock compass implementation owns the sensor setup, calibration,
          * sampling, and heading computation. Heading events normally reach the
          * sid-0x08 notifier only through Navigation's UI handler; mode 10 also
@@ -536,6 +579,7 @@ static int image_dispatch(const uint8_t *src, uint32_t srclen, int present, cfw_
         customCfwContext *ctx = getCustomCfwContext();
         if (ctx == 0) return -1;
         if (src[1] == 0) {
+            compass_unwatch(ctx);
             ctx->compass_forward = 0;
             return FW_SIDE() == 1 ? FW_COMPASS_STOP() : 0;
         }
@@ -557,6 +601,7 @@ static int image_dispatch(const uint8_t *src, uint32_t srclen, int present, cfw_
                     if (r != 0) FW_COMPASS_STOP();
                 }
                 if (r != 0) ctx->compass_forward = 0;
+                else compass_watch(ctx);
                 return r;
             }
             return 0;
@@ -873,6 +918,9 @@ static int cfw_cleanup_session(void) {
 
     int compass_was_forwarding = ctx->compass_forward != 0;
     ctx->compass_forward = 0;
+    compass_unwatch(ctx);
+    if (ctx->compass_watchdog_timer && FW_TIMER_DELETE(ctx->compass_watchdog_timer) == 0)
+        ctx->compass_watchdog_timer = 0;
     if (compass_was_forwarding && FW_SIDE() == 1) FW_COMPASS_STOP();
 
     int launch_dashboard = ctx->wake_dashboard_pending != 0;
@@ -888,6 +936,7 @@ static int cfw_cleanup_session(void) {
     /* Diagnostics are inert while hidden. Keep their sticky history for later
      * inspection, but make sure no Faceclaw overlay reaches the stock session. */
     ctx->diag_hide = 1;
+    cfw_timing_release(ctx);
 
     if (launch_dashboard) FW_APP_START(1, 0, 0, 0);
     return 0;

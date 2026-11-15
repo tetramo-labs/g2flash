@@ -229,6 +229,12 @@ unsigned ble_append_status(unsigned char *buf, unsigned len, unsigned capacity) 
     return pb_append_bytes_field(buf, len, capacity, 128u, body, sizeof(body));
 }
 
+/* This lens has a live phone connection (the record field 128 reports). */
+static int ble_phone_linked(void) {
+    const uint8_t *conn = BLE_CONN();
+    return conn != 0 && ble_read16(conn + BLE_CONN_INTERVAL) != 0;
+}
+
 /* Mode-11 session cleanup: a departing custom app leaves the link at stock speed. */
 static void ble_cleanup_session(void) {
     customCfwContext *ctx = BLE_PEEK();

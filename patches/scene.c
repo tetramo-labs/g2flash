@@ -738,15 +738,66 @@ static int cfw_cached_text_extent(const customCfwContext *ctx, const cfw_asset *
     return 1;
 }
 
+/* The pixel box of a PATH object's edges as cv_path_draw places them, or 0
+ * when the object draws nothing. */
+static int cfw_path_bounds(const cfw_cache *sc, const customCfwContext *ctx, const cfw_object *o, cfw_box *out) {
+    const cfw_path *path = cfw_object_path(sc, ctx->texture_cache, o);
+    if (path == 0 || path->count == 0) return 0;
+    uint32_t count = path->count;
+    if (count > CFW_PATH_MAX_EDGES) count = CFW_PATH_MAX_EDGES;
+    int32_t l = INT32_MAX, t = INT32_MAX, r = INT32_MIN, b = INT32_MIN;
+    for (uint32_t i = 0; i < count; i++) {
+        const cfw_edge *e = &path->edges[i];
+        if (e->x0 < l) l = e->x0; if (e->x0 > r) r = e->x0;
+        if (e->x1 < l) l = e->x1; if (e->x1 > r) r = e->x1;
+        if (e->y0 < t) t = e->y0; if (e->y0 > b) b = e->y0;
+        if (e->y1 < t) t = e->y1; if (e->y1 > b) b = e->y1;
+    }
+    /* the scale is monotonic, so the extreme edges stay extreme */
+    int32_t scale = cfw_clamp(o->p[2], 0, 2048);
+    int32_t ox = (int32_t)o->p[0] * 16, oy = (int32_t)o->p[1] * 16;
+    l = l * scale / 256 + ox; r = r * scale / 256 + ox;
+    t = t * scale / 256 + oy; b = b * scale / 256 + oy;
+    out->l = cfw_div_floor(l, 16) - 2; out->t = cfw_div_floor(t, 16) - 2;
+    out->r = cfw_div_floor(r, 16) + 3; out->b = cfw_div_floor(b, 16) + 3;
+    return 1;
+}
+
+/* Widen `box` to every pose a rotation about the object's pivot can reach: the
+ * square around the circle through its farthest corner. 0 when too far out. */
+static int cfw_rotation_bounds(const cfw_object *o, cfw_box *box) {
+    int32_t px = o->rotation.px, py = o->rotation.py;
+    int32_t dl = px - box->l, dr = box->r - px, dt = py - box->t, db = box->b - py;
+    int32_t dx = dl > dr ? dl : dr, dy = dt > db ? dt : db;
+    if (dx > 4096 || dy > 4096) return 0;
+    int32_t rad = (int32_t)cfw_isqrt((uint32_t)(dx * dx + dy * dy)) + 3;
+    box->l = px - rad; box->t = py - rad; box->r = px + rad + 1; box->b = py + rad + 1;
+    return 1;
+}
+
+static int cfw_object_extent(const cfw_cache *sc, const customCfwContext *ctx, const cfw_object *o, cfw_box *out);
+
 /* 1 and the box every pixel of `o`'s current record lies in; 0 when its extent
  * cannot be bounded without drawing it. */
 static int cfw_object_bounds(const cfw_cache *sc, const customCfwContext *ctx, const cfw_object *o, cfw_box *out) {
-    int32_t pw = (int32_t)IMAGE_W, ph = (int32_t)IMAGE_H;
-    const int16_t *p = o->p;
     out->l = out->t = out->r = out->b = 0;
     if (!(o->flags & CFW_SHAPE_FLAG_VISIBLE)) return 1;
-    if (o->rotation.angle % (360 * 256) || o->rotation.duration) return 0;
-    if (o->type == CFW_SHAPE_PATH || o->type == CFW_SHAPE_TEXT) return 0;
+    if (!cfw_object_extent(sc, ctx, o, out)) return 0;
+    int rotates = o->type <= CFW_SHAPE_PIE || o->type == CFW_SHAPE_PATH;
+    if (!rotates || cfw_box_empty(out)) return 1;
+    if (o->rotation.angle % (360 * 256) == 0 && o->rotation.duration == 0) return 1;
+    return cfw_rotation_bounds(o, out);
+}
+
+/* The unrotated box of a visible object. */
+static int cfw_object_extent(const cfw_cache *sc, const customCfwContext *ctx, const cfw_object *o, cfw_box *out) {
+    int32_t pw = (int32_t)IMAGE_W, ph = (int32_t)IMAGE_H;
+    const int16_t *p = o->p;
+    if (o->type == CFW_SHAPE_TEXT) return 0;
+    if (o->type == CFW_SHAPE_PATH) {
+        if (!cfw_path_bounds(sc, ctx, o, out)) out->l = out->t = out->r = out->b = 0;
+        return 1;
+    }
     if (o->type == CFW_SHAPE_TEXT_CACHED) {
         if (o->asset == 0 || o->font == 0) return 1;
         int32_t ext[3];

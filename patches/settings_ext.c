@@ -467,6 +467,11 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   53 -> rotating and rotated shapes and paths are bounded, so they redraw
+//         their box instead of the whole canvas (scene.c); a timer stops a
+//         compass whose right lens lost its phone link for 15-30 s; mode 7
+//         subs 3/4 turn worker/present timing on and off, and
+//         the cycle counter is left as found while nobody wants timings.
 //   52 -> an animation tick refreshes only the rows of the box it redraws and
 //         a render that changes nothing refreshes nothing (scene.c); the
 //         cache prepare no longer frees a lost cache outside the display gate,
@@ -633,7 +638,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/52";
+        static const char caps[] = "GLASSLYCFW/53";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

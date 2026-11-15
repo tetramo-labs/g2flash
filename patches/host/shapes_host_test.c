@@ -1479,6 +1479,164 @@ static void test_partial_render(void) {
     CHECK(count_color(sc->fb, 9) == 10000 && pixel_at(sc->fb, 529, 350) == 9 && pixel_at(sc->fb, 425, 350) == 0);
 }
 
+/* Revision 53: rotating shapes and paths are bounded, so each frame redraws
+ * their box; every partial render must match a full redraw of the same state. */
+static uint32_t g_rng = 12345;
+static int32_t rnd(int32_t lo, int32_t hi) { g_rng = g_rng * 1103515245u + 12345u; return lo + (int32_t)((g_rng >> 8) % (uint32_t)(hi - lo + 1)); }
+
+static int matches_full_redraw(cfw_cache *sc) {
+    static uint8_t partial[IMAGE_BYTES];
+    for (uint32_t i = 0; i < IMAGE_BYTES; i++) partial[i] = sc->fb[i];
+    cfw_rectlist rl = { 0 };
+    sc->full_redraw = 1;
+    cfw_scene_render(&g_ctx, sc, sc->fb, &rl);
+    for (uint32_t i = 0; i < IMAGE_BYTES; i++) if (partial[i] != sc->fb[i]) return 0;
+    return 1;
+}
+
+/* Every pixel each object draws on its own lies inside the box it keeps. */
+static int objects_inside_bounds(cfw_cache *sc) {
+    static uint8_t alone[IMAGE_BYTES];
+    cfw_raster r = { alone, IMAGE_STRIDE, (int32_t)IMAGE_W, (int32_t)IMAGE_H };
+    for (uint32_t i = 0; i < sc->active_count; i++) {
+        const cfw_object *o = &sc->objects[sc->active[i]];
+        if (!(o->flags & CFW_SHAPE_FLAG_VISIBLE)) continue;
+        bzero(alone, IMAGE_BYTES);
+        cfw_shape sh;
+        cfw_object_shape(sc, g_ctx.texture_cache, o, &sh);
+        sh.color = 15;
+        cfw_rectlist scratch = { 0 };
+        if (o->type == CFW_SHAPE_PATH) {
+            const cfw_path *path = cfw_object_path(sc, g_ctx.texture_cache, o);
+            if (path) cv_path_draw(&r, sc->vector_work, path, sh.p, &o->rotation, 15);
+        } else cv_shape_draw(&r, sc->vector_work, &sh, &o->rotation, &scratch);
+        cfw_box b;
+        cfw_box_load(o->drawn, &b);
+        for (int32_t y = 0; y < (int32_t)IMAGE_H; y++)
+            for (int32_t x = 0; x < (int32_t)IMAGE_W; x++)
+                if (pixel_at(alone, x, y) && (x < b.l || x >= b.r || y < b.t || y >= b.b)) {
+                    printf("object %u type %u draws %d,%d outside %d %d %d %d\n", o->id, o->type, x, y, b.l, b.t, b.r, b.b);
+                    return 0;
+                }
+    }
+    return 1;
+}
+
+/* A partial render leaves nothing stale outside the box it painted. */
+static int nothing_stale_outside_paint(cfw_cache *sc) {
+    static uint8_t partial[IMAGE_BYTES];
+    cfw_box due;
+    cfw_box_load(sc->due, &due);
+    for (uint32_t i = 0; i < IMAGE_BYTES; i++) partial[i] = sc->fb[i];
+    cfw_rectlist rl = { 0 };
+    sc->full_redraw = 1;
+    cfw_scene_render(&g_ctx, sc, sc->fb, &rl);
+    for (int32_t y = 0; y < (int32_t)IMAGE_H; y++)
+        for (int32_t x = 0; x < (int32_t)IMAGE_W; x++) {
+            if (x >= due.l && x < due.r && y >= due.t && y < due.b) continue;
+            if (pixel_at(partial, x, y) != pixel_at(sc->fb, x, y)) {
+                printf("stale pixel %d,%d outside %d %d %d %d\n", x, y, due.l, due.t, due.r, due.b);
+                return 0;
+            }
+        }
+    return 1;
+}
+
+static uint32_t star_path(uint8_t *cmds, int cx, int cy, int r) {
+    static const int8_t pts[5][2] = { { 0, -10 }, { 6, 8 }, { -9, -3 }, { 9, -3 }, { -6, 8 } };
+    uint32_t n = 0;
+    for (int i = 0; i < 5; i++) {
+        cmds[n++] = i ? 1 : 0;
+        put16(cmds + n, (cx + pts[i][0] * r / 10) * 16); n += 2;
+        put16(cmds + n, (cy + pts[i][1] * r / 10) * 16); n += 2;
+    }
+    cmds[n++] = 4;
+    return n;
+}
+
+static void test_rotation_bounds(void) {
+    fresh();
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    uint8_t r[20], cmds[64], prec[96];
+    { int16_t v[] = { 60, 60, 80, 30, 6 }; rec(r, CFW_SHAPE_RECT_FILL, 15, 0, v, 5); }
+    m_begin(1); m_put_object(1, 1, r, 20);
+    { int16_t v[] = { 450, 80, 560, 140 }; rec(r, CFW_SHAPE_LINE, 12, 3, v, 4); }
+    m_put_object(2, 1, r, 20);
+    uint32_t pn = star_path(cmds, 0, 0, 40);
+    uint8_t *pe = rec_path(prec, 9, 0, 300, 360, 384, cmds, pn);
+    m_put_object(3, 1, prec, (uint32_t)(pe - prec));
+    { int16_t v[] = { 600, 440, 10, 10, 0 }; rec(r, CFW_SHAPE_RECT_FILL, 7, 0, v, 5); }
+    m_put_object(4, 1, r, 20);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    uint32_t ids[] = { 4, 1, 2, 3 }, vers[] = { 1, 1, 1, 1 };
+    m_show(2, 1, 0); m_refs(ids, vers, 4);
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && count_color(sc->fb, 9) > 1000);
+    uint32_t corner = count_color(sc->fb, 7);
+    /* a static path moved: only its old and new box */
+    m_show(3, 0x01 | 0x02, 0); m_refs(0, 0, 0);
+    { uint8_t *p = g_msg + g_len; p[0] = 3; put32(p + 1, 3); put16(p + 5, 20); put16(p + 7, 0); g_len += 9; }
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(g_present_rect.w < 200 && g_present_rect.h < 200 && matches_full_redraw(sc));
+    /* each spinning object redraws the circle its pivot sweeps, never the panel */
+    m_show(4, 0x01 | 0x02, 0); m_refs(0, 0, 0);
+    m_rotate(1, 360 * 256, 100, 75, 330);
+    m_rotate(2, -90 * 256, 450, 80, 330);
+    m_rotate(3, 180 * 256, 320, 360, 330);
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && sc->anim_active);
+    for (int f = 0; f < 12 && sc->anim_active; f++) {
+        tick();
+        CHECK(g_present_n == 1 && (g_present_rect.w < IMAGE_W || g_present_rect.h < IMAGE_H));
+        CHECK(count_color(sc->fb, 7) == corner && matches_full_redraw(sc));
+    }
+    CHECK(!sc->anim_active);
+    /* a shape left at an angle stays bounded when something else moves */
+    m_show(5, 0x01 | 0x02, 0); m_refs(0, 0, 0); m_rotate(1, 30 * 256, 100, 75, 0);
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    CHECK(g_present_rect.w < 200 && matches_full_redraw(sc));
+
+    /* random shapes, pivots, spins and glides */
+    for (int round = 0; round < 400; round++) {
+        fresh();
+        sc = cfw_cache_peek(&g_ctx);
+        uint32_t n = (uint32_t)rnd(2, 8), rid[8], rver[8];
+        m_begin(1);
+        for (uint32_t i = 0; i < n; i++) {
+            uint8_t type = (uint8_t)rnd(0, 13);
+            int16_t v[8];
+            for (int k = 0; k < 8; k++) v[k] = (int16_t)(k & 1 ? rnd(-40, 520) : rnd(-40, 680));
+            if (type == CFW_SHAPE_RECT || type == CFW_SHAPE_RECT_FILL) { v[2] = (int16_t)rnd(1, 160); v[3] = (int16_t)rnd(1, 120); v[4] = (int16_t)rnd(0, 20); }
+            if (type >= CFW_SHAPE_CIRCLE && type <= CFW_SHAPE_CIRCLE_FILL) v[2] = (int16_t)rnd(1, 90);
+            if (type == CFW_SHAPE_ARC || type == CFW_SHAPE_PIE) { v[2] = (int16_t)rnd(1, 90); v[3] = (int16_t)rnd(0, 359); v[4] = (int16_t)(v[3] + rnd(10, 350)); }
+            if (type == 0) {
+                pn = star_path(cmds, rnd(-30, 30), rnd(-30, 30), rnd(10, 60));
+                pe = rec_path(prec, (uint8_t)rnd(1, 15), (uint8_t)rnd(0, 1), v[0], v[1], rnd(64, 700), cmds, pn);
+                m_put_object(i + 1, 1, prec, (uint32_t)(pe - prec));
+            } else {
+                rec(r, type, (uint8_t)rnd(1, 15), (uint8_t)rnd(0, 6), v, 8);
+                m_put_object(i + 1, 1, r, 20);
+            }
+            rid[i] = i + 1; rver[i] = 1;
+        }
+        CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+        m_show(2, 1, 0); m_refs(rid, rver, n);
+        CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+        for (int step = 0; step < 3; step++) {
+            m_show((uint16_t)(3 + step), 0x01 | 0x02, 0); m_refs(0, 0, 0);
+            for (uint32_t i = 0; i < n; i++) {
+                int what = rnd(0, 3);
+                if (what == 1) m_rotate(i + 1, rnd(-720, 720) * 256 + rnd(0, 255), rnd(-50, 690), rnd(-50, 530), (uint16_t)rnd(0, 300));
+                else if (what == 2) m_glide(i + 1, rnd(-60, 60), rnd(-60, 60), (uint8_t)rnd(2, 6), EASE);
+            }
+            CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+            CHECK(objects_inside_bounds(sc) && nothing_stale_outside_paint(sc));
+            for (int f = 0; f < 12 && sc->anim_active; f++) {
+                tick();
+                CHECK(objects_inside_bounds(sc) && nothing_stale_outside_paint(sc));
+            }
+        }
+    }
+}
+
 static void test_upload_continuation(void) {
     fresh();
     cfw_cache *sc = cfw_cache_peek(&g_ctx);
@@ -1702,6 +1860,7 @@ int main(int argc, char **argv) {
     test_transaction_rollback();
     test_upload_continuation();
     test_partial_render();
+    test_rotation_bounds();
     test_tick_present();
     test_freeze_redraw();
     test_staged_chunk_eviction();

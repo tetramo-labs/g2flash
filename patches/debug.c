@@ -50,7 +50,27 @@ static uint32_t cfw_cyc_per_ms(customCfwContext *ctx) {
  * region being measured. Regions may nest: by the time an inner start runs, the outer
  * one has already primed the calibration. end converts to microseconds; the subtraction
  * is unsigned, so it tolerates one CYCCNT wrap (~17 s at 250 MHz). */
+/* Revision 53: the counter runs only while the phone wants timings (perf logs)
+ * or the overlay shows them; otherwise both measurements read 0. */
+static int cfw_timing_wanted(const customCfwContext *ctx) {
+    return ctx && (ctx->perf_timing || !ctx->diag_hide);
+}
+
+/* Give the debug block back as we found it once nobody wants timings. */
+static void cfw_timing_release(customCfwContext *ctx) {
+    if (!ctx || !ctx->dwt_owned || cfw_timing_wanted(ctx)) return;
+    if (!(ctx->dwt_prior & 1u)) DWT_CTRL &= ~1u;
+    if (!(ctx->dwt_prior & 2u)) DWT_DEMCR &= ~(1u << 24);
+    ctx->dwt_owned = 0;
+}
+
 static void cfw_time_start(uint32_t *t) {
+    customCfwContext *ctx = peekCustomCfwContext();
+    if (!cfw_timing_wanted(ctx)) { *t = 0; return; }
+    if (!ctx->dwt_owned) {
+        ctx->dwt_prior = (uint8_t)((DWT_CTRL & 1u) | ((DWT_DEMCR >> 23) & 2u));
+        ctx->dwt_owned = 1;
+    }
     DWT_LAR   = DWT_UNLOCK_KEY;                     /* unlock the DWT (CoreSight lock) */
     DWT_DEMCR |= (1u << 24);                        /* TRCENA */
     DWT_CTRL  |= 1u;                                /* CYCCNTENA */
@@ -65,12 +85,13 @@ static void cfw_time_start(uint32_t *t) {
  * Peeks the context so this never allocates. */
 void cfw_time_calibrate(void) {
     customCfwContext *ctx = peekCustomCfwContext();
-    if (ctx) cfw_cyc_per_ms(ctx);
+    if (cfw_timing_wanted(ctx) && ctx->dwt_owned) cfw_cyc_per_ms(ctx);
 }
 
 static uint32_t cfw_time_end(const uint32_t *t) {
-    uint32_t dc = DWT_CYCCNT - *t;
     customCfwContext *ctx = peekCustomCfwContext();
+    if (!cfw_timing_wanted(ctx) || !ctx->dwt_owned) return 0;
+    uint32_t dc = DWT_CYCCNT - *t;
     uint32_t cpm = ctx ? ctx->cyc_per_ms : 0;          /* calibrated cycles/ms, if the worker did */
     uint32_t cyc_per_us = cpm ? (cpm / 1000u) : 250u;  /* fallback: assume 250 MHz */
     if (cyc_per_us == 0) cyc_per_us = 1;

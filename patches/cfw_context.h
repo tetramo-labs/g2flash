@@ -319,6 +319,12 @@ typedef struct {
     vg_state volume_gate;
     uint32_t vg_lease_deadline;             /* FW_MS_TICK deadline of the phone's lease; 0 = none */
     uint8_t  vg_notify_buf[32];             /* stable storage for the field-133 sid-0x09 notify */
+    /* --- Revision 53: compass link watchdog and phone-enabled timing (mode 7 subs 3/4). --- */
+    uint32_t compass_watchdog_timer;        /* one-shot osTimer checking the right lens's phone link */
+    uint8_t  compass_unlinked;              /* consecutive checks without a phone link */
+    uint8_t  perf_timing;                   /* phone asked for worker/present timings */
+    uint8_t  dwt_owned;                     /* we enabled the cycle counter */
+    uint8_t  dwt_prior;                     /* bit 0 CYCCNTENA, bit 1 TRCENA before we did */
 } customCfwContext;
 
 
