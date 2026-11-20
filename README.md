@@ -192,7 +192,13 @@ and `test_clock_tweens` in `patches/host/shapes_host_test.c`.
 Run the complete offline suite with
 `python3 patches/host/run_vector_tests.py --out /tmp/g2-vector-tests`.
 It tests the firmware C under sanitizers and replays the standalone shape and
-Bad Apple SVG payloads before any mobile integration. After installing revision
+Bad Apple SVG payloads before any mobile integration. Every message and frame
+tick of the shapes and vector suites is followed by a check of the object
+cache's invariants (store bitmap, reference counts, asset bytes and kinds, the
+active list), and `patches/host/cache_fuzz_host_test.c` sends random cache
+traffic under the same checks, with lease loss and a heap that can give only a
+smaller store or rollback workspace. The suite runs its default seeds; for
+more, build it as its header says and pass `first count [steps]`. After installing revision
 38 on the glasses, `cd demos && bun vector-suite.ts --device` runs the visual
 suite; add `--bad-apple` for the vector video demo.
 

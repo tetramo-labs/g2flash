@@ -61,6 +61,11 @@ def main():
     run("cc", "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Wno-unused-function", *flags,
         "-Ipatches", "-o", host, "patches/host/vector_host_test.c")
     run(host, out)
+    # The default seeds only; run the binary with [first count [steps]] for more.
+    fuzz = out / "cache_fuzz_host_test"
+    run("cc", "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Wno-unused-function", *flags,
+        "-Ipatches", "-o", fuzz, "patches/host/cache_fuzz_host_test.c")
+    run(fuzz)
     demos = ROOT / "demos"
     run("bun", "test", "vector-protocol.test.ts", "svg-video.test.ts", "keyboard.test.ts", cwd=demos)
     run("bun", "node_modules/typescript/bin/tsc", "-p", "tsconfig.vector.json", cwd=demos)
@@ -84,7 +89,7 @@ def main():
         subprocess.run(["python3", "patches/build.py", "patches/patches_main.c", "--json"],
                        cwd=ROOT, stdout=target, check=True)
     blob = json.loads((out / "thumb-build.json").read_text())
-    print(f"PASS: host + sanitizers + TypeScript + fixtures + 300 video frames; ARM blob {blob['text_len']} bytes")
+    print(f"PASS: host + cache fuzz + sanitizers + TypeScript + fixtures + 300 video frames; ARM blob {blob['text_len']} bytes")
     print(f"Artifacts: {out}")
 
 

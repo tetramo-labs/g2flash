@@ -7,7 +7,9 @@
  * images for eyeballing. It also asserts the parsing/validation rules, the
  * easing end points and the cache contract: identity, versions, LRU eviction,
  * pinning, transactions, asset dependencies, 32-bit offsets, the mutation
- * journal and the reply formats (revision 38).
+ * journal and the reply formats (revision 38). After every message and frame
+ * tick it checks the cache's invariants (check_cache_invariants), as do the
+ * suites built on this file: vector_host_test.c and cache_fuzz_host_test.c.
  *
  *   cc -std=c11 -O1 -Wall -I.. -o /tmp/shapes_host_test shapes_host_test.c && /tmp/shapes_host_test /tmp/out
  */
@@ -292,6 +294,125 @@ static void m_rotate(uint32_t id, int32_t angle, int px, int py, uint16_t ms) {
 static const uint8_t LINEAR[4] = { 0, 0, 255, 255 };
 static const uint8_t EASE[4] = { 107, 0, 148, 255 };
 
+/* ---- cache invariants ----------------------------------------------------------
+ * Checked after every message and frame tick that goes through send() and
+ * tick(), so every suite built on this file runs them. A complete asset keeps
+ * its bytes for as long as its descriptor holds it; a private asset has id 0,
+ * so it is told apart by the id and version of the object that holds it. */
+static struct { uint32_t id, version, offset, length; uint8_t kind, valid; uint64_t hash; } g_seen[CFW_CACHE_ASSETS];
+static const cfw_cache *g_seen_cache;
+static uint16_t g_seen_epoch;
+static uint32_t g_invariant_checks, g_invariant_fails;
+
+#define INVARIANT(cond, ...) do { if (!(cond)) { \
+    if (g_invariant_fails++ < 20) { printf("FAIL invariant after check %u (mode %d): %s: ", g_invariant_checks, mode, #cond); printf(__VA_ARGS__); printf("\n"); } \
+    g_fail++; } } while (0)
+
+static uint64_t fnv1a(const uint8_t *p, uint32_t n) {
+    uint64_t h = 1469598103934665603ull;
+    for (uint32_t i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+/* The asset kind an object of `type` holds; 0xff when it holds none. */
+static uint8_t object_asset_kind(uint8_t type) {
+    if (type == CFW_SHAPE_IMAGE) return CFW_ASSET_IMAGE;
+    if (type == CFW_SHAPE_PATH) return CFW_ASSET_EDGES;
+    if (type == CFW_SHAPE_TEXT || type == CFW_SHAPE_TEXT_CACHED || type == CFW_SHAPE_TEXT_INLINE) return CFW_ASSET_STRING;
+    return 0xffu;
+}
+
+static void check_cache_invariants(int mode) {
+    g_invariant_checks++;
+    INVARIANT(!g_ctx.cache_preparing, "the prepare flag outlived its message");
+    const cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    if (sc != g_seen_cache || g_ctx.cache_epoch != g_seen_epoch) {
+        bzero((uint8_t *)g_seen, sizeof g_seen);
+        g_seen_cache = sc;
+        g_seen_epoch = g_ctx.cache_epoch;
+    }
+    if (sc == 0) return;
+    const uint8_t *store = g_ctx.texture_cache;
+    INVARIANT(sc->store_bytes == (store ? g_ctx.texture_cache_size : 0u), "store_bytes %u, store %u", sc->store_bytes, g_ctx.texture_cache_size);
+    static uint16_t holders[CFW_CACHE_ASSETS], holder[CFW_CACHE_ASSETS];
+    static uint32_t used[CFW_CACHE_GRANULES / 32u];
+    static uint8_t listed[CFW_CACHE_OBJECTS];
+    bzero((uint8_t *)holders, sizeof holders); bzero((uint8_t *)holder, sizeof holder);
+    bzero((uint8_t *)used, sizeof used); bzero(listed, sizeof listed);
+    uint32_t active = 0;
+    for (uint32_t k = 0; k < CFW_CACHE_OBJECTS; k++) {
+        const cfw_object *o = &sc->objects[k];
+        if (o->id == 0) continue;
+        INVARIANT(!(o->state & (CFW_CACHE_ST_STAGED | CFW_CACHE_ST_PINNED | CFW_CACHE_ST_NEXT)), "object %u id %u state %02x", k, o->id, o->state);
+        if (o->state & CFW_CACHE_ST_ACTIVE) active++;
+        uint8_t want = object_asset_kind(o->type);
+        INVARIANT(o->asset == 0 || want != 0xffu, "object %u id %u type %u holds asset %u", k, o->id, o->type, o->asset);
+        INVARIANT(o->font == 0 || o->type == CFW_SHAPE_TEXT_CACHED, "object %u id %u type %u holds font %u", k, o->id, o->type, o->font);
+        if (o->asset) {
+            const cfw_asset *a = &sc->assets[o->asset - 1u];
+            int owned = o->type == CFW_SHAPE_TEXT_INLINE || o->type == CFW_SHAPE_PATH;
+            INVARIANT(a->length && (a->state & CFW_CACHE_ST_COMPLETE) && a->kind == want && !(a->state & CFW_CACHE_ST_PRIVATE) == !owned,
+                      "object %u id %u type %u: asset %u kind %u state %02x", k, o->id, o->type, o->asset - 1u, a->kind, a->state);
+            holders[o->asset - 1u]++;
+            holder[o->asset - 1u] = (uint16_t)(k + 1u);
+        }
+        if (o->font) {
+            const cfw_asset *a = &sc->assets[o->font - 1u];
+            INVARIANT(a->length && (a->state & CFW_CACHE_ST_COMPLETE) && a->kind == CFW_ASSET_FONT && !(a->state & CFW_CACHE_ST_PRIVATE),
+                      "object %u id %u: font %u kind %u state %02x", k, o->id, o->font - 1u, a->kind, a->state);
+            holders[o->font - 1u]++;
+        }
+    }
+    INVARIANT(active == sc->active_count, "%u objects marked active, %u listed", active, sc->active_count);
+    for (uint32_t k = 0; k < sc->active_count && k < CFW_CACHE_OBJECTS; k++) {
+        uint16_t idx = sc->active[k];
+        INVARIANT(idx < CFW_CACHE_OBJECTS && sc->objects[idx].id && (sc->objects[idx].state & CFW_CACHE_ST_ACTIVE) && !listed[idx],
+                  "active[%u] = %u", k, idx);
+        if (idx < CFW_CACHE_OBJECTS) listed[idx] = 1;
+    }
+    for (uint32_t i = 0; i < CFW_CACHE_ASSETS; i++) {
+        const cfw_asset *a = &sc->assets[i];
+        if (a->length == 0) {
+            INVARIANT(a->id == 0 && a->state == 0 && holders[i] == 0, "free asset %u id %u state %02x holders %u", i, a->id, a->state, holders[i]);
+            g_seen[i].valid = 0;
+            continue;
+        }
+        INVARIANT(a->id || (a->state & CFW_CACHE_ST_PRIVATE), "asset %u has bytes and no id", i);
+        INVARIANT(!(a->state & CFW_CACHE_ST_STAGED), "asset %u id %u still staged", i, a->id);
+        INVARIANT(a->offset % CFW_CACHE_GRANULE == 0 && a->offset + a->length <= sc->store_bytes && a->filled <= a->length,
+                  "asset %u id %u at %u+%u filled %u, store %u", i, a->id, a->offset, a->length, a->filled, sc->store_bytes);
+        INVARIANT(a->refs == holders[i], "asset %u id %u refs %u, held by %u", i, a->id, a->refs, holders[i]);
+        INVARIANT(!(a->state & CFW_CACHE_ST_PRIVATE) || (holders[i] == 1 && (a->state & CFW_CACHE_ST_COMPLETE)),
+                  "private asset %u state %02x held by %u", i, a->state, holders[i]);
+        uint32_t g0 = a->offset / CFW_CACHE_GRANULE, n = cfw_store_granules(a->length);
+        for (uint32_t g = g0; g < g0 + n && g < CFW_CACHE_GRANULES; g++) {
+            INVARIANT(!(used[g >> 5] & (1u << (g & 31u))), "asset %u id %u overlaps another at granule %u", i, a->id, g);
+            used[g >> 5] |= 1u << (g & 31u);
+        }
+        if (!(a->state & CFW_CACHE_ST_COMPLETE) || store == 0) { g_seen[i].valid = 0; continue; }
+        INVARIANT(a->filled == a->length, "complete asset %u id %u filled %u of %u", i, a->id, a->filled, a->length);
+        if (a->kind == CFW_ASSET_EDGES) {
+            const cfw_path *path = (const cfw_path *)(const void *)(store + a->offset);
+            INVARIANT(sizeof(cfw_path) + path->count * sizeof(cfw_edge) == a->length, "edges asset %u: %u edges in %u bytes", i, path->count, a->length);
+        } else {
+            INVARIANT(cfw_asset_content_valid(store + a->offset, a->length, a->kind), "complete asset %u id %u kind %u is invalid", i, a->id, a->kind);
+        }
+        uint32_t id = a->id, version = a->version;
+        if ((a->state & CFW_CACHE_ST_PRIVATE) && holder[i]) {
+            id = sc->objects[holder[i] - 1u].id;
+            version = sc->objects[holder[i] - 1u].version;
+        }
+        uint64_t h = fnv1a(store + a->offset, a->length);
+        if (g_seen[i].valid && g_seen[i].id == id && g_seen[i].version == version && g_seen[i].offset == a->offset &&
+            g_seen[i].length == a->length && g_seen[i].kind == a->kind)
+            INVARIANT(g_seen[i].hash == h, "complete asset %u (id %u v%u) changed its bytes", i, id, version);
+        g_seen[i].id = id; g_seen[i].version = version; g_seen[i].offset = a->offset;
+        g_seen[i].length = a->length; g_seen[i].kind = a->kind; g_seen[i].hash = h; g_seen[i].valid = 1;
+    }
+    for (uint32_t w = 0; w < CFW_CACHE_GRANULES / 32u; w++)
+        INVARIANT(used[w] == sc->bitmap[w], "store bitmap word %u is %08x, the assets cover %08x", w, sc->bitmap[w], used[w]);
+}
+
 /* dispatch with a 245-byte reply capacity, as a fast link would give */
 static int send(uint8_t mode) {
     cfw_rectlist rl = { 0 };
@@ -302,6 +423,7 @@ static int send(uint8_t mode) {
     g_inside_gate = 1;
     int result = cfw_scene_dispatch(&g_ctx, mode, g_msg, g_len, 1, &rl);
     g_inside_gate = 0;
+    check_cache_invariants(mode);
     return result;
 }
 static int reply_status(void) { return g_ctx.cache_reply_len >= 10 ? g_ctx.cache_reply[3] : -1; }
@@ -318,6 +440,7 @@ static void tick(void) {
     scene_tick(&g_ctx);
     cfw_cache *sc = cfw_cache_peek(&g_ctx);
     if (sc && sc->fb) cfw_scene_render_if_due(&g_ctx, sc->fb);
+    check_cache_invariants(0);
 }
 
 /* Fresh context and cache; adopt the epoch a RESET reports. */
@@ -2165,6 +2288,6 @@ int main(int argc, char **argv) {
     test_store_layout();
     cfw_scene_release(&g_ctx);
     CHECK(g_alloc_live == 0);
-    printf("%s (%d failures)\n", g_fail ? "FAILED" : "OK", g_fail);
+    printf("%s (%d failures, %u invariant checks)\n", g_fail ? "FAILED" : "OK", g_fail, g_invariant_checks);
     return g_fail ? 1 : 0;
 }
