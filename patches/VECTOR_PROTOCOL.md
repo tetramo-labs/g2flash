@@ -124,12 +124,19 @@ and the active edge budget are validated before the cache changes. Staged
 definitions are allocated first; failure frees them and retains the previous
 objects, background, animations and displayed frame (the reply names the
 cause). The scratch workspace can remain cached after a rejected message.
+Objects and assets evicted to make room come back too, unless the rollback
+workspace the heap gave could not hold every byte the message overwrote: then
+the message applies without rollback, and a rejection keeps those evictions
+and moves the cache revision (revisions 50 and 55).
 
 Replacement happens under the display gate. The previous edges are freed only
 when the replacement is committed; the display task cannot see an incomplete
 upload. Objects that leave the active list stay cached and are evicted least
-recently used when room is needed; RESET (mode 41) and mode 11 cleanup free
-everything. Scratch workspace is about 10.5 KiB on heap 13, allocated on first
+recently used when room is needed; to make room in the store, only objects
+that hold an asset (edges, an image, a string or a font) are evicted
+(revision 55). Assets of up to 1 KiB, such as strings and small paths, are
+placed from the top of the store so they do not split the space larger ones
+need. RESET (mode 41) and mode 11 cleanup free everything. Scratch workspace is about 10.5 KiB on heap 13, allocated on first
 path/rotation use. The cache descriptors use about 38 KiB of heap 13; edges,
 images, fonts and strings share the 256 KiB store on the EvenHub heap.
 
@@ -137,7 +144,10 @@ Framebuffer lease expiry/release stops animation, marks the cache lost and
 changes its epoch; the memory is released under the display gate afterwards,
 or emptied in place by a RESET under a renewed lease (revision 54).
 Clients learn about it from the STALE reply to their next cache message, reset
-the cache and rebuild rather than assuming an old baseline.
+the cache and rebuild rather than assuming an old baseline. A STATE query
+needs no lease; since revision 55 it notices a lease whose deadline passed
+itself and answers STALE, where revision 54 described the dead cache under its
+old epoch until a lease-gated message or FB_ACQUIRE noticed.
 
 ## Standalone validation and demos
 

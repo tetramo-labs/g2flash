@@ -532,6 +532,57 @@ after a settings read, as a separate notification rather than inside the
 settings reply. Detect support by revision 24 or later, or by the `RB` report.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
 
+### Lease checks, cross-task writes and store placement in the object cache (revision 55)
+
+Revision 55 (`GLASSLYCFW/55`) fixes the remaining object cache audit findings.
+
+ * A STATE query checks the framebuffer lease first. When its deadline has
+   passed, the cache is lost and its epoch moves before the reply is built, so
+   an old-epoch STATE answers STALE (epoch 0 answers RESET). Revision 54 never
+   checked: it answered DELTA from the dead cache under its old epoch until a
+   lease-gated message or FB_ACQUIRE noticed, and the phone's next SHOW got a
+   bare NACK. STATE still needs no lease.
+ * Lease loss runs on the stock settings worker threads and on the timer task.
+   It now only flags the cache as lost and stops the frame timer. Revision 54
+   also cleared a field of the cache block through a pointer read without the
+   display gate, while the display task or a mode-11 cleanup could be freeing
+   that block. The frame timer reads only the context until it holds the gate,
+   the frame period moved from the block into the context, and the display
+   task no longer reaps a lost cache while a message is allocating into it
+   before the gate.
+ * The frame timer tries the display gate without waiting. When a handler or
+   an uncopied frame holds it, the timer skips that frame and re-arms.
+   Revision 54 waited up to 1,000 ticks on the RTOS timer task, which delayed
+   every other osTimer, and after a timeout it rendered and gave back a gate it
+   did not hold.
+ * A rollback workspace the heap could give only in part saves what fits;
+   then the message applies without rollback, as one without a workspace has
+   since revision 50. Revisions 49 to 54 answered CAPACITY, so under heap
+   pressure every upload into a full store failed and the phone reset the
+   cache each time the store filled.
+ * Making room in the store, or freeing an asset descriptor, evicts only
+   objects that hold an asset: first those holding an asset's last reference,
+   then those sharing one. A shape that holds no asset stays, and the store is
+   rescanned only after granules were freed. Revision 54 evicted every older
+   object first, so a font upload into a full store evicted every inactive
+   shape. A free object descriptor still takes the least recently used object.
+ * Assets of up to 1 KiB (strings, inline text, small paths) are placed from
+   the top of the store and larger ones from the bottom. The store never
+   compacts, and the strings a shown scene pins used to sit between images, so
+   a large image or font failed CAPACITY while most of the store was
+   evictable.
+ * Drawing an image or a cached-font string no longer rescans RLE that was
+   validated when the asset completed. A string's characters and glyph
+   presence are still checked before any glyph is drawn.
+
+The wire format is unchanged. Host tests: `test_state_after_lapse`,
+`test_cross_thread_writes`, `test_tick_gate_busy`, `test_store_eviction` and
+`test_store_layout` in the shapes suite, plus updated checks in
+`test_transaction_rollback`, `test_offsets`, `test_hidden_animation` and
+`test_texture_render`; revision 54 fails 27 of their checks. The Blackwall
+harness gains a STATE-after-expiry scenario. Revision 55 has not been tested
+on hardware.
+
 ### Re-sent chunks, asset evictions and RESET after a lost lease (revision 54)
 
 Revision 54 (`GLASSLYCFW/54`) fixes three object cache replies.

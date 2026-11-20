@@ -35,14 +35,20 @@ static uint32_t g_now;
 #define IMAGE_BYTES (IMAGE_STRIDE * IMAGE_H)
 
 static customCfwContext g_ctx;
-static int g_lease = 1;
+static int g_lease = 1, g_lease_lapse;
 static int g_timer_started, g_timer_stopped, g_gate_waits, g_gate_signals, g_presented;
 static int g_fail_frame_alloc, g_presented_shadow;
 static uint8_t g_container_shadow[640 * 480 / 2];
 
 static customCfwContext *peekCustomCfwContext(void) { return &g_ctx; }
 static customCfwContext *getCustomCfwContext(void) { return &g_ctx; }
-int cfw_fb_lease_active(void) { return g_lease; }
+static void cfw_cache_lose(customCfwContext *ctx);
+/* g_lease_lapse: the deadline has passed and nothing has checked it yet; the
+ * next check loses the cache and clears the lease, as settings_ext.c does. */
+int cfw_fb_lease_active(void) {
+    if (g_lease_lapse) { g_lease_lapse = 0; g_lease = 0; cfw_cache_lose(&g_ctx); }
+    return g_lease;
+}
 static void rl_add(cfw_rectlist *rl, uint32_t l, uint32_t t, uint32_t w, uint32_t h) {
     if (rl && rl->n < CFW_RECT_MAX) {
         rl->r[rl->n].l = (uint16_t)l; rl->r[rl->n].t = (uint16_t)t;
@@ -82,13 +88,26 @@ static int  stub_timer_start(uint32_t h, uint32_t ms) { (void)h; (void)ms; g_tim
 static int  stub_timer_stop(uint32_t h) { (void)h; g_timer_stopped++; return 0; }
 static int g_fail_timer;
 static uint32_t stub_timer_new(void *cb, uint32_t t, void *a, void *attr) { (void)cb; (void)t; (void)a; (void)attr; return g_fail_timer?0:0x1234; }
-static void stub_gate_wait(void) { g_gate_waits++; }
+/* g_gate_busy: a handler on another task holds the display gate. A wait for
+ * it blocks the caller for its timeout (FW_DISPLAY_WAIT: 1000 ticks) and then
+ * returns without it; g_gate_blocked_ms sums that time. */
+static int g_gate_busy, g_display_sem;
+static uint32_t g_gate_blocked_ms;
+static void stub_gate_wait(void) { g_gate_waits++; if (g_gate_busy) g_gate_blocked_ms += 1000; }
+static int stub_sem_take(void *sem, uint32_t ticks) {
+    (void)sem; g_gate_waits++;
+    if (!g_gate_busy) return 1;
+    g_gate_blocked_ms += ticks;
+    return 0;
+}
 static void stub_gate_signal(void) { g_gate_signals++; }
 #define FW_TIMER_START stub_timer_start
 #define FW_TIMER_STOP stub_timer_stop
 #define FW_TIMER_NEW stub_timer_new
 #define FW_DISPLAY_WAIT stub_gate_wait
 #define FW_DISPLAY_SIGNAL stub_gate_signal
+#define FW_SEM_TAKE stub_sem_take
+#define FW_DISPLAY_SEM ((void *)&g_display_sem)
 
 /* The real image/font renderers over asset regions; the built-in LVGL font
  * path calls stock entry points, so it is replaced by a box painter that draws
@@ -306,7 +325,7 @@ static void fresh(void) {
     cfw_scene_release(&g_ctx);
     bzero((uint8_t *)&g_ctx, sizeof g_ctx);
     g_ctx.magic = CFW_CTX_MAGIC;
-    g_lease = 1; g_alloc_fail_after = -1; g_store_fail = 0; g_shadow_missing = 0; g_fail_timer = 0;
+    g_lease = 1; g_lease_lapse = 0; g_gate_busy = 0; g_alloc_fail_after = -1; g_store_fail = 0; g_shadow_missing = 0; g_fail_timer = 0;
     bzero(g_container_shadow, sizeof g_container_shadow);
     g_epoch = 0;
     m_begin(1); g_msg[g_len++] = 0;                      /* RESET */
@@ -764,8 +783,8 @@ static void test_assets(void) {
 static void test_offsets(void) {
     fresh();
     cfw_cache *sc = cfw_cache_peek(&g_ctx);
-    static uint8_t filler[70000], img[1024], font[4096], str[] = "ok";
-    uint32_t il = mk_big_image(img, 24, 24, 13), fl = mk_font(font, "ok", 7);
+    static uint8_t filler[70000], img[2048], font[4096], str[] = "ok";
+    uint32_t il = mk_big_image(img, 40, 40, 13), fl = mk_font(font, "ok", 7);
     /* a font asset is table + glyphs + any trailing bytes, so it can be sized exactly:
      * 0x10000 - 16 bytes long, so the next asset starts at 0xfff0 and spans the boundary */
     uint32_t fill_len = 0x10000u - 16u;
@@ -778,24 +797,25 @@ static void test_offsets(void) {
     CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && asset(900)->offset == 0 && (asset(900)->state & CFW_CACHE_ST_COMPLETE));
     m_begin(3);
     m_put_asset(100, 1, CFW_ASSET_IMAGE, il, 0, img, il);           /* starts just below 0x10000, ends above */
-    m_put_asset(300, 1, CFW_ASSET_FONT, fl, 0, font, fl);           /* entirely above 0x10000 */
+    m_put_asset(300, 1, CFW_ASSET_FONT, fl, 0, font, fl);           /* under 1 KiB: at the top of the store */
     m_put_asset(200, 1, CFW_ASSET_STRING, 2, 0, str, 2);
     CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
-    CHECK(asset(100)->offset == 0xfff0u && asset(100)->offset + il > 0x10000u && asset(300)->offset >= 0x10000u);
+    CHECK(asset(100)->offset == 0xfff0u && asset(100)->offset + il > 0x10000u);
+    CHECK(asset(300)->offset + ((fl + 15u) & ~15u) == CFW_CACHE_STORE_BYTES && asset(200)->offset + 16u == asset(300)->offset);
     uint8_t ri[12], rt[16];
     rec_asset(ri, CFW_SHAPE_IMAGE, 15, 100, 100, 100, 0);
     rec_asset(rt, CFW_SHAPE_TEXT_CACHED, 15, 300, 300, 200, 300);
     m_begin(4); m_put_object(1, 1, ri, 12); m_put_object(2, 1, rt, 16);
     CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
     { uint32_t o[] = { 1, 2 }, w[] = { 1, 1 }; m_show(5, 1, 0); m_refs(o, w, 2); CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED); }
-    CHECK(pixel_at(sc->fb, 100, 100) == 13 && pixel_at(sc->fb, 123, 123) == 13 && pixel_at(sc->fb, 124, 100) == 0);
+    CHECK(pixel_at(sc->fb, 100, 100) == 13 && pixel_at(sc->fb, 139, 139) == 13 && pixel_at(sc->fb, 140, 100) == 0);
     CHECK(pixel_at(sc->fb, 300, 300) == 7 && pixel_at(sc->fb, 311, 307) == 7 && pixel_at(sc->fb, 312, 300) == 0);
     /* mode 19/20 reach them too */
     { cfw_rectlist rl = { 0 }; uint8_t m[9]; put32(m, 100); put16(m + 4, 0); put16(m + 6, 0); m[8] = 15; bzero(g_shadow, sizeof g_shadow);
       CHECK(cfw_cache_immediate(&g_ctx, 19, g_shadow, IMAGE_STRIDE, IMAGE_W, IMAGE_H, m, 9, &rl) == 0 && pixel_at(g_shadow, 23, 23) == 13);
       uint8_t f[12]; put32(f, 300); put16(f + 4, 0); put16(f + 6, 40); f[8] = 15; f[9] = 2; f[10] = 'o'; f[11] = 'k';
       CHECK(cfw_cache_immediate(&g_ctx, 20, g_shadow, IMAGE_STRIDE, IMAGE_W, IMAGE_H, f, 12, &rl) == 0 && pixel_at(g_shadow, 11, 47) == 7); }
-    /* fill to exactly 256 KiB: the last allocation ends at the capacity */
+    /* fill to exactly 256 KiB: the last large allocation ends where the small assets begin */
     { static uint8_t blob[70000]; uint32_t bl = mk_big_image(blob, 255, 255, 1);
       uint32_t count = 0;
       while (CFW_CACHE_STORE_BYTES - store_used() >= ((bl + 15u) & ~15u) && count < 200) {
@@ -803,7 +823,7 @@ static void test_offsets(void) {
           CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_extra()[0] == 0);
           count++;
       }
-      CHECK(count == 3);
+      CHECK(count == 2);
       uint32_t room = CFW_CACHE_STORE_BYTES - store_used();
       CHECK(room >= CFW_FONT_TABLE_BYTES + 16u && room % CFW_CACHE_GRANULE == 0 && room <= sizeof filler);
       bzero(filler, room); put32(filler, CFW_FONT_TABLE_BYTES); mk_image(filler + CFW_FONT_TABLE_BYTES, 4, 4, 2);
@@ -812,7 +832,7 @@ static void test_offsets(void) {
       CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
       if (first < room) { m_begin(7); m_put_asset(1999, 1, CFW_ASSET_FONT, room, first, filler + first, room - first);
                           CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED); }
-      CHECK(asset(1999) && asset(1999)->offset + room == CFW_CACHE_STORE_BYTES);
+      CHECK(asset(1999) && asset(1999)->offset + room == asset(200)->offset);
       CHECK(store_used() == CFW_CACHE_STORE_BYTES);
       /* the store is full: the LRU unreferenced asset (the big filler) goes first, references stay */
       m_begin(8); m_put_asset(3000, 1, CFW_ASSET_IMAGE, bl, 0, blob, bl);
@@ -929,9 +949,9 @@ static void test_hidden_animation(void) {
     CHECK(cfw_scene_resync_shadow(&g_ctx, g_container_shadow) == 0);
     /* lease lapse from the tick stops the timer without touching memory */
     { uint32_t o[] = { 1 }, w[] = { 1 }; m_show(6, 1, 0); m_refs(o, w, 1); m_glide(1, 50, 0, 10, LINEAR); CHECK(send(38) == 0); }
-    g_lease = 0; stops = g_timer_stopped;
+    g_lease = 0; stops = g_timer_stopped; presented = g_presented;
     scene_tick(&g_ctx);
-    CHECK(sc->anim_active == 0 && g_timer_stopped == stops + 1);
+    CHECK(g_timer_stopped == stops + 1 && g_presented == presented);
     g_lease = 1;
     /* animation with no shadow: values snap to the end */
     g_shadow_missing = 1;
@@ -1355,18 +1375,24 @@ static void test_transaction_rollback(void) {
     m_show(10, 1, 0); m_put_asset(5, 1, CFW_ASSET_IMAGE, bl, 0, big, bl); m_put_count(1); m_refs(&missing, &ver, 1);
     CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_MISSING);
     check_cache_unchanged();
-    /* Force a smaller allocation on growth: no destructive fallback, even
-     * after some granules have already been saved. */
+    /* Revision 55: a workspace the heap could only give in part saves what
+     * fits, then the message applies without rollback, like one without a
+     * workspace (revision 50). Revisions 49-54 refused it with CAPACITY, so
+     * under heap pressure every upload into a full store failed and the phone
+     * reset the cache each time the store filled again. */
     cfw_cache *sc = cfw_cache_peek(&g_ctx);
     sc->undo_capacity = 2;
     g_evenhub_max = sizeof(cfw_undo) + 2u * sizeof(sc->undo->granules[0]);
     m_begin(11); m_put_asset(5, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
-    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_CAPACITY && reply_extra()[0] == 0);
-    check_cache_unchanged();
-    CHECK(sc->undo && sc->undo_capacity <= 2u);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_extra()[0] == 1);
+    CHECK(sc->undo && sc->undo_capacity <= 2u && !asset(1) && asset(5));
+    CHECK(asset(5) && bytes_equal(g_ctx.texture_cache + asset(5)->offset, big, bl));
+    /* a rejection past a full workspace keeps its evictions and moves the revision */
+    { uint32_t before = sc->revision;
+      m_show(12, 1, 0); m_put_asset(6, 1, CFW_ASSET_IMAGE, bl, 0, big, bl); m_put_count(1); m_refs(&missing, &ver, 1);
+      CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_MISSING);
+      CHECK(!asset(2) && !asset(6) && asset(3) && asset(5) && sc->revision == before + 1u && store_used() == 3u * ((bl + 15u) & ~15u)); }
     g_evenhub_max = 0;
-    m_begin(12); m_put_asset(5, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
-    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && !asset(1) && asset(5));
 
     /* Revision 50: without a workspace a PUT applies without rollback, and a
      * rejection keeps its evictions but moves the revision. */
@@ -1898,6 +1924,167 @@ static void ref_texture_render(uint8_t *shadow, uint32_t stride, uint32_t panel_
     }
 }
 
+
+
+/* Revision 55: making room in the store or for an asset descriptor evicts
+ * only objects that hold an asset: first those holding the last reference to
+ * one (a private asset always), then those sharing one. Revision 54 evicted
+ * every older object first, shapes that hold nothing included, and rescanned
+ * the store after each of them. */
+static void test_store_eviction(void) {
+    fresh();
+    static uint8_t big[70000]; uint32_t bl = mk_big_image(big, 255, 255, 3);
+    uint8_t r[12];
+    for (uint32_t i = 1; i <= 100; i++) put_circle(i, 1, 1, 1, 15);
+    for (uint32_t i = 0; i < 4; i++) {
+        rec_asset(r, CFW_SHAPE_IMAGE, 15, 0, 0, 500 + i, 0);
+        m_begin(10); m_put_asset(500 + i, 1, CFW_ASSET_IMAGE, bl, 0, big, bl); m_put_object(200 + i, 1, r, 12);
+        CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    }
+    rec_asset(r, CFW_SHAPE_IMAGE, 15, 0, 0, 600, 0);
+    m_begin(11); m_put_asset(600, 1, CFW_ASSET_IMAGE, bl, 0, big, bl); m_put_object(210, 1, r, 12);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_extra()[0] == 2);
+    CHECK(obj(1) && obj(100) && !obj(200) && !asset(500) && obj(201) && asset(501) && asset(600) && obj(210));
+    /* an object sharing its asset waits behind the one holding a last reference */
+    rec_asset(r, CFW_SHAPE_IMAGE, 15, 0, 0, 501, 0);
+    m_begin(12); m_put_object(300, 1, r, 12); CHECK(send(37) == 0 && asset(501)->refs == 2);
+    rec_asset(r, CFW_SHAPE_IMAGE, 15, 0, 0, 601, 0);
+    m_begin(13); m_put_asset(601, 1, CFW_ASSET_IMAGE, bl, 0, big, bl); m_put_object(211, 1, r, 12);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_extra()[0] == 2);
+    CHECK(obj(201) && obj(300) && asset(501) && !obj(202) && !asset(502) && obj(1) && asset(601));
+    /* a free object slot still takes the least recently used object, assets or not */
+    for (uint32_t i = 0; live_objects() < CFW_CACHE_OBJECTS; i++) put_circle(1000 + i, 1, 1, 1, 15);
+    put_circle(2000, 1, 1, 1, 15);
+    CHECK(!obj(1) && obj(2) && obj(201) && reply_extra()[0] == 1);
+
+    /* an asset only inactive objects share goes once all of them have */
+    fresh();
+    for (uint32_t i = 1; i <= 50; i++) put_circle(i, 1, 1, 1, 15);
+    rec_asset(r, CFW_SHAPE_IMAGE, 15, 0, 0, 500, 0);
+    m_begin(20); m_put_asset(500, 1, CFW_ASSET_IMAGE, bl, 0, big, bl); m_put_object(200, 1, r, 12); m_put_object(201, 1, r, 12);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && asset(500)->refs == 2);
+    uint32_t shown[3], ver[3] = { 1, 1, 1 };
+    for (uint32_t i = 0; i < 3; i++) {
+        rec_asset(r, CFW_SHAPE_IMAGE, 15, 0, 0, 501 + i, 0);
+        m_begin(21); m_put_asset(501 + i, 1, CFW_ASSET_IMAGE, bl, 0, big, bl); m_put_object(202 + i, 1, r, 12);
+        CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+        shown[i] = 202 + i;
+    }
+    m_show(22, 1, 0); m_refs(shown, ver, 3); CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    m_begin(23); m_put_asset(600, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_extra()[0] == 3);
+    CHECK(!obj(200) && !obj(201) && !asset(500) && asset(600) && obj(1) && obj(50) && obj(202) && asset(501));
+}
+
+
+/* Revision 55: assets under 1 KiB (strings, inline text, small paths) are
+ * placed from the top of the store and larger ones from the bottom, so the
+ * small assets a shown scene pins cannot split the space a large upload needs.
+ * Revision 54 placed everything first fit: each string landed right after an
+ * image, and a 64 KiB image failed CAPACITY with every other image evictable. */
+static void test_store_layout(void) {
+    fresh();
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    static uint8_t big[70000];
+    uint32_t il = mk_big_image(big, 180, 180, 3);
+    uint32_t ids[8], vers[8];
+    for (uint32_t i = 0; i < 8; i++) {
+        m_begin(1); m_put_asset(100 + i, 1, CFW_ASSET_IMAGE, il, 0, big, il);
+        CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+        uint8_t t[64]; uint8_t *e = rec_inline(t, 15, 10, 20 * (int)i, 0, 0, "pinned");
+        m_begin(2); m_put_object(10 + i, 1, t, (uint32_t)(e - t));
+        CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+        ids[i] = 10 + i; vers[i] = 1;
+    }
+    m_show(3, 1, 0); m_refs(ids, vers, 8); CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    uint32_t bl = mk_big_image(big, 255, 255, 5);
+    m_begin(4); m_put_asset(200, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_extra()[0] == 3);
+    CHECK(asset(200) && !asset(100) && !asset(102) && asset(103) && asset(107) && sc->active_count == 8);
+    for (uint32_t i = 0; i < 8; i++) CHECK(obj(10 + i) != 0);
+}
+
+/* Revision 55: STATE needs no lease, but a lease whose deadline passed loses
+ * the cache before it is described. Revision 54 answered from the dead cache
+ * with its old epoch until a lease-gated message or FB_ACQUIRE noticed. */
+static void test_state_after_lapse(void) {
+    fresh();
+    put_circle(1, 1, 10, 10, 15);
+    uint16_t old = g_epoch;
+    g_lease_lapse = 1;
+    m_begin(0); put32(g_msg + 2, 0); put16(g_msg + 6, 0); g_len = 8;
+    CHECK(send(40) == 0 && reply_status() == CFW_CACHE_REPLY_STALE);
+    CHECK(reply_epoch() != old && reply_epoch() == g_ctx.cache_epoch);
+    CHECK(g_ctx.scene == 0 && g_ctx.texture_cache == 0 && !g_ctx.cache_lost && g_alloc_live == 0);
+    put16(g_msg, 0);
+    CHECK(send(40) == 0 && reply_status() == CFW_CACHE_REPLY_RESET && reply_epoch() == g_ctx.cache_epoch);
+    m_begin(1); CHECK(send(37) == -1);                        /* lease-gated messages are still refused */
+    g_lease = 1;
+}
+
+static uint8_t g_block[sizeof(cfw_cache)];
+
+/* Lease loss arrives on the settings task and the timer task while the display
+ * task or a handler may be freeing the cache block: neither may write into it.
+ * Revision 54 cleared anim_active through a pointer read without the gate. */
+static void test_cross_thread_writes(void) {
+    fresh();
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    uint32_t o[] = { 1 }, w[] = { 1 };
+    put_circle(1, 1, 100, 100, 15);
+    m_show(1, 1, 0); m_refs(o, w, 1); m_glide(1, 100, 0, 10, LINEAR); CHECK(send(38) == 0 && sc->anim_active);
+    memcpy(g_block, sc, sizeof g_block);
+    int stops = g_timer_stopped;
+    cfw_cache_lose(&g_ctx);
+    CHECK(bytes_equal(g_block, sc, sizeof g_block));
+    CHECK(g_ctx.cache_lost && g_timer_stopped == stops + 1);
+    tick();
+    CHECK(bytes_equal(g_block, sc, sizeof g_block) && g_ctx.scene == sc);
+    cfw_cache_reap(&g_ctx);
+    CHECK(g_ctx.scene == 0);
+
+    /* the timer finds the lease lapsed: the loss is noticed there, nothing in the block changes */
+    fresh(); sc = cfw_cache_peek(&g_ctx);
+    put_circle(1, 1, 100, 100, 15);
+    m_show(2, 1, 0); m_refs(o, w, 1); m_glide(1, 100, 0, 10, LINEAR); CHECK(send(38) == 0 && sc->anim_active);
+    memcpy(g_block, sc, sizeof g_block);
+    int presents = g_presented, waits = g_gate_waits; stops = g_timer_stopped;
+    g_lease_lapse = 1; g_ctx.direct_pending = 0; g_now += 33;
+    scene_tick(&g_ctx);
+    CHECK(bytes_equal(g_block, sc, sizeof g_block));
+    CHECK(g_ctx.cache_lost && g_timer_stopped > stops && g_presented == presents && g_gate_waits == waits);
+    g_lease = 1;
+}
+
+/* Revision 55: the frame timer runs on the RTOS timer task, which every other
+ * osTimer shares. A gate held by a handler skips the frame and re-arms instead
+ * of blocking; revision 54 waited up to 1000 ticks and then, unable to tell a
+ * timeout from a take, rendered and gave back a gate it did not hold. */
+static void test_tick_gate_busy(void) {
+    fresh();
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    uint32_t o[] = { 1 }, w[] = { 1 };
+    put_circle(1, 1, 100, 100, 15);
+    m_show(1, 1, 0); m_refs(o, w, 1); m_glide(1, 100, 0, 10, LINEAR);
+    uint32_t start = g_now;
+    CHECK(send(38) == 0 && sc->anim_active);
+    memcpy(g_block, sc, sizeof g_block);
+    int presents = g_presented, signals = g_gate_signals, starts = g_timer_started;
+    g_gate_busy = 1; g_gate_blocked_ms = 0; g_ctx.direct_pending = 0;
+    g_now = start + 33;
+    scene_tick(&g_ctx);
+    CHECK(g_gate_blocked_ms == 0);
+    CHECK(g_presented == presents && g_gate_signals == signals && bytes_equal(g_block, sc, sizeof g_block));
+    CHECK(g_timer_started == starts + 1);
+    g_gate_busy = 0;
+    g_now = start + 66;
+    scene_tick(&g_ctx);
+    if (sc->fb) cfw_scene_render_if_due(&g_ctx, sc->fb);
+    CHECK(g_presented == presents + 1 && obj(1)->p[0] > 100 && sc->anim_active);
+    for (int i = 0; i < 12; i++) tick();
+    CHECK(obj(1)->p[0] == 200 && !sc->anim_active);
+}
+
 /* Random images, every token form, positions on and off every edge, views
  * narrower than their stride, odd columns, all options: the same pixels. */
 static void test_texture_render(void) {
@@ -1928,6 +2115,17 @@ static void test_texture_render(void) {
         ref_texture_render(want, STRIDE, pw, ph, x0, y0, &image, lut, transparent);
         cfw_texture_render(got, STRIDE, pw, ph, x0, y0, &image, lut, transparent);
         differ = !bytes_equal(want, got, sizeof want);
+        /* revision 55: a glyph is drawn with its font's remaining bytes as the bound */
+        uint32_t junk = RND() % 64;
+        for (uint32_t i = 0; i < junk; i++) img[n + i] = (uint8_t)RND();
+        image.rle_len += junk;
+        for (uint32_t i = 0; i < sizeof got; i++) got[i] = (uint8_t)(i * 7u);
+        for (uint32_t i = 0; i < sizeof got; i++) want[i] = got[i];
+        image.rle_len -= junk;
+        ref_texture_render(want, STRIDE, pw, ph, x0, y0, &image, lut, transparent);
+        image.rle_len += junk;
+        cfw_texture_render(got, STRIDE, pw, ph, x0, y0, &image, lut, transparent);
+        differ |= !bytes_equal(want, got, sizeof want);
     }
 #undef RND
     CHECK(!differ);
@@ -1960,6 +2158,11 @@ int main(int argc, char **argv) {
     test_asset_eviction_revision();
     test_reset_after_loss();
     test_texture_render();
+    test_state_after_lapse();
+    test_cross_thread_writes();
+    test_tick_gate_busy();
+    test_store_eviction();
+    test_store_layout();
     cfw_scene_release(&g_ctx);
     CHECK(g_alloc_live == 0);
     printf("%s (%d failures)\n", g_fail ? "FAILED" : "OK", g_fail);

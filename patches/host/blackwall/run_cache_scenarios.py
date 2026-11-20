@@ -456,6 +456,18 @@ def scenario_checks(ev):
     yield 'Lease expiry (deadline forced to now) moves the epoch', (
         'expiry-reset', 'expiry-put', 'expiry-force', 'expiry-query', 'expiry-show', 'expiry-reacquire', 'expiry-state'), expiry
 
+    def expired_query():
+        query = ev.answer('expiry-query')
+        before = ev.steps['expiry-force']['context']
+        after = ev.steps['expiry-query']['context']
+        moved = after.get('epoch')
+        ok = (before.get('epoch') == EXPIRY_EPOCH and before.get('scene') and moved not in (None, EXPIRY_EPOCH)
+              and is_reply(query, 40, 'STALE', 0, moved) and after.get('lease_deadline') == 0 and after.get('scene') == 0)
+        return ok, (describe(query) + f"; ctx epoch 0x{before.get('epoch', 0):04x} -> 0x{moved or 0:04x}, "
+                    f"lease {after.get('lease_deadline')}, cache block {after.get('scene', 0):#x}")
+    yield 'A STATE after the lease deadline passed sees the loss: STALE with the moved epoch (revision 55)', (
+        'expiry-put', 'expiry-force', 'expiry-query'), expired_query
+
     def present():
         answer = ev.answer('present-show')
         before, after = ev.framebuffer('idle'), ev.framebuffer('present-show')
@@ -564,9 +576,12 @@ def main():
     if report.get('aborted'):
         print(f"  machine stopped during {report['aborted']['step']}: {report['aborted']}")
     ev = Evidence(report, output)
-    if ev.ran('expiry-query'):
-        print(f"INFO STATE with the old epoch after the lease deadline passed, before any lease-gated request: "
-              f"{describe(ev.answer('expiry-query'))}")
+    tasks = {}
+    for step in report['results']:
+        for row in step['rows']:
+            tasks.setdefault(row['tag'], set()).add(row.get('task') or hex(row['tcb']))
+    print('  tasks: ' + '; '.join(f"{name} on {', '.join(sorted(tasks[tag]))}" for tag, name, *_ in WATCHES
+                                  if tag in tasks and tag not in (TAG_SEND, TAG_BRIDGE)))
     failed = 0
     for name, outcome, detail in evaluate(ev):
         print(f'{"PASS" if outcome == "VERIFIED" else "FAIL"} [{outcome}] {name}: {detail}')

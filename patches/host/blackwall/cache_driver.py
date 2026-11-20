@@ -208,8 +208,8 @@ try:
         rows = []
         for i in range(first_row, probe.Rows.Count):
             row = [int(v) for v in probe.Rows[i]]
-            rows.append(dict(tag=row[0], pc=row[1], r=row[2:6], sp=row[6], lr=row[7], tcb=row[8], xpsr=row[9],
-                             ticks=row[10], data=''.join('%02x' % int(b) for b in probe.Payloads[i])))
+            rows.append(dict(tag=row[0], pc=row[1], r=row[2:6], sp=row[6], lr=row[7], tcb=row[8], task=task_name(row[8]),
+                             xpsr=row[9], ticks=row[10], data=''.join('%02x' % int(b) for b in probe.Payloads[i])))
         entry['rows'] = rows
         entry['cpu'] = cpu_state()
         current_stops = stops()

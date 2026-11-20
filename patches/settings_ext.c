@@ -467,6 +467,13 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   55 -> a STATE notices a lapsed lease and answers STALE; lease loss no
+//         longer writes the cache block from other tasks; the frame timer
+//         tries the display gate without waiting; a rollback workspace that
+//         fills stops saving instead of answering CAPACITY; making room
+//         evicts only objects that hold assets; assets up to 1 KiB are placed
+//         from the top of the store; draws trust validated assets (scene.c,
+//         texture_cache.c).
 //   54 -> a re-sent chunk of a complete asset is a no-op instead of REFUSED,
 //         assets evicted to make room count in the evicted tally and move the
 //         revision, and a RESET right after a lost lease empties the lost
@@ -642,7 +649,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/54";
+        static const char caps[] = "GLASSLYCFW/55";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

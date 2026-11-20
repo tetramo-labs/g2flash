@@ -969,7 +969,7 @@ void display_copy_hook(void) {
     if (ctx == 0 || !ctx->direct_pending || ctx->direct_shadow == 0) {
         /* The display task owns the gate here, so a cache lost with the lease
          * can be released without racing a handler or an animation frame. */
-        if (ctx && ctx->cache_lost && ctx->magic == CFW_CTX_MAGIC) cfw_cache_reap(ctx);
+        if (ctx && ctx->cache_lost && !ctx->cache_preparing && ctx->magic == CFW_CTX_MAGIC) cfw_cache_reap(ctx);
         if (ctx && ctx->direct_active) {
             uint32_t deadline = ctx->direct_lease_deadline;
             if (deadline != 0 && (int32_t)(deadline - FW_MS_TICK) > 0)

@@ -148,7 +148,7 @@ static void invalid_and_lifecycle(void) {
     CHECK(show_ids(12,ids,vers,9)==CFW_CACHE_REPLY_REFUSED && reply_extra()[0]==CFW_CACHE_REFUSE_EDGES && sc->active_count==8);
     /* Lease expiry prevents writes and stops timers. */
     CHECK(rotate1(13,100,180*256,50,50,1000)==CFW_CACHE_REPLY_APPLIED);
-    g_lease=0;CHECK(rotate1(14,100,0,50,50,0)==-1);tick();CHECK(!sc->anim_active);g_lease=1;
+    g_lease=0;CHECK(rotate1(14,100,0,50,50,0)==-1);{int stops=g_timer_stopped,presents=g_presented;tick();CHECK(g_timer_stopped==stops+1 && g_presented==presents);}g_lease=1;
     /* No shadow at all: the SHOW fails instead of rendering anywhere. */
     g_shadow_missing=1;CHECK(show_ids(15,ids,vers,1)==-1);g_shadow_missing=0;
     /* A timer that cannot be created snaps the rotation to its end. */

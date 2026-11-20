@@ -308,10 +308,12 @@ typedef struct {
      * gate. A handler leaves its reply (transport kind 5) in cache_reply; the
      * transport sets cache_reply_cap to what one notification can carry. --- */
     uint16_t cache_epoch;
-    uint8_t  cache_lost;
+    volatile uint8_t cache_lost;
     uint8_t  cache_reply_len;
     uint8_t  cache_reply_cap;
-    uint8_t  cache_pad0[3];
+    uint8_t  scene_period;                  /* animation frame period, ms (revision 55: read outside the gate) */
+    volatile uint8_t cache_preparing;       /* cfw_cache_prepare is writing the block outside the gate */
+    uint8_t  cache_pad0[1];
     uint32_t texture_cache_size;            /* bytes the store allocation actually got (<= 256 KiB) */
     uint8_t  cache_reply[256];
     /* --- Revision 40: microphone volume gate (volume_gate.c, sid-0x09 fields

@@ -76,7 +76,9 @@
  *   epoch 0 asks for the current epoch. Replies UNCHANGED when the phone is at
  *   the current revision, DELTA with the journal entries after its revision
  *   when they fit one reply, otherwise SNAPSHOT page `page` of every resident
- *   object and asset. Queries do not touch recency.
+ *   object and asset. Queries do not touch recency. STATE needs no lease, but
+ *   a lease whose deadline has passed loses the cache first (revision 55): the
+ *   old epoch is then answered STALE, and epoch 0 RESET.
  *
  * Mode 41 CONTROL: [41][epoch][request][sub]
  *   sub 0 [cap:u8]?  RESET: drop everything and adopt `epoch` as the new epoch
@@ -103,9 +105,12 @@
  *   A malformed message is NACKed by the transport and gets no reply.
  *
  * Eviction. The active list and its assets are pinned, as is everything a
- * transaction in progress references. When a descriptor or store space is
- * needed, unreferenced assets go first, then the least recently used unpinned
- * object (lowest index on a tie); the objects' now-unreferenced assets follow.
+ * transaction in progress references. An object descriptor takes the least
+ * recently used unpinned object (lowest index on a tie). An asset descriptor
+ * or store space takes unreferenced assets first, then only objects that hold
+ * an asset, the last reference to one before a shared one (revision 55); the
+ * objects' now-unreferenced assets follow. Assets of up to 1 KiB are placed
+ * from the top of the store, larger ones from the bottom.
  * Recency advances only on accepted PUTs and SHOWs, in message order, never
  * on animation ticks, queries or a repeated request. The displayed scene is
  * never evicted to make a failed replacement fit: that is CAPACITY.
@@ -115,13 +120,17 @@
  * string with a font asset; mode-36 IMAGE/TEXT records resolve the same way.
  *
  * Threads: the receiving task owns the display gate while it mutates the cache
- * or renders. Animation frames are paced by a CFW osTimer; the callback takes
- * the same gate, advances every active animation, plans the box that changed,
- * queues only its rows and lets display_copy_hook paint it right before the
- * copy; a frame that changes nothing is not queued. Lease loss only flags the
- * cache as lost (cfw_cache_lose, any thread); the memory is released under the
- * gate by the next handler or display refresh (cfw_cache_reap), except that a
- * RESET under a live lease empties it in place for the new epoch (revision 54). */
+ * or renders; before the gate cfw_cache_prepare allocates into the block, and
+ * cache_preparing keeps the display task from reaping it meanwhile. Animation
+ * frames are paced by a CFW osTimer; the callback tries the same gate without
+ * waiting (a busy gate skips the frame), advances every active animation,
+ * plans the box that changed, queues only its rows and lets display_copy_hook
+ * paint it right before the copy; a frame that changes nothing is not queued.
+ * Lease loss only flags the cache as lost and stops the timer (cfw_cache_lose,
+ * any thread) and, like the callback before it holds the gate, never touches
+ * the block. The memory is released under the gate by the next handler or
+ * display refresh (cfw_cache_reap), except that a RESET under a live lease
+ * empties it in place for the new epoch (revision 54). */
 
 #define CFW_SHOW_FLAG_PRESENT 0x01u
 #define CFW_SHOW_FLAG_KEEP    0x02u
@@ -249,7 +258,7 @@ static cfw_cache *cfw_cache_get(customCfwContext *ctx) {
     if (sc == 0) return 0;
     bzero((uint8_t *)sc, sizeof(cfw_cache));
     sc->magic = CFW_CACHE_MAGIC;
-    sc->period_ms = CFW_SCENE_DEFAULT_PERIOD;
+    ctx->scene_period = CFW_SCENE_DEFAULT_PERIOD;
     sc->store_bytes = ctx->texture_cache ? ctx->texture_cache_size : 0;
     ctx->scene = sc;
     (void)cfw_cache_epoch(ctx);
@@ -293,7 +302,7 @@ static uint8_t *cfw_scene_frame(cfw_cache *sc) {
     return sc->fb;
 }
 
-/* Stop pacing frames. Safe from any thread, including the timer callback. */
+/* Stop pacing frames. Display gate held: it writes the cache block. */
 static void cfw_scene_stop(customCfwContext *ctx) {
     cfw_cache *sc = cfw_cache_peek(ctx);
     if (sc) sc->anim_active = 0;
@@ -328,23 +337,28 @@ static void cfw_scene_release(customCfwContext *ctx) {
     cfw_cache_free_storage(ctx);
 }
 
-/* Lease expiry or release, from any thread: stop animating and mark the cache
- * lost. Its memory is reclaimed under the display gate by cfw_cache_reap. */
+/* Lease expiry or release, from any thread (the settings worker threads, the
+ * timer task, a handler): stop the frame timer and mark the cache lost. Only
+ * the context is written. A reap on the display task or a mode-11 cleanup may
+ * be freeing the cache block meanwhile; cfw_cache_reap reclaims it under the
+ * display gate. */
 static void cfw_cache_lose(customCfwContext *ctx) {
     if (ctx == 0) return;
-    cfw_scene_stop(ctx);
+    if (ctx->scene_timer) FW_TIMER_STOP(ctx->scene_timer);
     if (ctx->scene || ctx->texture_cache) {
         ctx->cache_lost = 1;
         cfw_cache_next_epoch(ctx);
     }
 }
 
+/* cache_lost clears only once the block is gone: until then a prepare on
+ * another task must keep away from it. */
 static void cfw_cache_reap(customCfwContext *ctx) {
     if (ctx == 0 || !ctx->cache_lost) return;
-    ctx->cache_lost = 0;
     cfw_cache *sc = cfw_cache_peek(ctx);
     if (sc) cfw_scene_settled(ctx, sc);
     cfw_cache_free_storage(ctx);      /* cfw_cache_lose already moved the epoch */
+    ctx->cache_lost = 0;
 }
 
 /* Revision 49: staging may evict descriptors and reuse their store space.
@@ -362,8 +376,8 @@ static uint32_t cfw_put_entry_len(const uint8_t *p, uint32_t avail);
 
 /* Bound writes from the wire without touching the rendering workspace. Paths
  * can expand to the maximum edge count; all other writes fit in their entry.
- * A smaller allocation is still usable: staging refuses before overwriting
- * bytes it cannot save, then rolls back. */
+ * A smaller allocation is still usable: once it is full the rest of the
+ * message applies without rollback, as without a workspace (revision 55). */
 static void cfw_cache_prepare_undo(cfw_cache *sc, uint8_t mode,
                                    const uint8_t *src, uint32_t srclen) {
     uint32_t pos = mode == 37 ? 4u : 7u;
@@ -424,19 +438,32 @@ static void cfw_cache_prepare(customCfwContext *ctx, uint8_t mode,
         return;
     }
     if (ctx == 0 || mode < 37 || mode > 41 || mode == 40) return;
-    /* A lost cache is freed under the gate by the handler; the next message prepares. */
-    if (ctx->cache_lost || !cfw_fb_lease_active()) return;
-    cfw_cache *sc = cfw_cache_get(ctx);
-    if (sc == 0) return;
-    (void)cfw_cache_store(ctx);                 /* RESET reports the size the heap gave */
-    if (mode == 37 || mode == 38) {
-        /* paths and rotation need the vector workspace (heap 13); take it now too */
-        if (!sc->vector_work) sc->vector_work = (cfw_vector_work *)cfw_heap13_malloc(sizeof(cfw_vector_work));
-        cfw_cache_prepare_undo(sc, mode, src, srclen);
+    /* This writes the block outside the gate, so the display task must not
+     * reap it meanwhile (display_copy_hook checks cache_preparing after
+     * cache_lost; this checks cache_lost after setting it). A lost cache is
+     * freed under the gate by the handler; the next message prepares. */
+    ctx->cache_preparing = 1;
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    cfw_cache *sc = ctx->cache_lost || !cfw_fb_lease_active() ? 0 : cfw_cache_get(ctx);
+    if (sc) {
+        (void)cfw_cache_store(ctx);             /* RESET reports the size the heap gave */
+        if (mode == 37 || mode == 38) {
+            /* paths and rotation need the vector workspace (heap 13); take it now too */
+            if (!sc->vector_work) sc->vector_work = (cfw_vector_work *)cfw_heap13_malloc(sizeof(cfw_vector_work));
+            cfw_cache_prepare_undo(sc, mode, src, srclen);
+        }
     }
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    ctx->cache_preparing = 0;
 }
 
-/* --- store allocator (16-byte granules, first fit) ----------------------------- */
+/* --- store allocator (16-byte granules, first fit) -----------------------------
+ * Revision 55: an asset of at most CFW_CACHE_SMALL granules (strings, inline
+ * text, small paths) takes the first fit from the top, anything larger from
+ * the bottom. The store never compacts, and a shown scene pins its strings:
+ * placed first fit they split the space between large assets, so a font failed
+ * CAPACITY with most of the store evictable. */
+#define CFW_CACHE_SMALL 64u
 
 static uint32_t cfw_store_granules(uint32_t len) {
     return (len + CFW_CACHE_GRANULE - 1u) / CFW_CACHE_GRANULE;
@@ -461,12 +488,14 @@ static uint32_t cfw_store_capacity(const cfw_cache *sc) {
 static int cfw_store_alloc(cfw_cache *sc, uint32_t len, uint32_t *offset) {
     uint32_t need = cfw_store_granules(len), limit = cfw_store_capacity(sc);
     if (need == 0 || need > limit) return 0;
+    int down = need <= CFW_CACHE_SMALL;
     uint32_t run = 0;
-    for (uint32_t g = 0; g < limit; g++) {
-        if (sc->bitmap[g >> 5] == 0xffffffffu) { g |= 31u; run = 0; continue; }
+    for (uint32_t i = 0; i < limit; i++) {
+        uint32_t g = down ? limit - 1u - i : i;
+        if (sc->bitmap[g >> 5] == 0xffffffffu) { i += down ? g & 31u : 31u - (g & 31u); run = 0; continue; }
         if (cfw_store_bit(sc, g)) { run = 0; continue; }
         if (++run == need) {
-            uint32_t g0 = g + 1u - need;
+            uint32_t g0 = down ? g : g + 1u - need;
             cfw_store_mark(sc, g0, need, 1);
             *offset = g0 * CFW_CACHE_GRANULE;
             return 1;
@@ -643,17 +672,31 @@ static int cfw_evict_asset(cfw_cache *sc, uint32_t *evicted) {
     return 1;
 }
 
-static int cfw_evict_object(cfw_cache *sc, uint32_t *evicted) {
-    int best = -1;
+/* The least recently used unpinned inactive object; 0 when there is none.
+ * For an asset descriptor or store space (`for_asset`), an object holding no
+ * asset frees neither and stays: the LRU object that holds the last reference
+ * to an asset (always so for a private one) goes first, else the LRU one that
+ * shares an asset with others. Returns 2 when a private asset's bytes were
+ * freed with it, else 1 (revision 55). */
+static int cfw_evict_object(cfw_cache *sc, uint32_t *evicted, int for_asset) {
+    int best = -1, rank = 0;
     for (uint32_t i = 0; i < CFW_CACHE_OBJECTS; i++) {
         const cfw_object *o = &sc->objects[i];
         if (o->id == 0 || (o->state & (CFW_CACHE_ST_ACTIVE | CFW_CACHE_ST_STAGED | CFW_CACHE_ST_PINNED))) continue;
-        if (best < 0 || o->last_use < sc->objects[best].last_use) best = (int)i;
+        int r = 1;
+        if (for_asset) {
+            r = (o->asset && sc->assets[o->asset - 1u].refs == 1) || (o->font && sc->assets[o->font - 1u].refs == 1) ? 2
+                : (o->asset || o->font);
+            if (r == 0) continue;
+        }
+        if (r > rank || (r == rank && o->last_use < sc->objects[best].last_use)) { best = (int)i; rank = r; }
     }
     if (best < 0) return 0;
+    const cfw_object *o = &sc->objects[best];
+    int freed = o->asset && (sc->assets[o->asset - 1u].state & CFW_CACHE_ST_PRIVATE);
     cfw_object_free(sc, (uint32_t)best);
     if (evicted) (*evicted)++;
-    return 1;
+    return 1 + freed;
 }
 
 /* A free descriptor, evicting objects LRU-first when none is free. */
@@ -661,7 +704,7 @@ static int cfw_object_alloc(cfw_cache *sc, uint32_t *evicted) {
     for (;;) {
         for (uint32_t i = 0; i < CFW_CACHE_OBJECTS; i++)
             if (sc->objects[i].id == 0) return (int)i;
-        if (!cfw_evict_object(sc, evicted)) return -1;
+        if (!cfw_evict_object(sc, evicted, 0)) return -1;
     }
 }
 
@@ -669,16 +712,22 @@ static int cfw_asset_alloc(cfw_cache *sc, uint32_t *evicted) {
     for (;;) {
         for (uint32_t i = 0; i < CFW_CACHE_ASSETS; i++)
             if (sc->assets[i].id == 0 && sc->assets[i].length == 0) return (int)i;
-        if (!cfw_evict_asset(sc, evicted) && !cfw_evict_object(sc, evicted)) return -1;
+        if (!cfw_evict_asset(sc, evicted) && !cfw_evict_object(sc, evicted, 1)) return -1;
     }
 }
 
-/* Store space, evicting unreferenced assets then LRU objects until it fits. */
+/* Store space, evicting unreferenced assets then objects that hold assets
+ * until it fits. The bitmap is rescanned only after granules were freed. */
 static int cfw_store_reserve(cfw_cache *sc, uint32_t len, uint32_t *offset, uint32_t *evicted) {
-    for (;;) {
-        if (cfw_store_alloc(sc, len, offset)) return 1;
-        if (!cfw_evict_asset(sc, evicted) && !cfw_evict_object(sc, evicted)) return 0;
+    while (!cfw_store_alloc(sc, len, offset)) {
+        for (;;) {
+            if (cfw_evict_asset(sc, evicted)) break;
+            int r = cfw_evict_object(sc, evicted, 1);
+            if (r == 0) return 0;
+            if (r == 2) break;
+        }
     }
+    return 1;
 }
 
 /* --- rendering ---------------------------------------------------------------- */
@@ -1105,7 +1154,7 @@ static __attribute__((always_inline)) inline void cfw_scene_arm(customCfwContext
         return;
     }
     sc->anim_active = 1;
-    FW_TIMER_START(ctx->scene_timer, sc->period_ms);
+    FW_TIMER_START(ctx->scene_timer, ctx->scene_period);
 }
 
 /* `present` = 0 inside a mode-8 bundle: render into the owned shadow that
@@ -1197,9 +1246,10 @@ static int cfw_txn_fail(cfw_txn *t, uint8_t status, uint8_t reason) {
     return 0;
 }
 
-/* Called before pinning or staging. Without a workspace the message applies
- * without rollback, as before revision 49: a rejection keeps its evictions and
- * moves the revision (revision 50; refusing every PUT left the panel blank). */
+/* Called before pinning or staging. Without a workspace, or once it is full,
+ * the message applies without rollback, as before revision 49: a rejection
+ * keeps its evictions and moves the revision (revisions 50 and 55; refusing
+ * those PUTs left the panel blank or reset the cache whenever the store filled). */
 static int cfw_txn_snapshot(cfw_txn *t) {
     cfw_undo *undo = t->sc->undo;
     if (!undo) return 1;
@@ -1216,7 +1266,7 @@ static int cfw_txn_save_bytes(cfw_txn *t, uint32_t offset, uint32_t len) {
     for (uint32_t g = offset / CFW_CACHE_GRANULE; g < end; g++) {
         uint32_t bit = 1u << (g & 31u);
         if (!(undo->before.bitmap[g >> 5] & bit) || (undo->saved[g >> 5] & bit)) continue;
-        if (t->undo_count >= t->sc->undo_capacity) return cfw_txn_fail(t, CFW_CACHE_REPLY_CAPACITY, 0);
+        if (t->undo_count >= t->sc->undo_capacity) { t->undo_active = 0; return 1; }
         uint32_t at = t->undo_count++;
         undo->granules[at].offset = g * CFW_CACHE_GRANULE;
         memcpy(undo->granules[at].bytes, t->store + g * CFW_CACHE_GRANULE, CFW_CACHE_GRANULE);
@@ -1933,7 +1983,7 @@ static int cfw_cache_show(customCfwContext *ctx, const uint8_t *src, uint32_t sr
         sc->objects[i].state &= (uint8_t)~(CFW_CACHE_ST_PINNED | CFW_CACHE_ST_NEXT);
     if (flags & CFW_SHOW_FLAG_FREEZE)
         for (uint32_t i = 0; i < sc->active_count; i++) cfw_object_freeze(&sc->objects[sc->active[i]]);
-    cfw_op_clock clock = { FW_MS_TICK, sc->period_ms };   /* every op of a SHOW starts on the same tick */
+    cfw_op_clock clock = { FW_MS_TICK, ctx->scene_period };   /* every op of a SHOW starts on the same tick */
     for (pos = ops; pos < srclen; pos += cfw_op_len(src + pos, srclen - pos)) cfw_op_apply(sc, src + pos, &clock);
     sc->bg = bg;
     sc->last_show_request = request;
@@ -1991,6 +2041,7 @@ static int cfw_cache_hide(customCfwContext *ctx, const uint8_t *src, uint32_t sr
 
 static int cfw_cache_state(customCfwContext *ctx, const uint8_t *src, uint32_t srclen) {
     if (srclen < 8u) return -1;
+    (void)cfw_fb_lease_active();                  /* a lapsed lease loses the cache before it is described */
     cfw_cache_reap(ctx);
     uint16_t epoch = (uint16_t)rd16(src);
     uint32_t revision = rd32(src + 2);
@@ -2061,14 +2112,12 @@ static int cfw_cache_state(customCfwContext *ctx, const uint8_t *src, uint32_t s
 static void cfw_cache_reset(customCfwContext *ctx, cfw_cache *sc, uint16_t epoch) {
     cfw_scene_stop(ctx);
     cfw_scene_settled(ctx, sc);
-    uint8_t period = sc->period_ms;
     cfw_vector_work *work = sc->vector_work;
     cfw_undo *undo = sc->undo;
     uint32_t undo_capacity = sc->undo_capacity;
     uint32_t store_bytes = sc->store_bytes;
     bzero((uint8_t *)sc, sizeof(*sc));
     sc->magic = CFW_CACHE_MAGIC;
-    sc->period_ms = period;
     sc->vector_work = work;
     sc->undo = undo;
     sc->undo_capacity = undo_capacity;
@@ -2133,7 +2182,7 @@ static int cfw_cache_control(customCfwContext *ctx, const uint8_t *src, uint32_t
         if (ms < CFW_SCENE_MIN_PERIOD) ms = CFW_SCENE_MIN_PERIOD;
         if (ms > CFW_SCENE_MAX_PERIOD) ms = CFW_SCENE_MAX_PERIOD;
         if (sc == 0) { cfw_reply_simple(ctx, 41, request, CFW_CACHE_REPLY_CAPACITY, 0, 0); return 0; }
-        sc->period_ms = (uint8_t)ms;
+        ctx->scene_period = (uint8_t)ms;
         cfw_reply_simple(ctx, 41, request, CFW_CACHE_REPLY_APPLIED, sc, 0);
         return 0;
     }
@@ -2213,28 +2262,25 @@ static int cfw_cache_immediate(customCfwContext *ctx, uint8_t mode, uint8_t *sha
 
 /* --- frame timer ------------------------------------------------------------------ */
 
-/* osTimer callback on the RTOS timer thread. Mirrors image_worker's gate
- * discipline: take the display gate, mutate, queue one refresh, and leave the
- * gate held until the display task consumes the job. Frames are dropped
- * rather than queued up when the display task is still busy, and any lease
- * lapse, timeout or missing scene ends the animation quietly. Non-static so
- * -O2 keeps it: osTimerNew only ever sees it as a function-pointer value. */
+/* osTimer callback on the RTOS timer task, which every other osTimer shares,
+ * so it never waits: a display gate held by a handler, or by a frame the
+ * display task has not copied yet, skips this frame and re-arms. Before the
+ * gate only the context is read, since a lease loss on another task may be
+ * freeing the cache block. Under the gate it advances every active animation,
+ * queues one refresh and leaves the gate held until the display task consumes
+ * the job. Non-static so -O2 keeps it: osTimerNew only ever sees it as a
+ * function-pointer value. */
 void scene_tick(void *arg) {
     customCfwContext *ctx = (customCfwContext *)arg;
-    if (ctx == 0 || ctx->magic != CFW_CTX_MAGIC) return;
-    if (!cfw_fb_lease_active()) { cfw_scene_stop(ctx); return; }
+    if (ctx == 0 || ctx->magic != CFW_CTX_MAGIC || ctx->scene_timer == 0) return;
+    if (!cfw_fb_lease_active()) { FW_TIMER_STOP(ctx->scene_timer); return; }
+    if (ctx->cache_lost) return;
+    void *sem = FW_DISPLAY_SEM;
+    if (ctx->direct_pending || (sem && !FW_SEM_TAKE(sem, 0))) {
+        FW_TIMER_START(ctx->scene_timer, ctx->scene_period);
+        return;
+    }
     cfw_cache *sc = cfw_cache_peek(ctx);
-    if (sc == 0 || !sc->anim_active || ctx->scene_timer == 0 || ctx->cache_lost) return;
-    if (ctx->direct_pending) {                     /* display task still busy: skip a frame */
-        FW_TIMER_START(ctx->scene_timer, sc->period_ms);
-        return;
-    }
-    FW_DISPLAY_WAIT();
-    if (ctx->direct_pending) {                     /* timed out; we do not own the gate */
-        sc->anim_active = 0;
-        return;
-    }
-    sc = cfw_cache_peek(ctx);                      /* re-read under the gate */
     if (sc == 0 || !sc->anim_active || sc->fb == 0 || ctx->cache_lost) {
         if (sc) sc->anim_active = 0;
         FW_DISPLAY_SIGNAL();
@@ -2245,7 +2291,7 @@ void scene_tick(void *arg) {
     rl.n = 0;
     rl.direct_submitted = 0;
     cfw_scene_plan(ctx, sc, sc->fb, &rl);
-    if (moving) FW_TIMER_START(ctx->scene_timer, sc->period_ms);
+    if (moving) FW_TIMER_START(ctx->scene_timer, ctx->scene_period);
     else {
         sc->anim_active = 0;
         cfw_scene_settled(ctx, sc);

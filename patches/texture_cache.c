@@ -15,7 +15,11 @@
  *
  * Revision 38: nothing here knows about the asset store. The object cache
  * (scene.c) resolves a versioned asset id to a (base, size) region and these
- * helpers validate and draw inside that region only. */
+ * helpers draw inside that region only. Revision 55: an asset's bytes are
+ * validated once, when its upload completes (cfw_asset_content_valid), and
+ * stay unchanged while it is resident, so the draws take a complete cached
+ * asset as valid and check only what a message still chooses: the characters
+ * and which glyphs they use. */
 
 #define CFW_TEXTURE_OPT_TRANSPARENT 0x10u
 #define CFW_TEXTURE_OPT_INVERSE     0x20u
@@ -128,8 +132,10 @@ static void cfw_texture_make_lut(uint8_t options, uint8_t *lut) {
 }
 
 /* Render a previously validated image, clipping signed coordinates to the
- * physical packed-4bpp shadow. Transparency tests the original source value,
- * before the LUT, so source color 0 is skipped even for an inverse ramp. */
+ * physical packed-4bpp shadow. It stops after the image's last row, so
+ * `rle_len` may run past the image (a glyph inside its font). Transparency
+ * tests the original source value, before the LUT, so source color 0 is
+ * skipped even for an inverse ramp. */
 static void cfw_texture_render(uint8_t *shadow, uint32_t stride,
                                uint32_t panel_w, uint32_t panel_h,
                                int32_t x0, int32_t y0,
@@ -166,7 +172,7 @@ static void cfw_texture_render(uint8_t *shadow, uint32_t stride,
             col += run;
             if (col == image->width) {
                 col = 0;
-                if (++y >= (int32_t)panel_h) return;
+                if (++y >= (int32_t)panel_h || (uint32_t)(y - y0) == image->height) return;
             }
         }
     }
@@ -218,15 +224,23 @@ static void cfw_texture_add_rect(cfw_rectlist *rl, int32_t x, int32_t y,
                (uint32_t)(right - left), (uint32_t)(bottom - top));
 }
 
-/* Draw the image asset that starts at `data` (`size` bytes long). */
+/* The validated image at `offset` of a complete cached asset. */
+static void cfw_texture_cached(const uint8_t *base, uint32_t size, uint32_t offset, cfw_cached_image *out) {
+    out->rle = base + offset + 2u;
+    out->rle_len = size - offset - 2u;
+    out->width = base[offset];
+    out->height = base[offset + 1u];
+}
+
+/* Draw the complete cached image asset that starts at `data` (`size` bytes long). */
 static int cfw_texture_draw_image_region(uint8_t *shadow, uint32_t stride,
                                          uint32_t panel_w, uint32_t panel_h,
                                          const uint8_t *data, uint32_t size,
                                          int32_t x, int32_t y, uint8_t options,
                                          cfw_rectlist *rl) {
-    if (shadow == 0 || !cfw_fb_lease_active()) return -1;
+    if (shadow == 0 || data == 0 || size < 3u || !cfw_fb_lease_active()) return -1;
     cfw_cached_image image;
-    if (!cfw_texture_image_in(data, size, 0, &image)) return -1;
+    cfw_texture_cached(data, size, 0, &image);
     uint8_t lut[16];
     cfw_texture_make_lut(options, lut);
     cfw_texture_render(shadow, stride, panel_w, panel_h, x, y, &image,
@@ -250,8 +264,9 @@ static int cfw_texture_font_valid(const uint8_t *font, uint32_t size) {
     return 1;
 }
 
-/* Draw `string` with the font asset at `font`. Bytes 1..31 adjust x by -10..20;
- * byte 0, bytes above 127 and absent glyphs are invalid and nothing is drawn. */
+/* Draw `string` with the complete cached font asset at `font`. Bytes 1..31
+ * adjust x by -10..20; byte 0, bytes above 127 and absent glyphs are invalid
+ * and nothing is drawn. */
 static int cfw_texture_draw_string_region(uint8_t *shadow, uint32_t stride,
                                           uint32_t panel_w, uint32_t panel_h,
                                           const uint8_t *font, uint32_t font_size,
@@ -261,17 +276,14 @@ static int cfw_texture_draw_string_region(uint8_t *shadow, uint32_t stride,
     if (shadow == 0 || string == 0 || font == 0 || !cfw_fb_lease_active()) return -1;
     if (font_size < CFW_FONT_TABLE_BYTES) return -1;
 
-    /* Validate every character/table entry/RLE stream before drawing any glyph. */
+    /* Every character and glyph is checked before any glyph is drawn. */
     uint8_t lut[16];
     cfw_texture_make_lut(options, lut);
     int transparent = (options & CFW_TEXTURE_OPT_TRANSPARENT) != 0;
     for (uint32_t i = 0; i < string_len; i++) {
         uint32_t ch = string[i];
         if (ch >= 1u && ch <= 31u) continue;
-        if (ch < 32u || ch > 127u) return -1;
-        uint32_t image_offset = rd32(font + (ch - 32u) * 4u);
-        cfw_cached_image image;
-        if (image_offset == 0 || !cfw_texture_image_in(font, font_size, image_offset, &image)) return -1;
+        if (ch < 32u || ch > 127u || rd32(font + (ch - 32u) * 4u) == 0) return -1;
     }
 
     for (uint32_t i = 0; i < string_len; i++) {
@@ -280,10 +292,8 @@ static int cfw_texture_draw_string_region(uint8_t *shadow, uint32_t stride,
             x += (int32_t)ch - 11;
             continue;
         }
-        uint32_t image_offset = rd32(font + (ch - 32u) * 4u);
         cfw_cached_image image;
-        /* Already validated above; the store cannot change inside this handler. */
-        if (!cfw_texture_image_in(font, font_size, image_offset, &image)) return -1;
+        cfw_texture_cached(font, font_size, rd32(font + (ch - 32u) * 4u), &image);
         cfw_texture_render(shadow, stride, panel_w, panel_h, x, y, &image,
                            lut, transparent);
         cfw_texture_add_rect(rl, x, y, image.width, image.height, panel_w, panel_h);

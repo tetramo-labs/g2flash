@@ -135,7 +135,6 @@ typedef struct cfw_cache_s {
     uint8_t  bg;            /* background gray the scene clears to */
     uint8_t  anim_active;   /* at least one active object has frames left */
     volatile uint8_t render_due; /* display_copy_hook must re-render before copying */
-    uint8_t  period_ms;     /* animation frame period */
     uint8_t  settle_pending; /* a tagged SHOW has not reported settled yet */
     uint8_t  last_show_valid; /* last_show_request holds the last applied SHOW/HIDE */
     uint8_t  full_redraw;   /* the panel holds pixels no object accounts for: redraw everything */
