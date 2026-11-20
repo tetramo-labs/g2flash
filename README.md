@@ -538,6 +538,37 @@ after a settings read, as a separate notification rather than inside the
 settings reply. Detect support by revision 24 or later, or by the `RB` report.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
 
+### A RESET racing lease loss, the gate handover and a missing display gate in the object cache (revision 56)
+
+Revision 56 (`GLASSLYCFW/56`) fixes three defects an independent review of
+revision 55 found.
+
+ * A RESET under a live lease clears the lost flag so that it can empty a lost
+   cache in place. When FB_RELEASE on a settings worker thread, or a lapse
+   another task noticed, landed between the RESET's lease check and that
+   clear, revision 55 overwrote the loss: the RESET was NACKed, and the cache
+   block and the asset store (up to 256 KiB) stayed allocated with no lease
+   until the next FB_ACQUIRE or mode 11. Lease loss now moves the epoch before
+   it sets the flag, and the RESET sets the flag again when the epoch moved
+   meanwhile, so its prologue frees the cache.
+ * Queuing a frame hands the display gate to the display task, which gives it
+   back once it has copied the frame; a stock refresh may then free a cache
+   that was lost during the message. Revisions 52 to 55 still reported settled
+   and read the revision for the reply from the cache block after queuing the
+   frame, so a SHOW or HIDE could read and write freed heap. Both now finish
+   with the block before they queue the frame.
+ * The frame timer skips a frame and re-arms while the stock firmware has not
+   created the display gate. Revision 55 rendered without the gate and then
+   gave back a null one.
+
+The wire format is unchanged. Host tests: `test_reset_loss_race` and
+`test_present_hands_over_gate` in the shapes suite, and a missing-gate case in
+`test_tick_gate_busy`; revision 55 fails all three, the second as a
+heap-use-after-free under the sanitizers. The host suites now check the
+cache's invariants after every message and tick, and
+`patches/host/cache_fuzz_host_test.c` sends random cache traffic under the
+same checks. Revision 56 has not been tested on hardware.
+
 ### Lease checks, cross-task writes and store placement in the object cache (revision 55)
 
 Revision 55 (`GLASSLYCFW/55`) fixes the remaining object cache audit findings.

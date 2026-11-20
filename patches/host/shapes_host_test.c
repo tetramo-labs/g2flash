@@ -37,7 +37,7 @@ static uint32_t g_now;
 #define IMAGE_BYTES (IMAGE_STRIDE * IMAGE_H)
 
 static customCfwContext g_ctx;
-static int g_lease = 1, g_lease_lapse;
+static int g_lease = 1, g_lease_lapse, g_release_after_check;
 static int g_timer_started, g_timer_stopped, g_gate_waits, g_gate_signals, g_presented;
 static int g_fail_frame_alloc, g_presented_shadow;
 static uint8_t g_container_shadow[640 * 480 / 2];
@@ -45,11 +45,16 @@ static uint8_t g_container_shadow[640 * 480 / 2];
 static customCfwContext *peekCustomCfwContext(void) { return &g_ctx; }
 static customCfwContext *getCustomCfwContext(void) { return &g_ctx; }
 static void cfw_cache_lose(customCfwContext *ctx);
+static void cfw_cache_reap(customCfwContext *ctx);
 /* g_lease_lapse: the deadline has passed and nothing has checked it yet; the
- * next check loses the cache and clears the lease, as settings_ext.c does. */
+ * next check loses the cache and clears the lease, as settings_ext.c does.
+ * g_release_after_check: FB_RELEASE on a settings worker thread runs right
+ * after the next check has read a live lease. */
 int cfw_fb_lease_active(void) {
     if (g_lease_lapse) { g_lease_lapse = 0; g_lease = 0; cfw_cache_lose(&g_ctx); }
-    return g_lease;
+    int live = g_lease;
+    if (g_release_after_check) { g_release_after_check = 0; g_lease = 0; cfw_cache_lose(&g_ctx); }
+    return live;
 }
 static void rl_add(cfw_rectlist *rl, uint32_t l, uint32_t t, uint32_t w, uint32_t h) {
     if (rl && rl->n < CFW_RECT_MAX) {
@@ -109,7 +114,8 @@ static void stub_gate_signal(void) { g_gate_signals++; }
 #define FW_DISPLAY_WAIT stub_gate_wait
 #define FW_DISPLAY_SIGNAL stub_gate_signal
 #define FW_SEM_TAKE stub_sem_take
-#define FW_DISPLAY_SEM ((void *)&g_display_sem)
+static void *g_display_sem_handle = &g_display_sem;   /* 0: the stock firmware has not created it */
+#define FW_DISPLAY_SEM g_display_sem_handle
 
 /* The real image/font renderers over asset regions; the built-in LVGL font
  * path calls stock entry points, so it is replaced by a box painter that draws
@@ -131,14 +137,18 @@ static int cfw_builtin_draw_string_buf(uint8_t *shadow, uint32_t stride, uint32_
     (void)rl; (void)tokens; uint32_t n = src[5]; if (len != 6 + n || n > max_tokens) return -1;
     stub_box(shadow, stride, w, h, (int16_t)rd16(src), (int16_t)rd16(src + 2), 10 * n, 20, src[4] & 15); return 0;
 }
-/* g_present_fail: the display queue refuses the frame. The first rect of the last present is kept. */
-static int g_present_fail, g_present_n;
+/* g_present_fail: the display queue refuses the frame. The first rect of the last present is kept.
+ * g_reap_on_present: FB_RELEASE lands during the message, and the display
+ * task copies the frame, gives the gate back and runs a stock refresh, which
+ * reaps the lost cache, before the presenting task resumes. */
+static int g_present_fail, g_present_n, g_reap_on_present;
 static cfw_rect g_present_rect;
 static void present_buffer(customCfwContext *ctx, const uint8_t *buf, cfw_rectlist *rl) {
-    (void)ctx; (void)buf; g_presented++;
+    (void)buf; g_presented++;
     g_present_n = rl ? (int)rl->n : 0;
     if (rl && rl->n) g_present_rect = rl->r[0];
     if (rl && !g_present_fail) rl->direct_submitted = 1;
+    if (g_reap_on_present) { g_reap_on_present = 0; g_lease = 0; cfw_cache_lose(ctx); cfw_cache_reap(ctx); }
 }
 static uint8_t g_hint;
 static void cfw_message_reply_capacity_hint(uint8_t capacity) { g_hint = capacity; }
@@ -449,6 +459,7 @@ static void fresh(void) {
     bzero((uint8_t *)&g_ctx, sizeof g_ctx);
     g_ctx.magic = CFW_CTX_MAGIC;
     g_lease = 1; g_lease_lapse = 0; g_gate_busy = 0; g_alloc_fail_after = -1; g_store_fail = 0; g_shadow_missing = 0; g_fail_timer = 0;
+    g_release_after_check = 0; g_reap_on_present = 0; g_display_sem_handle = &g_display_sem;
     bzero(g_container_shadow, sizeof g_container_shadow);
     g_epoch = 0;
     m_begin(1); g_msg[g_len++] = 0;                      /* RESET */
@@ -2200,12 +2211,63 @@ static void test_tick_gate_busy(void) {
     CHECK(g_presented == presents && g_gate_signals == signals && bytes_equal(g_block, sc, sizeof g_block));
     CHECK(g_timer_started == starts + 1);
     g_gate_busy = 0;
+    /* Revision 56: before the stock firmware creates the gate the timer skips
+     * the frame too. Revision 55 rendered without it and gave back a null one. */
+    g_display_sem_handle = 0;
+    starts = g_timer_started;
+    g_now = start + 50;
+    scene_tick(&g_ctx);
+    CHECK(g_presented == presents && g_gate_signals == signals && bytes_equal(g_block, sc, sizeof g_block));
+    CHECK(g_timer_started == starts + 1);
+    g_display_sem_handle = &g_display_sem;
     g_now = start + 66;
     scene_tick(&g_ctx);
     if (sc->fb) cfw_scene_render_if_due(&g_ctx, sc->fb);
     CHECK(g_presented == presents + 1 && obj(1)->p[0] > 100 && sc->anim_active);
     for (int i = 0; i < 12; i++) tick();
     CHECK(obj(1)->p[0] == 200 && !sc->anim_active);
+}
+
+/* Revision 56: FB_RELEASE on a settings worker thread, or a lapse another task
+ * notices, can land between a RESET's lease check and its clearing of the
+ * lost flag. Revision 55 overwrote that loss: the RESET was NACKed, and the
+ * block and the store stayed allocated with no lease until the next FB_ACQUIRE
+ * or mode 11, since no display refresh reaps a cache that is not lost. */
+static void test_reset_loss_race(void) {
+    fresh();
+    put_circle(1, 1, 10, 10, 15);
+    m_begin(2); g_msg[g_len++] = 0;
+    cfw_cache_prepare(&g_ctx, 41, g_msg, g_len);
+    g_release_after_check = 1;
+    cfw_rectlist rl = { 0 };
+    CHECK(cfw_scene_dispatch(&g_ctx, 41, g_msg, g_len, 1, &rl) == -1);
+    cfw_cache_reap(&g_ctx);                                   /* the next display refresh */
+    CHECK(g_ctx.scene == 0 && g_ctx.texture_cache == 0 && g_alloc_live == 0);
+    g_lease = 1;
+}
+
+/* Revision 56: present_buffer hands the display gate to the display task. Once
+ * it has copied the frame and given the gate back, a stock refresh may reap a
+ * cache that FB_RELEASE lost during the message. Revisions 52 to 55 reported
+ * settled and read the revision from the cache block after presenting, so a
+ * SHOW or HIDE could read and write freed heap. */
+static void test_present_hands_over_gate(void) {
+    uint32_t o[] = { 1 }, w[] = { 1 };
+    fresh();
+    put_circle(1, 1, 100, 100, 15);
+    int settled = g_settled;
+    m_show(7, CFW_SHOW_FLAG_PRESENT | CFW_SHOW_FLAG_TAG, 0); m_refs(o, w, 1);
+    g_reap_on_present = 1;
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_request() == 7);
+    CHECK(g_settled == settled + 1 && g_settled_tag == 7);
+    CHECK(g_ctx.scene == 0 && g_ctx.texture_cache == 0 && g_alloc_live == 0);
+    fresh();
+    put_circle(1, 1, 100, 100, 15);
+    m_begin(8); g_msg[g_len++] = CFW_SHOW_FLAG_PRESENT; g_msg[g_len++] = 0;
+    g_reap_on_present = 1;
+    CHECK(send(39) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_request() == 8);
+    CHECK(g_ctx.scene == 0 && g_ctx.texture_cache == 0 && g_alloc_live == 0);
+    g_lease = 1;
 }
 
 /* Random images, every token form, positions on and off every edge, views
@@ -2286,6 +2348,8 @@ int main(int argc, char **argv) {
     test_tick_gate_busy();
     test_store_eviction();
     test_store_layout();
+    test_reset_loss_race();
+    test_present_hands_over_gate();
     cfw_scene_release(&g_ctx);
     CHECK(g_alloc_live == 0);
     printf("%s (%d failures, %u invariant checks)\n", g_fail ? "FAILED" : "OK", g_fail, g_invariant_checks);

@@ -467,6 +467,11 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   56 -> a RESET keeps a loss that lands between its lease check and its
+//         clear of the lost flag; a SHOW or HIDE reports settled and builds
+//         its reply before queuing the frame hands the display gate over; the
+//         frame timer skips a frame while the stock display gate does not
+//         exist yet (scene.c).
 //   55 -> a STATE notices a lapsed lease and answers STALE; lease loss no
 //         longer writes the cache block from other tasks; the frame timer
 //         tries the display gate without waiting; a rollback workspace that
@@ -649,7 +654,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/55";
+        static const char caps[] = "GLASSLYCFW/56";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

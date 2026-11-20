@@ -87,7 +87,7 @@ WATCHES = [
     (TAG_LOSE, 'cfw_cache_lose', -1, -1, 0),
     (TAG_REAP, 'cfw_cache_reap', -1, -1, 0),
     (TAG_DISPATCH, 'cfw_scene_dispatch', -1, -1, 0),
-    (TAG_PRESENT, 'cfw_scene_present', -1, -1, 0),
+    (TAG_PRESENT, 'present_buffer', -1, -1, 0),
 ]
 STATUS = {0: 'APPLIED', 1: 'STALE', 2: 'MISSING', 3: 'CAPACITY', 4: 'REFUSED', 5: 'UNCHANGED',
           6: 'DELTA', 7: 'SNAPSHOT', 8: 'RESET'}
@@ -480,7 +480,7 @@ def scenario_checks(ev):
         near = bool(box and abs(box[0] - TEXT_X) <= 4 and abs(box[1] - TEXT_Y) <= 8
                     and 40 <= box[2] - box[0] <= 160 and 8 <= box[3] - box[1] <= 30)
         ok = is_reply(answer, 38, 'APPLIED', 12, PRESENT_EPOCH) and presents >= 1 and near
-        return ok, describe(answer) + f'; cfw_scene_present calls {presents}; lit pixels only in box {box}'
+        return ok, describe(answer) + f'; present_buffer calls {presents}; lit pixels only in box {box}'
     yield 'Presenting SHOW draws the cached text on the panel framebuffer', (
         'present-reset', 'present-put', 'present-show'), present
 

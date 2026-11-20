@@ -121,11 +121,14 @@
  *
  * Threads: the receiving task owns the display gate while it mutates the cache
  * or renders; before the gate cfw_cache_prepare allocates into the block, and
- * cache_preparing keeps the display task from reaping it meanwhile. Animation
- * frames are paced by a CFW osTimer; the callback tries the same gate without
- * waiting (a busy gate skips the frame), advances every active animation,
- * plans the box that changed, queues only its rows and lets display_copy_hook
- * paint it right before the copy; a frame that changes nothing is not queued.
+ * cache_preparing keeps the display task from reaping it meanwhile. Queuing a
+ * frame hands the gate to the display task, after which the block may be
+ * freed, so a SHOW or HIDE reports settled and builds its reply first
+ * (revision 56). Animation frames are paced by a CFW osTimer; the callback
+ * tries the same gate without waiting (a busy gate skips the frame), advances
+ * every active animation, plans the box that changed, queues only its rows and
+ * lets display_copy_hook paint it right before the copy; a frame that changes
+ * nothing is not queued.
  * Lease loss only flags the cache as lost and stops the timer (cfw_cache_lose,
  * any thread) and, like the callback before it holds the gate, never touches
  * the block. The memory is released under the gate by the next handler or
@@ -341,13 +344,15 @@ static void cfw_scene_release(customCfwContext *ctx) {
  * timer task, a handler): stop the frame timer and mark the cache lost. Only
  * the context is written. A reap on the display task or a mode-11 cleanup may
  * be freeing the cache block meanwhile; cfw_cache_reap reclaims it under the
- * display gate. */
+ * display gate. The epoch moves before the flag is set, so a RESET that
+ * clears the flag can tell a loss landed meanwhile (cfw_cache_control). */
 static void cfw_cache_lose(customCfwContext *ctx) {
     if (ctx == 0) return;
     if (ctx->scene_timer) FW_TIMER_STOP(ctx->scene_timer);
     if (ctx->scene || ctx->texture_cache) {
-        ctx->cache_lost = 1;
         cfw_cache_next_epoch(ctx);
+        __atomic_signal_fence(__ATOMIC_SEQ_CST);
+        ctx->cache_lost = 1;
     }
 }
 
@@ -1157,21 +1162,16 @@ static __attribute__((always_inline)) inline void cfw_scene_arm(customCfwContext
     FW_TIMER_START(ctx->scene_timer, ctx->scene_period);
 }
 
-/* `present` = 0 inside a mode-8 bundle: render into the owned shadow that
- * the bundle presents at its end. Reports settled when nothing is animating. */
-static int cfw_scene_present(customCfwContext *ctx, cfw_cache *sc, int present, cfw_rectlist *rl) {
-    sc->render_due = 0;
-    uint8_t *fb = cfw_scene_frame(sc);
-    if (fb == 0) return -1;
-    cfw_scene_render(ctx, sc, fb, rl);
-    if (!present) {
-        ctx->shadow_stale = 0;
-    } else if (rl->n) {                         /* an empty list would refresh the whole panel */
-        present_buffer(ctx, fb, rl);
-        ctx->shadow_stale = 1;
-    }
-    if (!sc->anim_active) cfw_scene_settled(ctx, sc);
-    return 0;
+/* Queue the rendered shadow; `present` = 0 inside a mode-8 bundle, which
+ * presents it at its end. present_buffer hands the display gate to the display
+ * task, and once that has copied the frame and given the gate back, a stock
+ * refresh may free a lost cache: callers are done with the block before this
+ * (revision 56). */
+static void cfw_scene_publish(customCfwContext *ctx, uint8_t *fb, int present, cfw_rectlist *rl) {
+    if (!present) { ctx->shadow_stale = 0; return; }
+    if (rl->n == 0) return;                     /* an empty list would refresh the whole panel */
+    present_buffer(ctx, fb, rl);
+    ctx->shadow_stale = 1;
 }
 
 /* A raster mode is about to own the panel: this is an implicit HIDE without a
@@ -1994,11 +1994,16 @@ static int cfw_cache_show(customCfwContext *ctx, const uint8_t *src, uint32_t sr
         sc->settle_pending = 1;
     }
     cfw_scene_arm(ctx, sc);
-    int r = 0;
-    if (flags & CFW_SHOW_FLAG_PRESENT) r = cfw_scene_present(ctx, sc, present, rl);
-    else if (!sc->anim_active) cfw_scene_settled(ctx, sc);
-    if (r != 0) { cfw_reply_simple(ctx, 38, request, CFW_CACHE_REPLY_CAPACITY, sc, 0); return -1; }
+    uint8_t *fb = 0;
+    if (flags & CFW_SHOW_FLAG_PRESENT) {
+        sc->render_due = 0;
+        fb = cfw_scene_frame(sc);
+        if (fb == 0) { cfw_reply_simple(ctx, 38, request, CFW_CACHE_REPLY_CAPACITY, sc, 0); return -1; }
+        cfw_scene_render(ctx, sc, fb, rl);
+    }
+    if (!sc->anim_active) cfw_scene_settled(ctx, sc);
     cfw_reply_simple(ctx, 38, request, CFW_CACHE_REPLY_APPLIED, sc, (int)(tp->evicted > 255u ? 255u : tp->evicted));
+    if (fb) cfw_scene_publish(ctx, fb, present, rl);
     return 0;
 }
 
@@ -2025,17 +2030,17 @@ static int cfw_cache_hide(customCfwContext *ctx, const uint8_t *src, uint32_t sr
         sc->bg = bg;
     }
     if (flags & CFW_SHOW_FLAG_TAG) cfw_scene_notify_settled(ctx, request);
+    uint8_t *fb = 0;
     if (flags & CFW_SHOW_FLAG_PRESENT) {
-        uint8_t *fb = cfw_shadow_buffer();
+        fb = cfw_shadow_buffer();
         if (fb == 0) return -1;
         cfw_raster r = { fb, IMAGE_STRIDE, (int32_t)IMAGE_W, (int32_t)IMAGE_H };
         cfw_raster_clear(&r, bg);
         if (sc) cfw_drawn_reset(sc, fb, bg);
         rl_add(rl, 0, 0, IMAGE_W, IMAGE_H);
-        if (present) { present_buffer(ctx, fb, rl); ctx->shadow_stale = 1; }
-        else ctx->shadow_stale = 0;
     }
     cfw_reply_simple(ctx, 39, request, CFW_CACHE_REPLY_APPLIED, sc, 0);
+    if (fb) cfw_scene_publish(ctx, fb, present, rl);
     return 0;
 }
 
@@ -2128,10 +2133,19 @@ static void cfw_cache_reset(customCfwContext *ctx, cfw_cache *sc, uint16_t epoch
 
 /* A RESET under a live lease empties a lost cache in place rather than freeing
  * it: nothing may be allocated under the gate, and the prepare before the gate
- * leaves a lost cache alone. */
+ * leaves a lost cache alone. A loss on another task between the lease check
+ * and the clear has moved the epoch (cfw_cache_lose), so the flag is set again
+ * and the prologue frees the cache (revision 56). */
 static int cfw_cache_control(customCfwContext *ctx, const uint8_t *src, uint32_t srclen) {
     uint16_t epoch, request;
-    if (srclen >= 5u && src[4] == 0 && cfw_fb_lease_active()) ctx->cache_lost = 0;
+    if (srclen >= 5u && src[4] == 0) {
+        uint16_t seen = ctx->cache_epoch;
+        if (cfw_fb_lease_active()) {
+            ctx->cache_lost = 0;
+            __atomic_signal_fence(__ATOMIC_SEQ_CST);
+            if (ctx->cache_epoch != seen) ctx->cache_lost = 1;
+        }
+    }
     if (cfw_cache_prologue(ctx, src, srclen, &epoch, &request)) return -1;
     if (srclen < 5u) return -1;
     uint8_t sub = src[4];
@@ -2264,9 +2278,10 @@ static int cfw_cache_immediate(customCfwContext *ctx, uint8_t mode, uint8_t *sha
 
 /* osTimer callback on the RTOS timer task, which every other osTimer shares,
  * so it never waits: a display gate held by a handler, or by a frame the
- * display task has not copied yet, skips this frame and re-arms. Before the
- * gate only the context is read, since a lease loss on another task may be
- * freeing the cache block. Under the gate it advances every active animation,
+ * display task has not copied yet, or not created yet by the stock firmware
+ * (revision 56), skips this frame and re-arms. Before the gate only the
+ * context is read, since a lease loss on another task may be freeing the cache
+ * block. Under the gate it advances every active animation,
  * queues one refresh and leaves the gate held until the display task consumes
  * the job. Non-static so -O2 keeps it: osTimerNew only ever sees it as a
  * function-pointer value. */
@@ -2276,7 +2291,7 @@ void scene_tick(void *arg) {
     if (!cfw_fb_lease_active()) { FW_TIMER_STOP(ctx->scene_timer); return; }
     if (ctx->cache_lost) return;
     void *sem = FW_DISPLAY_SEM;
-    if (ctx->direct_pending || (sem && !FW_SEM_TAKE(sem, 0))) {
+    if (sem == 0 || ctx->direct_pending || !FW_SEM_TAKE(sem, 0)) {
         FW_TIMER_START(ctx->scene_timer, ctx->scene_period);
         return;
     }
