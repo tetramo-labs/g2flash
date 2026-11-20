@@ -532,6 +532,35 @@ after a settings read, as a separate notification rather than inside the
 settings reply. Detect support by revision 24 or later, or by the `RB` report.
 See [the wire contract and stock-firmware evidence](docs/ring-battery.md).
 
+### Re-sent chunks, asset evictions and RESET after a lost lease (revision 54)
+
+Revision 54 (`GLASSLYCFW/54`) fixes three object cache replies.
+
+ * Every chunk of an asset that is already complete, with the same id,
+   version, kind and total length, is a no-op answered APPLIED. Before, only
+   the first chunk was. When the phone re-sent an upload whose last ack it had
+   lost, or that only the other lens needed, the second chunk of any asset over
+   one message (a font atlas over 8,160 bytes) was refused with
+   `CFW_CACHE_REFUSE_UPLOAD`, and the phone answered with a cache RESET and a
+   full re-upload. A chunk of another version, kind or length is still
+   refused, and now that includes a first chunk of another kind.
+ * Assets evicted to make room count in the evicted byte of APPLIED and
+   CAPACITY replies, as objects always did. A rejected message that evicted
+   only assets and had no rollback workspace now moves the revision, so a
+   STATE query from the old revision answers DELTA with the assets gone
+   instead of UNCHANGED.
+ * A RESET under a live lease that arrives after FB_RELEASE (or after an
+   FB_ACQUIRE that found the lease expired) and before any display refresh
+   released the lost cache now empties that cache in place and answers
+   APPLIED with the phone's epoch. Revisions 52 and 53 freed it and answered
+   CAPACITY with the firmware's epoch, so the phone dropped that frame and
+   reset again. Nothing is allocated under the display gate.
+
+The reply format is unchanged. Host tests: `test_resident_chunks`,
+`test_asset_eviction_revision` and `test_reset_after_loss` in the shapes suite,
+plus updated checks in `test_assets` and `test_lifecycle`. Revision 54 has not
+been tested on hardware.
+
 ### Bounded rotations and paths, compass watchdog, timing on request (revision 53)
 
 Revision 53 (`GLASSLYCFW/53`) bounds the objects revision 51 still redrew the

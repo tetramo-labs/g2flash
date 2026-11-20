@@ -727,7 +727,7 @@ static void test_assets(void) {
       for (uint32_t i = 0; i < 4; i++) { m_begin(9); m_put_asset(400 + i, 1, CFW_ASSET_IMAGE, bl, 0, big, bl); CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED); }
       CHECK(asset(201) && asset(400));
       m_begin(10); m_put_asset(404, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
-      CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_extra()[0] == 0);
+      CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_extra()[0] == 2);
       CHECK(asset(201) == 0 && asset(400) == 0 && asset(401) && asset(404) && asset(300));   /* LRU unreferenced went, the referenced font stayed */
       CHECK(store_used() <= CFW_CACHE_STORE_BYTES); }
     /* chunked upload across messages; incomplete assets are not referenceable */
@@ -1080,15 +1080,14 @@ static void test_lifecycle(void) {
     m_begin(3); CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_CAPACITY && reply_epoch() == g_epoch);
     CHECK(g_ctx.scene == 0 && g_ctx.texture_cache == 0 && !g_ctx.cache_lost && g_alloc_live == 0);
     m_begin(4); CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && g_ctx.scene != 0 && obj(1) == 0);
-    /* a SHOW, a HIDE that blanks and a RESET right after a loss answer without one too; the next RESET works */
+    /* a SHOW and a HIDE that blanks right after a loss answer without one too; a RESET empties it in place */
     { uint32_t o[] = { 1 }, w[] = { 1 }; cfw_cache_lose(&g_ctx); g_epoch = g_ctx.cache_epoch;
       m_show(5, 1, 0); m_refs(o, w, 1); CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_CAPACITY && g_ctx.scene == 0); }
     put_circle(1, 1, 1, 1, 15); cfw_cache_lose(&g_ctx); g_epoch = g_ctx.cache_epoch;
     m_begin(6); g_msg[g_len++] = 0x01; g_msg[g_len++] = 0;
     CHECK(send(39) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && g_ctx.scene == 0 && count_color(g_container_shadow, 0) == IMAGE_W * IMAGE_H);
     put_circle(1, 1, 1, 1, 15); cfw_cache_lose(&g_ctx);
-    m_begin(7); g_msg[g_len++] = 0; CHECK(send(41) == 0 && reply_status() == CFW_CACHE_REPLY_CAPACITY && g_ctx.scene == 0 && g_alloc_live == 0);
-    m_begin(8); g_msg[g_len++] = 0; CHECK(send(41) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && g_ctx.scene != 0);
+    m_begin(7); g_msg[g_len++] = 0; CHECK(send(41) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && g_ctx.scene != 0 && obj(1) == 0);
     g_epoch = reply_epoch();
     put_circle(1, 1, 1, 1, 15); CHECK(obj(1));
     /* losing twice before a reap bumps once per loss; a reap with nothing lost is a no-op */
@@ -1782,6 +1781,99 @@ static void test_staged_chunk_eviction(void) {
     CHECK(asset(1) && bytes_equal(g_ctx.texture_cache + asset(1)->offset, big, bl));
 }
 
+/* Revision 54: a phone that lost the ack of an upload's last message, or sent
+ * it for the other lens, re-sends chunks this lens already holds. Every chunk
+ * of a complete asset of the same version, kind and length is a no-op that
+ * never rewrites the validated bytes; any other chunk is still refused. */
+static void test_resident_chunks(void) {
+    fresh();
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    static uint8_t big[66000], other[66000];
+    uint32_t bl = mk_big_image(big, 200, 100, 5), chunk = 8160;
+    mk_big_image(other, 200, 100, 9);
+    for (uint32_t off = 0; off < bl; off += chunk) {
+        m_begin((uint16_t)(1 + off / chunk)); m_put_asset(7, 1, CFW_ASSET_IMAGE, bl, off, big + off, bl - off < chunk ? bl - off : chunk);
+        CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    }
+    CHECK(asset(7) && (asset(7)->state & CFW_CACHE_ST_COMPLETE) && bl > 2 * chunk);
+    save_cache();
+    for (uint32_t off = 0; off < bl; off += chunk) {
+        m_begin((uint16_t)(10 + off / chunk)); m_put_asset(7, 1, CFW_ASSET_IMAGE, bl, off, other + off, bl - off < chunk ? bl - off : chunk);
+        CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_revision() == sc->revision);
+    }
+    m_begin(20);
+    for (uint32_t off = 0; off < bl; off += chunk) m_put_asset(7, 1, CFW_ASSET_IMAGE, bl, off, other + off, bl - off < chunk ? bl - off : chunk);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    m_begin(21); m_put_asset(7, 1, CFW_ASSET_IMAGE, bl, chunk, other + chunk, chunk); m_put_asset(7, 1, CFW_ASSET_IMAGE, bl, 2 * chunk, other + 2 * chunk, bl - 2 * chunk);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED);
+    check_cache_unchanged();
+    uint8_t ri[12]; rec_asset(ri, CFW_SHAPE_IMAGE, 15, 0, 0, 7, 0);
+    m_begin(22); m_put_asset(7, 1, CFW_ASSET_IMAGE, bl, chunk, big + chunk, chunk); m_put_object(1, 1, ri, 12);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && obj(1) && asset(7)->refs == 1);
+    m_begin(23); m_put_asset(7, 2, CFW_ASSET_IMAGE, bl, chunk, big + chunk, chunk);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED && reply_extra()[0] == CFW_CACHE_REFUSE_UPLOAD);
+    m_begin(24); m_put_asset(7, 1, CFW_ASSET_FONT, bl, chunk, big + chunk, chunk);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED && reply_extra()[0] == CFW_CACHE_REFUSE_UPLOAD);
+    m_begin(25); m_put_asset(7, 1, CFW_ASSET_IMAGE, bl + 16, chunk, big + chunk, chunk);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED && reply_extra()[0] == CFW_CACHE_REFUSE_UPLOAD);
+    m_begin(26); m_put_asset(7, 1, CFW_ASSET_FONT, bl, 0, big, chunk);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED && reply_extra()[0] == CFW_CACHE_REFUSE_UPLOAD);
+    CHECK(asset(7) && asset(7)->version == 1 && bytes_equal(g_ctx.texture_cache + asset(7)->offset, big, bl));
+}
+
+/* Revision 54: assets evicted to make room count like objects, in the APPLIED
+ * count and in the revision a rejection without a rollback workspace keeps, so
+ * a STATE query from before it reports them gone. */
+static void test_asset_eviction_revision(void) {
+    fresh();
+    cfw_cache *sc = cfw_cache_peek(&g_ctx);
+    static uint8_t big[66000]; uint32_t bl = mk_big_image(big, 255, 255, 3);
+    uint8_t r[20]; int16_t v[] = {10, 10, 5}; rec(r, CFW_SHAPE_CIRCLE_FILL, 15, 0, v, 3);
+    uint32_t missing = 9999, ver = 1;
+    for (uint32_t i = 1; i <= 4; i++) {
+        m_begin((uint16_t)i); m_put_asset(i, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
+        CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_extra()[0] == 0);
+    }
+    m_begin(5); m_put_asset(5, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_extra()[0] == 1 && !asset(1) && asset(5));
+    FW_FREE(sc->undo); sc->undo = 0; sc->undo_capacity = 0; g_evenhub_fail = 1;
+    uint32_t rev = sc->revision;
+    m_begin(6); m_put_asset(6, 1, CFW_ASSET_IMAGE, bl, 0, big, bl); m_put_object(1001, 0, r, 20);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_REFUSED && !sc->undo && !asset(2) && !asset(6));
+    CHECK(sc->revision == rev + 1u && reply_revision() == rev + 1u);
+    m_begin(0); put32(g_msg + 2, rev); put16(g_msg + 6, 0); g_len = 8;
+    CHECK(send(40) == 0 && reply_status() == CFW_CACHE_REPLY_DELTA);
+    { const uint8_t *x = reply_extra(); CHECK(x[0] == 1 && x[1] == 1 && rd32(x + 2) == 2 && rd32(x + 6) == 0); }
+    m_begin(7); m_put_asset(9, 1, CFW_ASSET_IMAGE, bl, 0, big, bl);
+    CHECK(send(37) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_extra()[0] == 0 && live_assets() == 4);
+    rev = sc->revision;
+    m_show(8, 1, 0); m_put_asset(6, 1, CFW_ASSET_IMAGE, bl, 0, big, bl); m_put_count(1); m_refs(&missing, &ver, 1);
+    CHECK(send(38) == 0 && reply_status() == CFW_CACHE_REPLY_MISSING && !asset(6) && live_assets() == 3 && sc->revision == rev + 1u);
+    g_evenhub_fail = 0;
+}
+
+/* Revision 54: the first RESET after a loss (FB_RELEASE, or an expired lease
+ * that FB_ACQUIRE renewed) that no display refresh has reaped yet starts the
+ * phone's epoch on an empty cache. Nothing is allocated under the gate. */
+static void test_reset_after_loss(void) {
+    fresh();
+    put_circle(1, 1, 100, 100, 15);
+    { uint32_t o[] = { 1 }, w[] = { 1 }; m_show(1, 1, 0); m_refs(o, w, 1); m_glide(1, 100, 0, 10, LINEAR); CHECK(send(38) == 0); }
+    cfw_cache_lose(&g_ctx);
+    int gate_allocs = g_gate_allocs;
+    m_begin(2); put16(g_msg, 0x5a5a); g_msg[g_len++] = 0;
+    CHECK(send(41) == 0 && reply_status() == CFW_CACHE_REPLY_APPLIED && reply_epoch() == 0x5a5a);
+    CHECK(reply_extra_len() == 3 && rd16(reply_extra() + 1) == 256);
+    CHECK(!g_ctx.cache_lost && g_ctx.scene && obj(1) == 0 && g_gate_allocs == gate_allocs);
+    g_epoch = 0x5a5a;
+    put_circle(2, 1, 10, 10, 15);
+    CHECK(obj(2) && reply_epoch() == 0x5a5a);
+    cfw_cache_lose(&g_ctx); g_lease = 0;
+    m_begin(3); g_msg[g_len++] = 0;
+    CHECK(send(41) == -1 && g_ctx.scene == 0 && g_ctx.texture_cache == 0);
+    g_lease = 1;
+}
+
 /* The per-pixel image renderer that cfw_texture_render replaced. */
 static void ref_texture_render(uint8_t *shadow, uint32_t stride, uint32_t panel_w, uint32_t panel_h,
                                int32_t x0, int32_t y0, const cfw_cached_image *image,
@@ -1864,6 +1956,9 @@ int main(int argc, char **argv) {
     test_tick_present();
     test_freeze_redraw();
     test_staged_chunk_eviction();
+    test_resident_chunks();
+    test_asset_eviction_revision();
+    test_reset_after_loss();
     test_texture_render();
     cfw_scene_release(&g_ctx);
     CHECK(g_alloc_live == 0);

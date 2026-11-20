@@ -134,7 +134,8 @@ path/rotation use. The cache descriptors use about 38 KiB of heap 13; edges,
 images, fonts and strings share the 256 KiB store on the EvenHub heap.
 
 Framebuffer lease expiry/release stops animation, marks the cache lost and
-changes its epoch; the memory is released under the display gate afterwards.
+changes its epoch; the memory is released under the display gate afterwards,
+or emptied in place by a RESET under a renewed lease (revision 54).
 Clients learn about it from the STALE reply to their next cache message, reset
 the cache and rebuild rather than assuming an old baseline.
 

@@ -467,6 +467,10 @@ __attribute__((naked)) void faceclaw_evenai_display_entry(void) {
 
 // Firmware revision string "GLASSLYCFW/<n>" (see the header comment). Revision
 // history, for reference when bumping:
+//   54 -> a re-sent chunk of a complete asset is a no-op instead of REFUSED,
+//         assets evicted to make room count in the evicted tally and move the
+//         revision, and a RESET right after a lost lease empties the lost
+//         cache in place instead of answering CAPACITY (scene.c).
 //   53 -> rotating and rotated shapes and paths are bounded, so they redraw
 //         their box instead of the whole canvas (scene.c); a timer stops a
 //         compass whose right lens lost its phone link for 15-30 s; mode 7
@@ -638,7 +642,7 @@ static unsigned diag_append_status(unsigned char *buf, unsigned len, unsigned ca
 
 int settings_send_wrapper(int type, int sid, unsigned char *buf, unsigned len) {
     if (sid == 9) {
-        static const char caps[] = "GLASSLYCFW/53";
+        static const char caps[] = "GLASSLYCFW/54";
         len = pb_append_bytes_field(buf, len, SETTINGS_RESPONSE_CAPACITY,
                                     100u, (const unsigned char *)caps,
                                     (unsigned)sizeof(caps) - 1u);

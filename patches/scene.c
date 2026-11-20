@@ -90,7 +90,8 @@
  *
  * Replies ride the SID-0xf0 transport as reply kind 5, before the ACK:
  *   [5][stream][ordinal:u16][lens][mode][request:u16][status][epoch:u16][revision:u32][extra]
- *   status 0 APPLIED   extra [evicted:u8]  objects evicted to make room
+ *   status 0 APPLIED   extra [evicted:u8]  objects and (since revision 54) assets
+ *                                          evicted to make room
  *          1 STALE     epoch mismatch, nothing applied
  *          2 MISSING   extra [n][more][id x n]
  *          3 CAPACITY  extra [evicted:u8]  could not fit even after eviction
@@ -119,7 +120,8 @@
  * queues only its rows and lets display_copy_hook paint it right before the
  * copy; a frame that changes nothing is not queued. Lease loss only flags the
  * cache as lost (cfw_cache_lose, any thread); the memory is released under the
- * gate by the next handler or display refresh (cfw_cache_reap). */
+ * gate by the next handler or display refresh (cfw_cache_reap), except that a
+ * RESET under a live lease empties it in place for the new epoch (revision 54). */
 
 #define CFW_SHOW_FLAG_PRESENT 0x01u
 #define CFW_SHOW_FLAG_KEEP    0x02u
@@ -627,7 +629,7 @@ static uint32_t cfw_txn_staged_fill(const cfw_txn *t, uint16_t asset);
 
 /* Only from staging: a resident partial upload that took a chunk of the
  * transaction in progress stays, since commit credits that chunk to it. */
-static int cfw_evict_asset(cfw_cache *sc) {
+static int cfw_evict_asset(cfw_cache *sc, uint32_t *evicted) {
     int best = -1;
     for (uint32_t i = 0; i < CFW_CACHE_ASSETS; i++) {
         const cfw_asset *a = &sc->assets[i];
@@ -637,6 +639,7 @@ static int cfw_evict_asset(cfw_cache *sc) {
     }
     if (best < 0) return 0;
     cfw_asset_free(sc, (uint32_t)best);
+    if (evicted) (*evicted)++;
     return 1;
 }
 
@@ -666,7 +669,7 @@ static int cfw_asset_alloc(cfw_cache *sc, uint32_t *evicted) {
     for (;;) {
         for (uint32_t i = 0; i < CFW_CACHE_ASSETS; i++)
             if (sc->assets[i].id == 0 && sc->assets[i].length == 0) return (int)i;
-        if (!cfw_evict_asset(sc) && !cfw_evict_object(sc, evicted)) return -1;
+        if (!cfw_evict_asset(sc, evicted) && !cfw_evict_object(sc, evicted)) return -1;
     }
 }
 
@@ -674,7 +677,7 @@ static int cfw_asset_alloc(cfw_cache *sc, uint32_t *evicted) {
 static int cfw_store_reserve(cfw_cache *sc, uint32_t len, uint32_t *offset, uint32_t *evicted) {
     for (;;) {
         if (cfw_store_alloc(sc, len, offset)) return 1;
-        if (!cfw_evict_asset(sc) && !cfw_evict_object(sc, evicted)) return 0;
+        if (!cfw_evict_asset(sc, evicted) && !cfw_evict_object(sc, evicted)) return 0;
     }
 }
 
@@ -1334,7 +1337,7 @@ static int cfw_txn_put_asset(cfw_txn *t, const uint8_t *p) {
         if (staged >= 0) return cfw_txn_fail(t, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_DUPLICATE);
         if (resident >= 0) {
             cfw_asset *r = &sc->assets[resident];
-            if (r->length == total && (r->state & CFW_CACHE_ST_COMPLETE))
+            if (r->kind == kind && r->length == total && (r->state & CFW_CACHE_ST_COMPLETE))
                 return 1;                                   /* already resident: no-op */
             if (!(r->state & CFW_CACHE_ST_COMPLETE) && r->kind == kind && r->length == total) {
                 /* restarting an interrupted upload: refill in place. Not after a
@@ -1358,8 +1361,9 @@ static int cfw_txn_put_asset(cfw_txn *t, const uint8_t *p) {
         idx = staged >= 0 ? staged : resident;
         if (idx < 0) return cfw_txn_fail(t, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_UPLOAD);
         cfw_asset *a = &sc->assets[idx];
-        if (a->version != version || a->kind != kind || a->length != total || (a->state & CFW_CACHE_ST_COMPLETE))
+        if (a->version != version || a->kind != kind || a->length != total)
             return cfw_txn_fail(t, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_UPLOAD);
+        if (a->state & CFW_CACHE_ST_COMPLETE) return 1;   /* already complete: a re-sent chunk is a no-op */
         if (a->filled + cfw_txn_staged_fill(t, (uint16_t)(idx + 1)) != offset)
             return cfw_txn_fail(t, CFW_CACHE_REPLY_REFUSED, CFW_CACHE_REFUSE_UPLOAD);
     }
@@ -2073,8 +2077,12 @@ static void cfw_cache_reset(customCfwContext *ctx, cfw_cache *sc, uint16_t epoch
     else cfw_cache_next_epoch(ctx);
 }
 
+/* A RESET under a live lease empties a lost cache in place rather than freeing
+ * it: nothing may be allocated under the gate, and the prepare before the gate
+ * leaves a lost cache alone. */
 static int cfw_cache_control(customCfwContext *ctx, const uint8_t *src, uint32_t srclen) {
     uint16_t epoch, request;
+    if (srclen >= 5u && src[4] == 0 && cfw_fb_lease_active()) ctx->cache_lost = 0;
     if (cfw_cache_prologue(ctx, src, srclen, &epoch, &request)) return -1;
     if (srclen < 5u) return -1;
     uint8_t sub = src[4];
